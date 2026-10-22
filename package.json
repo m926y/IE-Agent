@@ -1,0 +1,31 @@
+{
+  "name": "qw-pages-dynamic-starter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build && node scripts/prepare-publish.mjs",
+    "preview": "vite preview --host 0.0.0.0",
+    "start": "node server.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test tests/runtime.test.mjs"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "5.2.0",
+    "typescript": "5.8.3",
+    "vite": "7.3.6"
+  },
+  "overrides": {
+    "electron-to-chromium": "1.5.395"
+  }
+}

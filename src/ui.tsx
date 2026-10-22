@@ -1,0 +1,120 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { ApiError, getData } from "./api";
+import type { ListResult } from "./api";
+
+/** 四种页面状态的统一呈现（加载中/无匹配/无权限无覆盖/读写失败） */
+export function EmptyState({ kind, hint, onRetry }: { kind: "loading" | "nomatch" | "noperm" | "nocov" | "error"; hint?: string; onRetry?: () => void }) {
+  if (kind === "loading") {
+    return <div className="panel"><div className="skeleton" style={{ width: "38%" }} /><div className="skeleton" /><div className="skeleton" style={{ width: "80%" }} /><div className="skeleton" style={{ width: "64%" }} /></div>;
+  }
+  const map = {
+    nomatch: { big: "当前筛选条件下无匹配记录", hint: hint || "这不代表“零风险”。请调整或清空筛选条件。" },
+    noperm: { big: "无权限查看该数据", hint: hint || "服务端已拒绝越权访问；此处不会返回受限数据。" },
+    nocov: { big: "暂无设备/数据覆盖", hint: hint || "“无事件”不等于“无覆盖”。请先核实设备状态与数据导入范围。" },
+    error: { big: "暂时无法读取数据", hint: hint || "网络或服务异常，已保留页面；请稍后重试。" },
+  } as const;
+  const t = map[kind as keyof typeof map];
+  return (
+    <div className="panel empty" role="status">
+      <div className="big">{t.big}</div>
+      <div className="hint">{t.hint}</div>
+      {kind === "error" && onRetry && <p><button className="btn" onClick={onRetry}>重试</button></p>}
+    </div>
+  );
+}
+
+export function Tag({ tone, children }: { tone: "gray" | "blue" | "red" | "amber" | "green"; children: ReactNode }) {
+  return <span className={`tag ${tone}`}>{children}</span>;
+}
+
+export function fmtCell(v: unknown): string {
+  if (v === null || v === undefined || v === "") return "—";
+  if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(4).replace(/0+$/, "");
+  return String(v);
+}
+
+type ResourceTableProps = {
+  resource: string;
+  labels?: Record<string, string>;
+  pageSize?: number;
+  params?: Record<string, string | number>;
+  onRowClick?: (row: Record<string, unknown>) => void;
+};
+
+/** 受控只读列表：数据一律来自服务端 /api/data/<resource>（服务端验权+行级过滤），前端不伪造行 */
+export function ResourceTable({ resource, labels = {}, pageSize = 20, params = {}, onRowClick }: ResourceTableProps) {
+  const [state, setState] = useState<{ kind: "loading" | "ok" | "error"; data: ListResult<Record<string, unknown>> | null; code?: string }>({ kind: "loading", data: null });
+  const [offset, setOffset] = useState(0);
+  const seq = useRef(0);
+
+  const load = useCallback(async (off: number) => {
+    const my = ++seq.current;
+    setState({ kind: "loading", data: null });
+    try {
+      const res = await getData<Record<string, unknown>>(resource, { ...params, limit: pageSize, offset: off });
+      if (my === seq.current) setState({ kind: "ok", data: res });
+    } catch (e) {
+      if (my !== seq.current) return;
+      const code = e instanceof ApiError ? e.code : "network_error";
+      setState({ kind: "error", data: null, code });
+    }
+  }, [resource, pageSize, JSON.stringify(params)]);
+
+  useEffect(() => { setOffset(0); }, [resource]);
+  useEffect(() => { load(offset); }, [load, offset]);
+
+  if (state.kind === "loading") return <EmptyState kind="loading" />;
+  if (state.kind === "error") {
+    if (state.code === "forbidden") return <EmptyState kind="noperm" />;
+    if (state.code === "binding_required") return <EmptyState kind="nocov" hint="当前账号尚未核实绑定司机身份。演示账号不展示个人明细；绑定经安全管理员核实后此区将显示本人数据。" />;
+    return <EmptyState kind="error" onRetry={() => load(offset)} />;
+  }
+  const rows = state.data?.rows ?? [];
+  if (rows.length === 0) {
+    return <EmptyState kind="nomatch" hint="当前筛选/该对象无记录。未导入的表显示此待导入空态；本页不补造趋势、告警或证据。" />;
+  }
+  const cols = Object.keys(rows[0]);
+  const total = state.data?.total ?? rows.length;
+  return (
+    <div>
+      <div className="table-wrap">
+        <table>
+          <thead><tr>{cols.map((c) => <th key={c}>{labels[c] || c}</th>)}</tr></thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={String(r[cols[0]] ?? i)} style={onRowClick ? { cursor: "pointer" } : undefined} onClick={() => onRowClick?.(r)}>
+                {cols.map((c) => <td key={c} className={/id$|version|gpsno/.test(c) ? "mono" : undefined} title={fmtCell(r[c])}>{cellView(c, r[c])}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="pager">
+        <button className="btn" disabled={offset === 0} onClick={() => setOffset(Math.max(offset - pageSize, 0))}>上一页</button>
+        <span>第 {Math.floor(offset / pageSize) + 1} 页 · 可见 {rows.length} 行{state.data?.total !== null && state.data?.total !== undefined ? ` / 共约 ${total} 行` : ""}</span>
+        <button className="btn" disabled={offset + pageSize >= total} onClick={() => setOffset(offset + pageSize)}>下一页</button>
+      </div>
+    </div>
+  );
+}
+
+/** 语义色标：低可信=琥珀并提示先核验；D=高危红、C=琥珀（等级为复核优先级非事故概率），颜色均配文字 */
+export function cellView(col: string, v: unknown) {
+  if (col === "confidence_level") {
+    if (v === "low") return <Tag tone="amber">low · 建议先核验数据/设备</Tag>;
+    if (v === "high") return <Tag tone="green">high</Tag>;
+    if (v) return <Tag tone="gray">{String(v)}</Tag>;
+  }
+  if (col === "score_change_7d" && typeof v === "number" && v <= -10) return <Tag tone="red">{v} · 7天下降≥10</Tag>;
+  if (col === "risk_level") {
+    if (v === "D") return <Tag tone="red">D（高优先复核）</Tag>;
+    if (v === "C") return <Tag tone="amber">C</Tag>;
+    if (v === "A" || v === "B") return <Tag tone="gray">{String(v)}</Tag>;
+  }
+  return fmtCell(v);
+}
+
+export function Banner({ tone, children }: { tone: "info" | "warn"; children: ReactNode }) {
+  return <div className={`banner ${tone}`}>{children}</div>;
+}

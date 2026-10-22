@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.qw-pages/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+.runtime-tmp/
+
+.playwright-cli/
+*.png
+!public/**/*.png
+.runtime-tmp/
