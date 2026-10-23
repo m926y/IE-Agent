@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { MeUser } from "./api";
 import { ApiError, getData, interventionRead, interventionReply, logout, myNotes, noteRead, rrCreate, taskSaveDraft, taskStart, taskSubmit } from "./api";
-import { Banner, EmptyState, ResourceTable, Tag } from "./ui";
+import { Banner, EmptyState, ResourceTable, Tag, GlobalSearch} from "./ui";
 
 function TabBtn({ active, ico, label, onClick }: { active: boolean; ico: string; label: string; onClick: () => void }) {
   return <button className={active ? "active" : ""} onClick={onClick}><span className="ico" aria-hidden="true">{ico}</span>{label}</button>;
@@ -241,6 +241,7 @@ export function DriverShell({ user }: { user: MeUser }) {
   const active = TABS[tab];
   return <div className="driver-shell">
     <header className="driver-head">
+      <GlobalSearch />
       <div className="name">{user.displayName || "司机"}</div>
       <div className="sub">数据截止 2026-07-31 · {user.driverId ? `绑定 ${user.driverId}（演示映射）` : "身份未核实（演示）"}</div>
     </header>

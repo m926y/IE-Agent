@@ -150,3 +150,14 @@ export type CheckResult = { ok?: true; ref: string; route: string | null; fresh?
 export const aiEvidenceCheck = (ref: string) => api<CheckResult>(`/api/ai/evidence-check?ref=${encodeURIComponent(ref)}`);
 export const aiConfirm = (p2: { ai_call_id: string; decision: string; business_entity?: string; business_id?: string; business_audit_id?: string }) => api<{ ok: true; confirm_audit_id: string | null; status: string; idempotent_replay?: boolean; confirmed?: string }>("/api/ai/confirm", { method: "POST", body: JSON.stringify(p2) });
 export const aiCallsStatus = (ids: string[]) => api<{ confirms: Record<string, { decision: string; at: string; business: string | null }> }>(`/api/ai/calls?ids=${ids.join(",")}`);
+
+// R17：全局搜索 / SM05 / SM06
+export type SearchItem = { record_id: string; title: string; summary: string; route: string };
+export type SearchGroup = { type: string; total: number; items: SearchItem[] };
+export const search = (q: string) => api<{ ok: true; q: string; groups: SearchGroup[]; visible_types: string[]; note?: string }>("/api/search?q=" + encodeURIComponent(q));
+export const rulesBoard = () => api<{ ok: true; current: Record<string, unknown>[]; drafts: Record<string, unknown>[]; note: string }>("/api/admin/rule-drafts");
+export const ruleDraftCreate = (b: Record<string, unknown>) => api<{ ok: true; draft_id: string; audit_id: string }>("/api/admin/rule-drafts", { method: "POST", body: JSON.stringify(b) });
+export const ruleDraftAction = (id: string, b: Record<string, unknown>) => api<{ ok: true; new_status: string; audit_id: string }>(`/api/admin/rule-drafts/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(b) });
+export const knowledgeList = () => api<{ ok: true; rows: Record<string, unknown>[]; note: string }>("/api/admin/knowledge");
+export const knowledgeCreate = (b: Record<string, unknown>) => api<{ ok: true; article_id: string; version_no: number; audit_id: string }>("/api/admin/knowledge", { method: "POST", body: JSON.stringify(b) });
+export const knowledgeAction = (id: string, b: Record<string, unknown>) => api<{ ok: true; new_status?: string; version_no?: number; audit_id: string; self_review_confirmed?: boolean }>(`/api/admin/knowledge/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(b) });

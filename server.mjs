@@ -114,6 +114,7 @@ const SAFE_DATABASE_OPERATIONS = new Set([
   "create_session", "get_session", "delete_session",
   "get_binding_by_platform_user", "insert_audit", "list_audit",
   "list_resource", "count_resource", "insert_resource",
+  "search_read", "erd_list", "erd_get", "erd_insert", "erd_patch", "er_current", "kn_list", "kn_get", "kn_insert", "kn_patch",
   "insert_import_run", "get_import_run", "update_import_run", "upsert_resource",
   "get_task_row", "patch_task_row", "insert_task_notify", "count_task_notifs",
   "get_rr_row", "patch_rr_row", "insert_rr_row", "get_own_score_row", "get_own_ledger_row",
@@ -324,14 +325,14 @@ const FACT_TABLES = new Set([
 const ROLE_CAPABILITIES = {
   safety_admin: new Set([
     "view.fleet_overview", "view.driver_detail", "view.replay", "view.alerts",
-    "handle.alert", "send.intervention", "assign.training", "review.training_feedback",
+    "handle.alert", "send.intervention", "assign.training", "review.training_feedback", "manage.rule_drafts", "manage.knowledge", "global.search",
     "review.score_challenge", "import.data", "manage.accounts", "manage.bindings",
     "manage.operation_config", "review.content", "view.audit", "ai.explain_own_scope",
   ]),
   team_leader: new Set(["view.fleet_overview", "view.driver_detail", "view.alerts", "handle.alert", "ai.explain_own_scope"]),
   driver: new Set([
     "view.my_score", "ack.my_alert", "reply.my_intervention", "view.my_training",
-    "submit.my_training_feedback", "submit.score_challenge", "manage.my_profile", "ai.explain_own_scope",
+    "submit.my_training_feedback", "submit.score_challenge", "manage.my_profile", "ai.explain_own_scope", "global.search",
   ]),
 };
 
@@ -361,7 +362,7 @@ const RESOURCE_DEFS = {
     roles: ["safety_admin", "team_leader"], cap: "view.driver_detail", filters: ["gpsno", "driver_id", "as_of_date"] },
   "admin.trainings": { table: "training_tasks", order: "updated_at.desc",
     cols: "task_id,driver_id,alert_id,course_id,goal,mandatory,due_at,status,submitted_at,reviewed_at,created_by,updated_at",
-    roles: ["safety_admin", "team_leader"], cap: "assign.training", filters: ["alert_id", "status", "driver_id"] },
+    roles: ["safety_admin", "team_leader"], cap: "assign.training", filters: ["alert_id", "status", "driver_id", "task_id"] },
   "admin.notifications": { table: "notification_events", order: "created_at.desc",
     cols: "notification_id,target_user_id,source_entity_type,source_entity_id,type,title,content,read_at,created_at",
     roles: ["safety_admin"], cap: "send.intervention", filters: ["source_entity_id", "target_user_id", "type"] },
@@ -461,13 +462,15 @@ function requireUser(principal) {
   return u;
 }
 
-async function appendAudit(actor, action, entityType, entityId, oldStatus, newStatus, requestId) {
+async function appendAudit(actor, action, entityType, entityId, oldStatus, newStatus, requestId, evidenceRefs, detail) {
   const auditId = newId("aud");
   const row = {
     audit_id: auditId, actor_id: actor?.user?.user_id || "anonymous", actor_role: actor?.user?.role || "-",
     action, entity_type: entityType, entity_id: entityId || "", old_status: oldStatus || null, new_status: newStatus || null,
     occurred_at: nowIso(), request_id: requestId || null,
   };
+  if (evidenceRefs) row.evidence_refs = JSON.stringify(evidenceRefs);
+  if (detail) row.detail_json = JSON.stringify(detail);
   try {
     await dbRequest("insert_audit", "POST", "audit_logs", { body: [row], headers: { Prefer: "return=minimal" } });
     return auditId;
@@ -524,7 +527,7 @@ async function handleLogout(request, response, url, ctx) {
 function publicUser(u, authKind) {
   return {
     userId: u.user_id, username: u.username || null, displayName: u.display_name || "", role: u.role,
-    fleetScope: u.fleet_scope || null, driverId: u.driver_id || null,
+    fleetScope: u.fleet_scope || null, driverId: u.driver_id || null, binding_verified: Boolean(u.binding_verified), bindingVerified: Boolean(u.binding_verified),
     bindingVerified: Boolean(u.binding_verified), bindingNote: u.binding_note || null, accountStatus: u.account_status || "active",
     authKind,
     capabilities: [...(ROLE_CAPABILITIES[u.role] || [])],
@@ -1765,17 +1768,23 @@ const AI_TOOLS = {
     const r = await aiQ("admin.review_requests", q, p).catch(() => ({ rows: [] }));
     return { status: r.rows.length ? "ok" : "empty", data: r.rows.map((x) => factPick(x, ["request_id", "driver_id", "status", "reason_code", "reviewer_id"])), fact_refs: r.rows.map((x) => "request_id:" + x.request_id), data_limitations: null };
   },
+  async rules_read(a, p) {
+    if (p.user.role !== "safety_admin") return DENY;
+    try {
+      const rows = await listRows("er_current", "evaluation_rules", { select: "dimension,dimension_name,weight,window_days,score_method,editable,source_version", order: "dimension.asc" });
+      const sv = rows[0]?.source_version || "";
+      return { status: "ok", data: { rules: rows.map((x) => ({ dimension: x.dimension, weight: x.weight, window_days: x.window_days, method: x.score_method, editable: x.editable, source_version: x.source_version })), drafts_excluded: "evaluation_rule_drafts 不进入本工具（草案永不作为现行参数）" }, fact_refs: ["rules@" + sv], data_limitations: "只读冻结口径（SM05 现行列与本页同源，不重算）；新算法版本须另行验证与重新出数" };
+    } catch { return { status: "tool_unavailable", data: null, fact_refs: [], data_limitations: "暂时无法读取数据" }; }
+  },
   async knowledge_search(a, p) {
     try {
-      const q = { resource: "admin.knowledge" }; void q;
-      const k = await aiQ("admin.knowledge", { limit: 12 }, p).catch(() => ({ rows: [] }));
-      if (p.user.role === "driver") {
-        const kb = (k.rows || []).filter((x) => x.review_status === "approved");
-        return { status: kb.length ? "ok" : "empty", data: kb.map((x) => ({ article_id: x.article_id, title: x.title, review_status: x.review_status, version: x.version_no })), fact_refs: kb.map((x) => "knowledge:" + x.article_id + "@" + x.version_no), data_limitations: "司机端仅返回 approved 条目" };
-      }
-      const kw = String(a.keyword || "").toLowerCase();
-      const rows = (k.rows || []).filter((x) => !kw || (String(x.title) + " " + String(x.article_id)).toLowerCase().includes(kw));
-      return { status: rows.length ? "ok" : "empty", data: rows.map((x) => ({ article_id: x.article_id, title: x.title, review_status: x.review_status, version: x.version_no })), fact_refs: rows.map((x) => "knowledge:" + x.article_id + "@" + x.review_status), data_limitations: "非 approved 条目仅为草稿，不得作为正式制度或已批准建议引用" };
+      const kwRaw = String(a.keyword || "").toLowerCase();
+      const kw = kwRaw.replace(/[\\()%,.*^$]/g, " ");
+      const official = await officialKnowledgeRows(p, kw);
+      const { latest } = await knowledgeLatestMap();
+      const draftish = [...latest.values()].filter((x) => x.review_status !== "approved" && (!kw || (String(x.title) + " " + x.article_id).toLowerCase().includes(kw))).slice(0, 6).map((x) => ({ article_id: x.article_id, version_no: x.version_no, title: x.title, review_status: x.review_status }));
+      if (!official.length) return { status: "no_official_knowledge", data: { non_official_visible_as_draft_only: draftish }, fact_refs: [], data_limitations: "无 approved 正式知识版本可引用；下列为草案/待审条目，仅可陈述存在性与审核状态，不得作为正式制度、已批准建议或评分依据引用" };
+      return { status: "ok", data: { official: official.map((x) => ({ article_id: x.article_id, version_no: x.version_no, title: x.title, dimension: x.dimension, source_note: x.source_note, version: x.version })), non_official_visible_as_draft_only: draftish }, fact_refs: official.map((x) => "knowledge:" + x.article_id + "." + x.version_no), data_limitations: "正式引用仅限 approved 最新版本（含版本号）；草案/待审/停用不构成正式依据" };
     } catch { return { status: "tool_unavailable", data: null, fact_refs: [], data_limitations: "暂时无法读取数据" }; }
   },
   async propose_intervention(a, p) {
@@ -1829,7 +1838,8 @@ const AI_TOOL_SCHEMAS = [
   ["get_interventions", "干预消息（管理员按alert；司机=本人）", { alert_id: "string" }],
   ["get_tasks", "培训任务（管理员；司机=本人）", { status: "string" }],
   ["get_review_request", "复核申请（管理员；司机=本人）", { request_id: "string" }],
-  ["knowledge_search", "本工作台知识条目检索（草稿状态会显式标注）", { keyword: "string" }],
+  ["knowledge_search", "正式引用仅返回 approved 最新版本（含版本号）；待审/草案/停用只能陈述存在，不得作为正式制度引用", { keyword: "string" }],
+  ["rules_read", "读取现行冻结 evaluation_rules 权重/窗口（只读，草案排除）", {}],
   ["propose_intervention", "生成沟通草稿（requires_confirmation，零写库）", { alert_id: "string", tone: "string" }],
   ["propose_training", "生成培训草稿（校验课程审核态；零写库）", { driver_id: "string" }],
   ["action_preplan", "三种管理路径并排预演（未写入）", { gpsno: "string" }],
@@ -1914,6 +1924,173 @@ function collectCardsSafe(calls) {
   const seen = new Set(); const cards = [];
   for (const { name, out } of calls) { for (const c of cardsFromTool(name, out)) { if (!seen.has(c.ref) && cards.length < 10) { seen.add(c.ref); cards.push(c); } } }
   return cards;
+}
+// ===== R17：全局搜索 / SM05 规则草案 / SM06 知识管理 =====
+const KN_COLS = "article_id,version_no,title,dimension,content,source_note,review_status,applicable_role,version,created_by,reviewed_by,reviewed_at,updated_at";
+function cleanQuery(raw, max = 40) {
+  const s = String(raw || "").trim().slice(0, max);
+  const safe = s.replace(/[\\()%,.*^$]/g, " ").replace(/\s+/g, " ").trim();
+  return safe;
+}
+async function listRows(op, table, query) {
+  const q = query && query.query ? query.query : query;
+  const { data } = await dbRequest(op, "GET", table, { query: q });
+  return data || [];
+}
+async function knowledgeLatestMap() {
+  const rows = await listRows("kn_list", "knowledge_articles", { select: KN_COLS, order: "article_id.asc,version_no.asc", limit: 300 });
+  const latest = new Map();
+  for (const r of rows) { const cur = latest.get(r.article_id); if (!cur || Number(r.version_no) > Number(cur.version_no)) latest.set(r.article_id, r); }
+  return { rows, latest };
+}
+function knowledgeVisibleOfficial(p, kw) {
+  return null; // 占位，实际用 async 版本
+}
+async function officialKnowledgeRows(p, kw) {
+  const { latest } = await knowledgeLatestMap();
+  const role = p.user.role;
+  const out = [];
+  for (const r of latest.values()) {
+    if (r.review_status !== "approved") continue;
+    const ar = String(r.applicable_role || "all");
+    if (role === "driver" && !["all", "driver"].includes(ar)) continue;
+    if (!["all", "safety_admin", "team_leader", "driver"].includes(ar) && ar !== role) continue;
+    if (kw && !(String(r.title) + " " + String(r.article_id) + " " + String(r.content || "")).toLowerCase().includes(kw)) continue;
+    out.push(r);
+  }
+  return out;
+}
+async function countList(op, table, query, range) {
+  const r = await dbRequest(op, "GET", table, { query, headers: { Prefer: "count=exact" }, range });
+  const total = parseCount(r.headers?.["content-range"] ?? r.rangeHeader) ?? (r.data ? r.data.length : 0);
+  return { rows: r.data || [], total };
+}
+async function handleGlobalSearch(request, response, url, ctx) {
+  const user = requireUser(ctx.principal);
+  const q = cleanQuery(url.searchParams.get("q"));
+  if (!q) throw new HttpError(400, "invalid_query");
+  const like = `ilike.%${q}%`;
+  const groups = [];
+  const isStaff = ["safety_admin", "team_leader"].includes(user.role);
+  const myDriver = String(user.driver_id || "");
+  const myBound = user.role === "driver" ? Boolean(user.binding_verified) && Boolean(myDriver) : false;
+  if (isStaff) {
+    const query = { select: "driver_id,gpsno,display_name,fleet_id,identity_status,mapping_end", or: `(driver_id.${like},gpsno.${like},display_name.${like})`, order: "driver_id.asc,version_no?", limit: 8 };
+    delete query.order;
+    if (user.fleet_scope && user.fleet_scope !== "*") query.fleet_id = `eq.${user.fleet_scope}`;
+    const r = await countList("search_read", "drivers", query, 0, 7);
+    groups.push({ type: "drivers", total: r.total, items: r.rows.map((x) => ({ record_id: `${x.driver_id}:${x.gpsno}`, title: `${x.driver_id} · 车 ${x.gpsno}`, summary: `${x.display_name || "—"} · ${x.fleet_id || "—"} · 身份:${x.identity_status || "—"}${x.mapping_end ? " · 至" + x.mapping_end : ""}`, route: `#/ev-fleet?driver_id=${encodeURIComponent(x.driver_id)}` })) });
+    const ra = await countList("search_read", "alerts", { select: "alert_id,gpsno,driver_id,rule_code,status,occurred_at", or: `(alert_id.${like},gpsno.${like},driver_id.${like},rule_code.${like})`, order: "occurred_at.desc", limit: 8 }, 0, 7);
+    groups.push({ type: "alerts", total: ra.total, items: ra.rows.map((x) => ({ record_id: x.alert_id, title: `案卷 ${x.alert_id} · ${x.rule_code}`, summary: `车 ${x.gpsno} · ${x.driver_id || "未绑定"} · ${x.status} · ${x.occurred_at}`, route: `#/rm-alerts?alert_id=${encodeURIComponent(x.alert_id)}` })) });
+    const rt = await countList("search_read", "training_tasks", { select: "task_id,driver_id,alert_id,course_id,goal,status,due_at", or: `(task_id.${like},driver_id.${like},course_id.${like},alert_id.${like},goal.${like})`, order: "updated_at.desc", limit: 8 }, 0, 7);
+    groups.push({ type: "training_tasks", total: rt.total, items: rt.rows.map((x) => ({ record_id: x.task_id, title: `培训 ${x.task_id}`, summary: `${x.driver_id} · ${x.course_id} · ${x.status}${x.due_at ? " · 截止 " + x.due_at : ""} · ${String(x.goal || "").slice(0, 40)}`, route: `#/tr-ledger?task_id=${encodeURIComponent(x.task_id)}` })) });
+  } else if (myBound) {
+    const rd = await countList("search_read", "drivers", { select: "driver_id,gpsno,display_name,fleet_id,identity_status", driver_id: `eq.${myDriver}`, or: `(driver_id.${like},gpsno.${like},display_name.${like})`, order: "gpsno.asc", limit: 8 }, 0, 7);
+    groups.push({ type: "drivers", total: rd.total, items: rd.rows.map((x) => ({ record_id: `${x.driver_id}:${x.gpsno}`, title: `${x.driver_id} · 车 ${x.gpsno}`, summary: "本人车辆", route: `#/ev-fleet?driver_id=${encodeURIComponent(x.driver_id)}` })) });
+    const ra = await countList("search_read", "alerts", { select: "alert_id,gpsno,rule_code,status,occurred_at", driver_id: `eq.${myDriver}`, or: `(alert_id.${like},gpsno.${like},rule_code.${like})`, order: "occurred_at.desc", limit: 8 }, 0, 7);
+    groups.push({ type: "alerts", total: ra.total, items: ra.rows.map((x) => ({ record_id: x.alert_id, title: `案卷 ${x.alert_id} · ${x.rule_code}`, summary: `车 ${x.gpsno} · ${x.status}`, route: `#/rm-alerts?alert_id=${encodeURIComponent(x.alert_id)}` })) });
+    const rt = await countList("search_read", "training_tasks", { select: "task_id,course_id,goal,status,due_at", driver_id: `eq.${myDriver}`, or: `(task_id.${like},course_id.${like},goal.${like})`, order: "updated_at.desc", limit: 8 }, 0, 7);
+    groups.push({ type: "training_tasks", total: rt.total, items: rt.rows.map((x) => ({ record_id: x.task_id, title: `培训任务 ${x.task_id}`, summary: `${x.course_id} · ${x.status}${x.due_at ? " · 截止 " + x.due_at : ""}`, route: `#/?task_id=${encodeURIComponent(x.task_id)}` })) });
+  }
+  const official = await officialKnowledgeRows({ user }, q.toLowerCase());
+  groups.push({ type: "knowledge_articles", total: official.length, items: official.slice(0, 8).map((x) => ({ record_id: `${x.article_id}:${x.version_no}`, title: `${x.article_id} · ${x.title}`, summary: `approved v${x.version_no} · ${x.dimension || "维度—"}`, route: `#/sm-knowledge?article_id=${encodeURIComponent(x.article_id)}` })) });
+  sendJson(response, 200, { ok: true, q, groups, visible_types: groups.map((g) => g.type), note: user.role === "driver" && !myBound ? "未核实司机绑定：不返回个人对象与计数" : "结果均按当前会话授权过滤；点击目标路由后再验权" });
+}
+const ERD_STATUS = { draft: ["pending_review", "archived"], pending_review: ["draft", "archived"], archived: [] };
+async function handleRuleDrafts(request, response, url, ctx, draftId) {
+  const user = requireUser(ctx.principal, "manage.rule_drafts");
+  if (request.method === "GET") {
+    const drafts = await listRows("erd_list", "evaluation_rule_drafts", { select: "draft_id,base_version,dimension,proposal,status,approval_note,review_note,created_by,created_at,updated_at,reviewed_by,reviewed_at", order: "updated_at.desc", limit: 60 });
+    const current = await listRows("er_current", "evaluation_rules", { select: "dimension,dimension_name,weight,window_days,score_method,editable,source_version", order: "dimension.asc" });
+    return sendJson(response, 200, { ok: true, current, drafts, note: "current=冻结只读快照（与评分出数 source_version 一致）；草案永不参与当期计算，无生效写回路径" });
+  }
+  const body = await readBody(request);
+  const action = String(body.action || "");
+  if (request.method === "POST" && !draftId) {
+    const dimension = String(body.dimension || "");
+    const DIMS = ["history", "driving_stability", "fatigue_distraction", "management", "imu_evidence", "gps_coverage"];
+    if (!DIMS.includes(dimension)) throw new HttpError(409, "unknown_dimension");
+    const proposal = String(body.proposal || "").slice(0, 6000);
+    if (!proposal.trim()) throw new HttpError(400, "proposal_required");
+    const cur = await listRows("er_current", "evaluation_rules", { query: { dimension: `eq.${dimension}`, select: "source_version" } }).catch(() => []);
+    const at = nowIso(); const id = newId("erd");
+    await dbRequest("erd_insert", "POST", "evaluation_rule_drafts", {
+      body: [{ draft_id: id, base_version: String(body.base_version || (cur[0]?.source_version || "")), dimension, proposal, status: "draft", approval_note: null, review_note: null, created_by: user.user_id, created_at: at, updated_at: at, reviewed_by: null, reviewed_at: null }],
+      headers: { Prefer: "return=minimal" } });
+    const auditId = await appendAudit(ctx.principal, "rule_draft.create", "evaluation_rule_draft", id, null, "draft", ctx.requestId, [], { dimension });
+    return sendJson(response, 201, { ok: true, draft_id: id, status: "draft", audit_id: auditId, note: "草案=提案文本，未生效；不可用于任何评分/展示口径" });
+  }
+  if (!draftId) throw new HttpError(404, "not_found");
+  const row0 = await listRows("erd_get", "evaluation_rule_drafts", { query: { draft_id: `eq.${draftId}`, select: "draft_id,status,created_by,review_note" } });
+  const row = row0[0]; if (!row) throw new HttpError(404, "not_found");
+  const at = nowIso(); let patch = null, audit = null;
+  if (action === "submit" && row.status === "draft") patch = { status: "pending_review" }, audit = ["draft", "pending_review", "rule_draft.submit"];
+  else if (action === "withdraw" && row.status === "pending_review") patch = { status: "draft" }, audit = ["pending_review", "draft", "rule_draft.withdraw"];
+  else if (action === "note") { const rn = String(body.review_note || "").slice(0, 800); if (!rn.trim()) throw new HttpError(400, "review_note_required"); patch = { review_note: rn, reviewed_by: user.user_id, reviewed_at: at }; audit = [row.status, row.status, "rule_draft.note"]; }
+  else if (action === "archive" && row.status !== "archived") patch = { status: "archived" }, audit = [row.status, "archived", "rule_draft.archive"];
+  if (!patch) throw new HttpError(409, `rule_draft_action_${action || "none"}_invalid_from_${row.status}`);
+  await dbRequest("erd_patch", "PATCH", "evaluation_rule_drafts", { query: { draft_id: `eq.${draftId}`, status: `eq.${row.status}` }, body: { ...patch, updated_at: at }, headers: { Prefer: "return=minimal" } });
+  const auditId = await appendAudit(ctx.principal, audit[2], "evaluation_rule_draft", draftId, audit[0], audit[1], ctx.requestId);
+  sendJson(response, 200, { ok: true, draft_id: draftId, old_status: audit[0], new_status: audit[1], audit_id: auditId });
+}
+async function handleKnowledgeAdmin(request, response, url, ctx, articleId) {
+  const user = requireUser(ctx.principal, "manage.knowledge");
+  if (request.method === "GET" && !articleId) {
+    const { rows, latest } = await knowledgeLatestMap();
+    return sendJson(response, 200, { ok: true, rows: rows.map((r) => ({ ...r, is_latest: latest.get(r.article_id)?.version_no === r.version_no, officially_referenceable: latest.get(r.article_id)?.review_status === "approved" && latest.get(r.article_id)?.version_no === r.version_no })), note: "正式引用=最新且 approved；历史版本仅可追溯" });
+  }
+  const body = await readBody(request);
+  const action = String(body.action || "");
+  const at = nowIso();
+  if (request.method === "POST" && !articleId) {
+    const title = String(body.title || "").slice(0, 160), content = String(body.content || "").slice(0, 20000);
+    if (!title.trim() || !content.trim()) throw new HttpError(400, "title_content_required");
+    const all = await knowledgeLatestMap();
+    let n = 1; for (const k of all.latest.keys()) { const m = /^K(\d+)$/.exec(k); if (m) n = Math.max(n, Number(m[1]) + 1); }
+    const article_id = "K" + n;
+    await dbRequest("kn_insert", "POST", "knowledge_articles", {
+      body: [{ article_id, version_no: 1, title, dimension: String(body.dimension || "").slice(0, 40) || null, content, source_note: String(body.source_note || "自建").slice(0, 500), review_status: "draft", applicable_role: ["all", "driver", "safety_admin"].includes(body.applicable_role) ? body.applicable_role : "all", version: "v1", created_by: user.user_id, reviewed_by: null, reviewed_at: null, updated_at: at }],
+      headers: { Prefer: "return=minimal" } });
+    const auditId = await appendAudit(ctx.principal, "knowledge.create", "knowledge_article", article_id, null, "draft", ctx.requestId, [], { version_no: 1 });
+    return sendJson(response, 201, { ok: true, article_id, version_no: 1, status: "draft", audit_id: auditId });
+  }
+  if (!articleId) throw new HttpError(404, "not_found");
+  const { latest } = await knowledgeLatestMap();
+  const row = latest.get(articleId); if (!row) throw new HttpError(404, "not_found");
+  const FKS = { draft: ["pending_review"], pending_review: ["draft", "approved", "disabled"], approved: ["disabled"], disabled: [] };
+  if (action === "new_version") {
+    if (!["approved", "disabled"].includes(row.review_status)) throw new HttpError(409, "new_version_requires_approved_base");
+    const content = String(body.content || "").slice(0, 20000); if (!content.trim()) throw new HttpError(400, "content_required");
+    const vn = Number(row.version_no) + 1;
+    await dbRequest("kn_insert", "POST", "knowledge_articles", {
+      body: [{ article_id: row.article_id, version_no: vn, title: String(body.title || row.title).slice(0, 160), dimension: String(body.dimension || row.dimension || ""), content, source_note: String(body.source_note || row.source_note || "").slice(0, 500), review_status: "draft", applicable_role: row.applicable_role, version: "v" + vn, created_by: user.user_id, reviewed_at: null, reviewed_by: null, updated_at: at }],
+      headers: { Prefer: "return=minimal" } });
+    const auditId = await appendAudit(ctx.principal, "knowledge.new_version", "knowledge_article", `${row.article_id}:${vn}`, row.review_status, "draft", ctx.requestId, [], { base_version: row.version_no });
+    return sendJson(response, 200, { ok: true, article_id: row.article_id, version_no: vn, status: "draft", audit_id: auditId });
+  }
+  let patch = null, au = null;
+  if (action === "submit") { if (!FKS.draft.includes("pending_review") || row.review_status !== "draft") throw new HttpError(409, "knowledge_transition_invalid"); patch = { review_status: "pending_review" }; au = ["draft", "pending_review", "knowledge.submit"]; }
+  else if (action === "withdraw") { if (row.review_status !== "pending_review") throw new HttpError(409, "knowledge_transition_invalid"); patch = { review_status: "draft" }; au = ["pending_review", "draft", "knowledge.withdraw"]; }
+  else if (action === "approve") {
+    if (row.review_status !== "pending_review") throw new HttpError(409, "knowledge_transition_invalid");
+    const sameActor = row.created_by === user.user_id;
+    if (sameActor && body.confirm_same_actor !== true) throw new HttpError(409, "self_review_requires_explicit_confirm");
+    patch = { review_status: "approved", reviewed_by: user.user_id, reviewed_at: at, version: String(row.version || "v" + row.version_no) };
+    au = ["pending_review", "approved", "knowledge.approve"];
+    if (sameActor) patch.review_note_guard = undefined; // 不落额外列：同作者确认写审计 detail
+  }
+  else if (action === "disable") { if (!FKS[row.review_status]?.includes("disabled")) throw new HttpError(409, "knowledge_transition_invalid"); patch = { review_status: "disabled", reviewed_by: user.user_id, reviewed_at: at }; au = [row.review_status, "disabled", "knowledge.disable"]; }
+  else if (action === "edit") {
+    if (row.review_status !== "draft") throw new HttpError(409, "edit_only_draft_versions");
+    const content = String(body.content || "").slice(0, 20000); if (!content.trim()) throw new HttpError(400, "content_required");
+    patch = { content, title: String(body.title || row.title).slice(0, 160), dimension: body.dimension !== undefined ? String(body.dimension).slice(0, 40) : row.dimension, source_note: body.source_note !== undefined ? String(body.source_note).slice(0, 500) : row.source_note };
+    au = ["draft", "draft", "knowledge.edit"];
+  }
+  if (!patch) throw new HttpError(409, `knowledge_action_${action || "none"}_invalid_from_${row.review_status}`);
+  await dbRequest("kn_patch", "PATCH", "knowledge_articles", { query: { article_id: `eq.${articleId}`, version_no: `eq.${row.version_no}`, review_status: `eq.${row.review_status}` }, body: { ...patch, updated_at: at }, headers: { Prefer: "return=minimal" } });
+  const sameConf = action === "approve" && row.created_by === user.user_id;
+  const auditId = await appendAudit(ctx.principal, au[2], "knowledge_article", `${articleId}:${row.version_no}`, au[0], au[1], ctx.requestId, [], sameConf ? { self_review_confirmed: true, note: "审阅者与作者同为该管理员，已二次确认留痕" } : undefined);
+  sendJson(response, 200, { ok: true, article_id: articleId, version_no: row.version_no, old_status: au[0], new_status: au[1], audit_id: auditId, self_review_confirmed: sameConf || undefined });
 }
 async function handleAiSelftest(request, response, url, ctx) {
   const u = requireUser(ctx.principal);
@@ -2004,6 +2181,14 @@ async function handleEvidenceCheck(request, response, url, ctx) {
   const def = TABLE_KEY[kind];
   if (!def || !/^[\w:.,-]{1,100}$/.test(id)) { try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", sanitize(kind) + ":rejected_ref", null, "bad_ref", ctx.requestId); } catch {} return sendJson(response, 404, NOLEAK); }
   try {
+    if (kind === "knowledge") {
+      const [aid, vtag] = String(id).split(".");
+      const { latest } = await knowledgeLatestMap();
+      const kr = latest.get(aid);
+      if (!kr || kr.review_status !== "approved" || (user.role === "driver" && !["all", "driver"].includes(String(kr.applicable_role || "all")))) { try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", "knowledge:non_official", null, "refused_scope", ctx.requestId); } catch {} return sendJson(response, 404, NOLEAK); }
+      if (vtag && vtag !== String(kr.version_no)) return sendJson(response, 400, { ok: false, ref, error: "stale_version", hint: `引用版本已更新：当前 approved 为 v${kr.version_no}` });
+      return sendJson(response, 200, { ok: true, ref, route: `#/sm-knowledge?article_id=${encodeURIComponent(aid)}`, fresh: { article_id: aid, version_no: kr.version_no, review_status: "approved", title: kr.title } });
+    }
     const q = { select: "*", [def[1]]: `eq.${id}`, limit: 1 };
     if (user.role === "driver") {
       if (kind === "score") { delete q.select; q.select = "score_id,driver_id"; q.driver_id = `eq.${user.driver_id || "__none__"}`; }
@@ -2092,6 +2277,12 @@ const API_ROUTES = [
   { method: "POST", path: "/api/admin/users", needAuth: true, cap: "manage.accounts", handler: handleAdminUserCreate },
   { method: "GET", path: "/api/notes/summary", needAuth: true, handler: handleNotesSummary },
   { method: "GET", path: "/api/meta/egress-probe", needAuth: true, handler: handleEgressProbe },
+  { method: "GET", path: "/api/search", needAuth: true, cap: "global.search", handler: handleGlobalSearch },
+  { method: "GET", path: "/api/admin/rule-drafts", needAuth: true, cap: "manage.rule_drafts", handler: handleRuleDrafts },
+  { method: "POST", path: "/api/admin/rule-drafts", needAuth: true, cap: "manage.rule_drafts", handler: handleRuleDrafts },
+  { method: "GET", path: "/api/admin/knowledge", needAuth: true, cap: "manage.knowledge", handler: handleKnowledgeAdmin },
+  { method: "POST", path: "/api/admin/knowledge", needAuth: true, cap: "manage.knowledge", handler: handleKnowledgeAdmin },
+  { method: "PATCH", path: "/api/admin/knowledge", needAuth: true, cap: "manage.knowledge", handler: handleKnowledgeAdmin },
   { method: "POST", path: "/api/admin/evaluation-rules", needAuth: true, handler: async () => { throw new HttpError(410, "frozen_rules_not_writable"); } },
   { method: "PATCH", path: "/api/admin/evaluation-rules", needAuth: true, handler: async () => { throw new HttpError(410, "frozen_rules_not_writable"); } },
 ];
@@ -2099,6 +2290,8 @@ const API_ROUTES = [
 
 const CASE_ROUTES = [
   { method: "PATCH", re: /^\/api\/alerts\/([^/]+)\/status$/, h: handleAlertStatus },
+  { method: "PATCH", re: /^\/api\/admin\/rule-drafts\/([^/]+)$/, h: (req, res, url, ctx, id) => handleRuleDrafts(req, res, url, ctx, decodeURIComponent(String(id))) },
+  { method: "PATCH", re: /^\/api\/admin\/knowledge\/([^/]+)$/, h: (req, res, url, ctx, id) => handleKnowledgeAdmin(req, res, url, ctx, decodeURIComponent(String(id))) },
   { method: "POST", re: /^\/api\/alerts\/([^/]+)\/intervention$/, h: handleInterventionDraft },
   { method: "PATCH", re: /^\/api\/interventions\/([^/]+)\/draft$/, h: handleDraftEdit },
   { method: "POST", re: /^\/api\/interventions\/([^/]+)\/send$/, h: handleInterventionSend },

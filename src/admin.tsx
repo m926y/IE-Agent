@@ -3,7 +3,8 @@ import type { MeUser, OverviewResult, ImportCheckReport, ImportCommitReport } fr
 import { ApiError, alertConfirm, alertContact, alertHandoff, alertNote, alertStatus, caseView, courseReview, createUser, egressProbe, getData, getHistoryDates, getOverview, importCheck, importCommit, interventionDraft, interventionEdit, interventionSend, myNotes, noteRead, notesSummary, opsConfigUpdate, rrAdvance, rrView, setBinding, setUserStatus, taskReview, taskView, trainingAssign } from "./api";
 import type { RRView } from "./api";
 import type { CaseView as CaseViewT } from "./api";
-import { Banner, EmptyState, ResourceTable, Tag } from "./ui";
+import { Banner, EmptyState, ResourceTable, Tag, GlobalSearch } from "./ui";
+import { SmDraftsPage, SmKnowledgePage } from "./sm17";
 
 const IMPORTABLE_TABLES = [
   "drivers", "risk_snapshots", "score_snapshots", "review_queue", "score_history", "deduction_ledger",
@@ -680,7 +681,8 @@ function ReviewBench() {
   </div>;
 }
 
-function TrLedger() {
+function TrLedger()  {
+  const tid = (location.hash.split("task_id=")[1] || "").split("&")[0];
   const [tick, setTick] = useState(0);
   const [rows, setRows] = useState<Record<string, unknown>[] | null>(null);
   const [sel, setSel] = useState<string | null>(null);
@@ -697,7 +699,7 @@ function TrLedger() {
       <EmptyState kind="nomatch" hint="当前 0 个培训任务（门禁：三门课仍为演示草稿待团队审核，正式分配一律 409）。此空态为真实业务状态，不放空模板数据。" />
       <ReviewBench />
     </> : <>
-      <ResourceTable resource="admin.trainings" onRowClick={(r) => setSel(String(r.task_id))} labels={{ task_id: "task_id", driver_id: "司机", alert_id: "关联告警", course_id: "课程", mandatory: "强制", due_at: "截止", status: "状态", submitted_at: "提交", reviewed_at: "复核" }} />
+      <ResourceTable resource="admin.trainings" params={tid ? { task_id: tid } : {}} onRowClick={(r) => setSel(String(r.task_id))} labels={{ task_id: "task_id", driver_id: "司机", alert_id: "关联告警", course_id: "课程", mandatory: "强制", due_at: "截止", status: "状态", submitted_at: "提交", reviewed_at: "复核" }} />
       <ReviewBench />
     </>}
   </div>;
@@ -946,20 +948,8 @@ function SmAudit() {
   </div>;
 }
 
-function SmDrafts() {
-  return <div>
-    <PageHead code="SM05" title="规则草案" desc="现行口径与“未生效”草案并列；草案不得进入当期评分。现行权重/阈值只从冻结算法配置读取。" />
-    <EmptyState kind="nomatch" hint="评价规则冻结口径见 SM03；草案表 evaluation_rule_drafts 已建，审批工作流第3轮启用。" />
-    <p className="login-note">草案永远标“未生效”；启用新规则须走算法验证与重新出数的正式流程，本应用不能以草案改写既有结果。</p>
-  </div>;
-}
-
-function SmKnowledge() {
-  return <div>
-    <PageHead code="SM06" title="知识内容审核" desc="自建知识/课程/通知模板：草稿→待审→已审核→停用；AI 引用知识时只允许“已审核”条目并给出依据。" />
-    <ResourceTable resource="admin.knowledge" labels={{ article_id: "条目ID", version_no: "版本", title: "标题", dimension: "适用维度", review_status: "审核状态", reviewed_by: "审核人", updated_at: "更新" }} />
-  </div>;
-}
+function SmDrafts() { return <SmDraftsPage />; }
+function SmKnowledge() { return <SmKnowledgePage />; }
 
 export function AdminShell({ user }: { user: MeUser }) {
   const [route, setRoute] = useState(() => (location.hash.replace(/^#\/?/, "") || "overview").split("?")[0]);
@@ -991,6 +981,7 @@ export function AdminShell({ user }: { user: MeUser }) {
   }, [route]);
   return <div className="admin-shell">
     <header className="topbar">
+      <GlobalSearch />
       <span className="title">Crazy Logi-AI 2.0 · 驾驶安全管理</span>
       <span className="chip">车队：全部授权（范围随绑定收敛）</span>
       <span className="meta">数据截止 2026-07-31 · 来源 snapshot_ffbc02143fcb</span>

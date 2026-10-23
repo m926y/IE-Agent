@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ApiError, getData } from "./api";
-import type { ListResult } from "./api";
+import type { ListResult, SearchGroup } from "./api";
+import { search } from "./api";
 
 /** 四种页面状态的统一呈现（加载中/无匹配/无权限无覆盖/读写失败） */
 export function EmptyState({ kind, hint, onRetry }: { kind: "loading" | "nomatch" | "noperm" | "nocov" | "error"; hint?: string; onRetry?: () => void }) {
@@ -117,4 +118,43 @@ export function cellView(col: string, v: unknown) {
 
 export function Banner({ tone, children }: { tone: "info" | "warn"; children: ReactNode }) {
   return <div className={`banner ${tone}`}>{children}</div>;
+}
+
+// ===== 全局搜索入口（顶部；两角色共用；结果由服务端按可信会话过滤） =====
+export function GlobalSearch() {
+  const [q, setQ] = useState("");
+  const [state, setState] = useState<"idle" | "loading" | "ok" | "empty" | "fail" | "invalid">("idle");
+  const [data, setData] = useState<{ groups: SearchGroup[]; note?: string } | null>(null);
+  const [open, setOpen] = useState(false);
+  const timer = useRef<number>(0);
+  function run(text: string) {
+    setQ(text);
+    window.clearTimeout(timer.current);
+    if (!text.trim()) { setState("idle"); setData(null); return; }
+    timer.current = window.setTimeout(async () => {
+      setState("loading"); setOpen(true);
+      try {
+        const r = await search(text);
+        const any = r.groups.reduce((a, g) => a + g.total, 0);
+        setData(r as typeof data); setState(any ? "ok" : "empty");
+      } catch { setState("fail"); }
+    }, 350);
+  }
+  const LABEL: Record<string, string> = { drivers: "司机/车辆", alerts: "案卷与告警", training_tasks: "培训任务", knowledge_articles: "正式知识(approved)" };
+  return <div style={{ position: "relative", flex: 1, maxWidth: 420 }}>
+    <input aria-label="全局搜索" value={q} onChange={(e) => run(e.target.value)} onFocus={() => { if (data) setOpen(true); }} placeholder="搜索司机/车辆、案卷、任务、正式知识（按你的授权）" style={{ width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--line)", fontSize: 13 }} />
+    {open && state !== "idle" && <div className="task-card" style={{ position: "absolute", top: 36, left: 0, right: 0, zIndex: 60, maxHeight: 420, overflowY: "auto", textAlign: "left" }}>
+      {state === "loading" && <div className="meta">检索中…（服务端按会话授权过滤，未授权类别连计数都不返回）</div>}
+      {state === "fail" && <div className="meta" style={{ color: "var(--warn)" }}>搜索失败：网络或服务异常，可稍后重试（不展示旧结果冒充）</div>}
+      {state === "empty" && <div><div className="meta">未找到匹配对象。仅统计你有权查看的类别{data?.note ? "；" + data.note : ""}</div>
+        {(data?.groups || []).map((g) => <div key={g.type} className="meta" style={{ fontSize: 11 }}>{LABEL[g.type] || g.type}：{g.total}</div>)}</div>}
+      {(state === "ok") && (data?.groups || []).map((g) => <div key={g.type} style={{ marginBottom: 4 }}>
+        <div className="t" style={{ fontSize: 12 }}>{LABEL[g.type] || g.type} · 命中 {g.total}</div>
+        {g.items.map((it) => <div key={g.type + it.record_id} className="task-card" style={{ padding: 6, cursor: "pointer" }} onClick={() => { const h = it.route.replace(/^#/, ""); if (h && h !== "/") location.hash = h; setOpen(false); }}>
+          <div style={{ fontSize: 12.5 }}>{it.title} <span className="meta">↗</span></div><div className="meta" style={{ fontSize: 11 }}>{it.summary} · {it.record_id}</div>
+        </div>)}
+      </div>)}
+      {data?.note && state !== "empty" && <div className="meta" style={{ fontSize: 11 }}>{data.note}</div>}
+    </div>}
+  </div>;
 }

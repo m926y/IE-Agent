@@ -314,7 +314,8 @@ try {
     const T = st0.json?.tools || [];
     check("AI自检14工具全执行且业务表零写入", st0.status === 200 && T.length === 14 && st0.json?.writes === "zero_confirmed", `tools=${T.length} writes=${st0.json?.writes}`);
     check("自检含propose草稿需确认", T.some((x) => x.requires_confirmation && String(x.tool).startsWith("propose_")));
-    check("knowledge_search命中4条pending草稿", T.find((x) => x.tool === "knowledge_search")?.refs === 4, "refs=" + (T.find((x) => x.tool === "knowledge_search")?.refs));
+    const ksn = T.find((x) => x.tool === "knowledge_search");
+    check("knowledge_search正式引用门禁:非approved→状态no_official且refs=0（有approved则refs>0）", Boolean(ksn) && (["no_official_knowledge", "ok", "empty"].includes(ksn.status)) && (ksn.status === "no_official_knowledge" || ksn.status === "empty" ? ksn.refs === 0 : ksn.refs > 0), JSON.stringify(ksn));
     const chat = async (ck2, text, page) => req("/api/ai/chat", { method: "POST", cookie: ck2, body: { messages: [{ role: "user", content: text }], page } });
     const c1 = await chat(C, "今天谁优先处理？请给出队列与record_id依据；不得编造数字。", "rm-queue");
     const cj1 = JSON.stringify(c1.json?.citations || []);

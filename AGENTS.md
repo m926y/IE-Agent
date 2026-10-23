@@ -133,3 +133,12 @@
 - AI01：storeKey=claw_ai_msgs_<user_id>，owner 校验（切账号清旧 key），restored 标记"上一上下文历史快照"；LogoutButton/司机退出/401 事件全清 claw_ai_*+claw_fill。
 - 数据终态（真实操作）：D0289 案卷 pending→confirmed（人工判定）；intv-ffbcc65351fd868c draft→sent（sent_text=AI 填入稿；D0289 无绑定账号按护栏不建通知、delivered_to_account=false）；task-ee36bfc9fc9a5699（C01 approved 真实分配）+ noti-fe5ff777c12951fb；重复 draft/send/assign 全部幂等回放同 ID；C03 待审分配 409 course_not_approved。审计链 aud-a6ea654493be2f5c(draft)→aud-4c5d8b3584588782(send)、aud-480297a22f22979f(assign)。
 - 修正：admin.interventions 资源 filters 白名单补 alert_id/driver_id/status；verify-local A18 改行数自适应、audit limit=50、真实模型 chat 引用断言加上游抖动重试（119/119 稳定）。b16.cjs API 19/19、ui16b.cjs UI 8/8。
+
+## 第17轮（全局搜索 + SM05 规则草案 + SM06 知识管理）
+
+- /api/search?q=：服务端按可信会话过滤。staff=drivers(fleet_scope)/alerts/training_tasks 全量+四类分组计数；driver 仅 binding_verified 后本人 driver_id 范围（他人对象 total=0 且零条目，不泄漏存在性；未绑定→note 提示无个人结果）；知识仅 approved-latest 且 applicable_role 可见；未登录 401；q 清洗（去 ()%,.*^$），注入式 400。route：ev-fleet?driver_id / rm-alerts?alert_id / tr-ledger?task_id(新增 deep-link) / sm-knowledge?article_id；点击后目标页照常二次验权。空/无结果/失败三态。
+- SM05：GET/POST /api/admin/rule-drafts + PATCH :id（submit/withdraw/note/archive，状态机+审计），current 直读 evaluation_rules（全等断言）；**无生效端点**；新 AI 工具 rules_read 只读现行冻结权重，草案永不被 AI/页面当参数；红线：erd 流程中 er/sc/ledger 行数 6/500/6267 不变。
+- SM06：POST /api/admin/knowledge（新条目=draft，编号自然递增 K5/K6/K7...）、PATCH :id actions=edit(仅draft)/submit/withdraw/approve(pending→approved)/disable(approved→disabled)/new_version(approved|disabled→新draft版本)；同作者 approve 无 confirm_same_actor → 409 self_review_requires_explicit_confirm，确认后审计 detail 留痕。版本规则 official=latest&&approved；knowledge_search 工具重写为正式/草案二列（no_official_knowledge→refs=0）；evidence-check knowledge 支持 ID.version（非 approved 404、版本滞后 stale_version）。
+- 现网样本实测：K01-K04 全 pending → AI 正式引用 0（chat refused 语义 + cites=[]）；本轮创建→批准→AI 按版本引用 knowledge:K6.1+证据卡 200→停用→404/refs=0。TR05 三课未审核 409 门禁在位（回归）。
+- 根因坑：新 re 路由必须放 CASE_ROUTES（matchCaseRoute 传解好的 id 字符串，非 match 数组）；path 型条目勿误入 CASE 表；API_ROUTES 元素后漏逗号= ASI 静默 undefined 元素（运行时才爆）；principal.user 是 raw snake_case 行（binding_verified/driver_id/fleet_scope）；pkill pattern 误杀自 spawn server→端口预清。
+- 电池 scripts/r17-search-sm05-sm06-battery.cjs 28/28；verify-local 断言演化（knowledge 门禁自适应）119/119；V25 发布。
