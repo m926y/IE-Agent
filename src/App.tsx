@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import {useEffect, useState, useRef} from "react";
 import type { FormEvent } from "react";
-import { ApiError, aiCallsStatus, aiChat, aiConfirm, aiEvidenceCheck, aiSelftest, getMe, login } from "./api";
+import {ApiError, aiCallsStatus, aiChat, aiConfirm, aiEvidenceCheck, aiSelftest, getMe, login, opsList, opsSet} from "./api";
 import type { EvidenceCard } from "./api";
 import { Tag } from "./ui";
 import type { Selftest } from "./api";
@@ -53,8 +53,8 @@ function SsoUnboundView({ name, provider, onUseAppAccount }: { name: string; pro
   </div></div>;
 }
 
-function AiPanel({ onClose, who }: { onClose: () => void; who: { role: string; userId: string } }) {
-  type Msg = { role: "user" | "assistant"; content: string; citations?: string[]; limitations?: string[]; drafts?: Record<string, unknown>[] | null; err?: string; cards?: EvidenceCard[]; callId?: string | null; restored?: boolean };
+function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; who: { role: string; userId: string }; preset?: string | null; onPresetUsed?: () => void }) {
+  type Msg = { role: "user" | "assistant"; content: string; citations?: string[]; limitations?: string[]; drafts?: Record<string, unknown>[] | null; err?: string; cards?: EvidenceCard[]; callId?: string | null; restored?: boolean; longTerm?: boolean };
   const storeKey = "claw_ai_msgs_" + who.userId;
   const [msgs, setMsgs] = useState<Msg[]>(() => {
     try {
@@ -63,10 +63,23 @@ function AiPanel({ onClose, who }: { onClose: () => void; who: { role: string; u
       sessionStorage.setItem("claw_ai_owner", who.userId);
       const raw = sessionStorage.getItem(storeKey);
       const arr: Msg[] = raw ? JSON.parse(raw) : [];
-      return arr.map(m => ({ ...m, restored: true }));
+      let lg: Msg[] = [];
+      try { const lr = localStorage.getItem("claw_ai_long_" + who.userId); if (lr) { const d = JSON.parse(lr); if (Number(d.exp) < Date.now()) localStorage.removeItem("claw_ai_long_" + who.userId); else lg = (d.items || []).map((x: { r: string; x: string }): Msg => ({ role: x.r === "assistant" ? "assistant" : "user", content: String(x.x), longTerm: true, restored: true })); } } catch {}
+      const base: Msg[] = arr.map((m): Msg => ({ ...m, restored: true }));
+      return arr.length ? base : base.concat(lg);
     } catch { return []; }
   });
   useEffect(() => { try { sessionStorage.setItem(storeKey, JSON.stringify(msgs.slice(-24))); } catch {} }, [msgs, storeKey]);
+  const sendRef = useRef<(p?: string) => void>(() => undefined);
+  sendRef.current = (text?: string) => { void send(text); };
+  useEffect(() => { if (preset) { const t = setTimeout(() => { sendRef.current(preset); onPresetUsed && onPresetUsed(); }, 60); return () => clearTimeout(t); } }, [preset]);
+  const [longOn, setLongOn] = useState<boolean | null>(null);
+  const longKey = "claw_ai_long_" + who.userId;
+  const [longBanner, setLongBanner] = useState<string | null>(null);
+  function excerpt(s: string) { return String(s).replace(/(密码|口令|token|cookie|sk-)[^\s，。,]*/gi, "$1***").slice(0, 90); }
+  useEffect(() => { if (who.role !== "safety_admin") { setLongOn(false); return; } opsList().then((r) => { const row = (r as { rows: Record<string, unknown>[] }).rows.find((x) => String(x.config_id) === "ai_long_session"); setLongOn(String(row?.value || "off") === "on"); }).catch(() => setLongOn(false)); }, [who.role]);
+  useEffect(() => { if (who.role !== "safety_admin" || !longOn) return; try { const items = msgs.slice(-8).map(m => ({ r: m.role, x: excerpt(m.content), refs: (m.cards || []).map(c => c.ref).slice(0, 6) })); localStorage.setItem(longKey, JSON.stringify({ exp: Date.now() + 7200000, items })); } catch { setLongBanner("本平台不支持安全本地存储或配额受限：长期恢复不可用（现跨页 sessionStorage 能力不受影响）"); } }, [msgs, longOn, longKey, who.role]);
+  useEffect(() => { try { const raw = localStorage.getItem(longKey); if (raw) { const d = JSON.parse(raw); if (Number(d.exp) > Date.now() && (d.items || []).length) setLongBanner(`已加载本设备长期摘要（脱敏 ${d.items.length} 条，非业务状态；数字将在追问时重查）`); else if (Number(d.exp) < Date.now()) { localStorage.removeItem(longKey); setLongBanner("长期摘要已过期（2h）自动清除——重登从空会话开始"); } } } catch {} }, [longKey]);
   useEffect(() => { const on401 = () => { try { sessionStorage.removeItem(storeKey); sessionStorage.removeItem("claw_ai_owner"); } catch {} }; window.addEventListener("claw:auth-lost", on401); return () => window.removeEventListener("claw:auth-lost", on401); }, [storeKey]);
   function doFill(ft: Record<string, unknown>) { try { sessionStorage.setItem("claw_fill", JSON.stringify(ft)); window.dispatchEvent(new CustomEvent("claw:fill", { detail: ft })); } catch {} const r = String(ft.route || ""); if (r) location.hash = r.replace(/^#/, ""); }
   const [confirms, setConfirms] = useState<Record<string, { decision: string; at: string; business: string | null }>>({});
@@ -109,6 +122,7 @@ function AiPanel({ onClose, who }: { onClose: () => void; who: { role: string; u
         : m.err
           ? <div key={i} className="alert warn" style={{ fontSize: 12.5 }}>{m.err === "ai_provider_not_configured" ? "AI 通道未配置（属主 Page env）：运行时模型尚未接通——本界面不是静态聊天模拟，拒绝假回答。人工流程不受影响。探针：/api/meta/egress-probe 输出 ai_provider_not_configured" : m.err === "ai_upstream_error" ? "模型上游暂时不可用；工具与人工流程不受影响。" : `请求失败：${m.err}`}</div>
           : <div key={i} className="task-card">
+              {m.longTerm ? <div style={{ fontSize: 11, color: "#ad6800", marginBottom: 2 }}>⌛ 长期摘要（本设备暂存·已截断，非业务状态；重登恢复）</div> : null}
               {m.restored ? <div style={{ fontSize: 11, color: "var(--ink-3)", marginBottom: 2 }}>— 上一上下文的历史快照（数字未重新计算；追问将实时重查并重新验权）</div> : null}
               <div style={{ whiteSpace: "pre-wrap", fontSize: 13 }}>{m.content}</div>
               {m.cards && m.cards.length > 0 && <div style={{ marginTop: 6 }}>
@@ -136,6 +150,11 @@ function AiPanel({ onClose, who }: { onClose: () => void; who: { role: string; u
                 </div>)}
               </div>}
             </div>)}
+      {who.role === "safety_admin" && <div style={{ display: "flex", gap: 6, margin: "2px 12px 6px", alignItems: "center", flexWrap: "wrap" }}>
+        <label className="meta" style={{ display: "flex", gap: 4, alignItems: "center" }}><input type="checkbox" checked={Boolean(longOn)} aria-label="长期会话摘要开关" onChange={(e) => { const v = e.target.checked; setLongOn(v); if (!v) { try { localStorage.removeItem(longKey); } catch {} setLongBanner("已关闭并清除本设备长期摘要"); } opsSet("ai_long_session", v ? "on" : "off").then((r) => setLongBanner(`长期摘要开关=${v ? "on" : "off"}（config v${r.new_version}，审计 ${r.audit_id}）`)).catch(() => setLongBanner("开关写入失败（需 manage.operation_config 能力）")); }} />重登后保留脱敏摘要（默认关；2h 过期；不含令牌/明文个人数据/业务状态）</label>
+        <button className="btn" style={{ padding: "2px 8px" }} onClick={() => { try { localStorage.removeItem(longKey); } catch {} setLongBanner("已一键清除本设备长期摘要"); }}>一键清除</button>
+      </div>}
+      {longBanner && <div className="alert info" style={{ margin: "0 12px 6px", fontSize: 12, color: "#57230f", background: "#fff7e6", border: "1px solid #ffd591", borderRadius: 8, padding: "6px 10px" }}>{longBanner}</div>}
       {probe && <div className="alert info" style={{ fontSize: 12 }}>{probe}</div>}
     </div>
     {checkMsg && <div className="alert info" style={{ margin: "0 12px 6px" }}>{checkMsg}</div>}
@@ -160,6 +179,8 @@ export function App() {
   const [unbound, setUnbound] = useState<{ name: string; provider: string } | null>(null);
   const [forceLogin, setForceLogin] = useState(false);
   const [ai, setAi] = useState(false);
+  const [aiPreset, setAiPreset] = useState<string | null>(null);
+  useEffect(() => { const h = (ev: Event) => { const d = (ev as CustomEvent<{ prompt?: string }>).detail; if (d && d.prompt) { setAiPreset(String(d.prompt).slice(0, 400)); setAi(true); } }; window.addEventListener("claw:ai-preset", h); return () => window.removeEventListener("claw:ai-preset", h); }, []);
   const reload = () => getMe().then((r) => {
     if (!r) { setMe(null); return; }
     if (r.user) { setMe(r.user); setUnbound(null); }
@@ -173,6 +194,6 @@ export function App() {
   return <>
     {me.role === "driver" ? <DriverShell user={me} /> : <AdminShell user={me} />}
     <button className="ai-fab" onClick={() => setAi((v) => !v)} title="AI 助手">AI</button>
-    {ai && <AiPanel onClose={() => setAi(false)} who={{ role: me!.role, userId: me!.userId }} />}
+    {ai && <AiPanel onClose={() => setAi(false)} who={{ role: me!.role, userId: me!.userId }} preset={aiPreset} onPresetUsed={() => setAiPreset(null)} />}
   </>;
 }

@@ -88,7 +88,10 @@ function sendJson(response, status, payload, extraHeaders = {}) {
   response.end(JSON.stringify(payload));
 }
 
-function readBody(request, limitBytes = 64 * 1024) {
+const bodyCache = new WeakMap();
+async function peekBody(request) { if (bodyCache.has(request)) return bodyCache.get(request); const b = await readBodyRaw(request); bodyCache.set(request, b); return b; }
+async function readBody(request, limitBytes = 64 * 1024) { return peekBody(request); }
+function readBodyRaw(request, limitBytes = 64 * 1024) {
   return new Promise((resolvePromise, rejectPromise) => {
     let size = 0;
     const chunks = [];
@@ -114,7 +117,8 @@ const SAFE_DATABASE_OPERATIONS = new Set([
   "create_session", "get_session", "delete_session",
   "get_binding_by_platform_user", "insert_audit", "list_audit",
   "list_resource", "count_resource", "insert_resource",
-  "search_read", "erd_list", "erd_get", "erd_insert", "erd_patch", "er_current", "kn_list", "kn_get", "kn_insert", "kn_patch",
+  "get_user_by_id", "user_edit", "drv_exists", "bind_active_check", "bind_rows", "bind_insert", "bind_close", "bind_patch_row", "bind_delete_row", "bind_conflict_q", "search_read", "erd_list",
+  "course_list", "audits_q", "audits_get", "course_insert", "course_patch", "ops_insert", "ops_list", "ts_course", "ts_facts", "pp_rows", "tpl_probe", "tpl_list", "tpl_insert", "tpl_patch",, "erd_get", "erd_insert", "erd_patch", "er_current", "kn_list", "kn_get", "kn_insert", "kn_patch",
   "insert_import_run", "get_import_run", "update_import_run", "upsert_resource",
   "get_task_row", "patch_task_row", "insert_task_notify", "count_task_notifs",
   "get_rr_row", "patch_rr_row", "insert_rr_row", "get_own_score_row", "get_own_ledger_row",
@@ -424,6 +428,29 @@ const RESOURCE_DEFS = {
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
 
+const FLEET_GPS_TABLES = new Set(["drivers", "review_queue", "risk_snapshots", "score_snapshots", "score_history", "deduction_ledger", "replay_events", "alerts"]);
+const FLEET_DRV_TABLES = new Set(["training_tasks", "review_requests", "interventions"]);
+let fleetScopeCache = { scope: null, gps: null, drv: null, at: 0 };
+async function fleetScopeSets(scope) {
+  if (fleetScopeCache.scope === scope && Date.now() - fleetScopeCache.at < 60000) return fleetScopeCache;
+  const rows = await listRows("ops_list", "drivers", { select: "driver_id,gpsno", fleet_id: `eq.${scope}`, limit: 2000 });
+  fleetScopeCache = { scope, gps: rows.map((x) => x.gpsno), drv: rows.map((x) => x.driver_id), at: Date.now() };
+  return fleetScopeCache;
+}
+async function assertInScope(principal, keys) {
+  const u = principal?.user || {}; const scope = String(u.fleet_scope || "*");
+  if (!["safety_admin", "team_leader"].includes(u.role) || scope === "*") return;
+  const s = await fleetScopeSets(scope);
+  if (keys.alertId) { const al = await listRows("get_alert_row", "alerts", { query: { alert_id: `eq.${keys.alertId}`, select: "gpsno,driver_id", limit: 1 } }); const a = al[0]; if (!a || (!s.gps.includes(String(a.gpsno)) && !s.drv.includes(String(a.driver_id || "")))) { try { await appendAudit(principal, "scope_refused.write", "fleet_object", String(keys.alertId), null, "refused_scope_404", principal.requestId); } catch {} throw new HttpError(404, "not_found"); } return; }
+  if (keys.taskId) { const tk = await listRows("get_task_row", "training_tasks", { query: { task_id: `eq.${keys.taskId}`, select: "driver_id", limit: 1 } }); const x = tk[0]; if (!x || !s.drv.includes(String(x.driver_id))) { try { await appendAudit(principal, "scope_refused.write", "fleet_object", String(keys.taskId), null, "refused_scope_404", principal.requestId); } catch {} throw new HttpError(404, "not_found"); } return; }
+  if (keys.gpsno && !s.gps.includes(String(keys.gpsno))) { try { await appendAudit(principal, "scope_refused.write", "fleet_object", String(keys.alertId || keys.gpsno), null, "refused_scope", principal.requestId); } catch {} throw new HttpError(404, "not_found_or_stale"); }
+  if (keys.driverId && !s.drv.includes(String(keys.driverId))) { try { await appendAudit(principal, "scope_refused.write", "fleet_object", String(keys.taskId || keys.driverId), null, "refused_scope", principal.requestId); } catch {} throw new HttpError(404, "not_found_or_stale"); }
+}
+async function applyFleetScope(user, def, query) {
+  const scope = String(user.fleet_scope || "*");
+  if (!["safety_admin", "team_leader"].includes(user.role) || scope === "*") return null;
+  return { __noFleetDimension: def.table }; // 课程/知识/审计/配置等非车队维度资源：不受队列表约束但也不泄露行数据
+}
 async function listResource(principal, resName, url) {
   const def = RESOURCE_DEFS[resName];
   if (!def) throw new HttpError(404, "not_found");
@@ -434,6 +461,9 @@ async function listResource(principal, resName, url) {
   // 行级权限：司机仅本人；注入优先于任何客户端过滤参数
   if (def.injectDriver) {
     if (!user.driver_id) throw new HttpError(409, "binding_required");
+    if (!user.binding_verified) throw new HttpError(403, "binding_not_verified");
+    if (!user.driver_id) throw new HttpError(409, "binding_required");
+    if (!user.binding_verified) throw new HttpError(403, "binding_not_verified");
     query.driver_id = `eq.${user.driver_id}`;
   }
   if (def.injectUser) query[def.injectUser] = `eq.${user.user_id}`;
@@ -448,7 +478,24 @@ async function listResource(principal, resName, url) {
     if (!/^[\w.,:;\-\u4e00-\u9fff ]+$/.test(val)) continue;
     query[k] = val.includes(",") ? `in.(${val.split(",").map((x) => x.trim()).join(",")})` : `eq.${val}`;
   }
-  if (url.searchParams.get("fleet_id") && user.role === "safety_admin" && !def.injectDriver) query.fleet_id = `eq.${url.searchParams.get("fleet_id")}`;
+  if (url.searchParams.get("fleet_id") && user.role === "safety_admin" && !def.injectDriver) {
+    if (String(user.fleet_scope || "*") !== "*" && String(url.searchParams.get("fleet_id")) !== String(user.fleet_scope)) throw new HttpError(403, "out_of_fleet_scope"); // 受限管理员不得借参数扩权
+    query.fleet_id = `eq.${url.searchParams.get("fleet_id")}`;
+  }
+  if (def.table === "training_courses" && user.role === "driver") query.content_status = `eq.${COURSE_APPROVED}`; // 司机仅可见已审核课程
+  if (def.table === "app_users" && user.role === "safety_admin" && String(user.fleet_scope || "*") !== "*") {
+    const scope = String(user.fleet_scope);
+    const s = await fleetScopeSets(scope);
+    const allAcc = await dbRequest("list_resource", "GET", "app_users", { query: { select: "user_id,driver_id,fleet_scope", limit: 500 } });
+    const keep = (allAcc.data || []).filter((x) => x.user_id === user.user_id || (x.driver_id && s.drv.includes(String(x.driver_id))) || String(x.fleet_scope || "") === scope).map((x) => x.user_id);
+    if (!keep.includes(user.user_id)) keep.push(user.user_id);
+    query.user_id = keep.length ? `in.(${keep.join(",")})` : `eq.${user.user_id}`; // 可信会话内内存过滤，绝不下发超长 in-list
+  }
+  const scopeNote = await applyFleetScope(user, def, query);
+  if (url.searchParams.get("fleet_id") && scopeNote && scopeNote.__selfScoped) {
+    // 受限管理员显式传他队 fleet_id：拒绝扩权
+    if (String(url.searchParams.get("fleet_id")) !== String(user.fleet_scope)) throw new HttpError(403, "out_of_fleet_scope");
+  }
   const result = await dbRequest("list_resource", "GET", def.table, {
     query, headers: { Prefer: "count=exact" },
   });
@@ -591,16 +638,123 @@ async function handleHistoryDates(request, response, url, ctx) {
   sendJson(response, 200, { dates: dates || [], counts });
 }
 
+// ===== R21：EV04 匿名车队聚合（只读、可信会话、防反推） =====
+// ===== R22：RM01「7 天下滑」分组（只读比较，不产告警/扣分/任务；可信会话 scope） =====
+function addDaysIso(iso, n) { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+async function handleDrop7(request, response, url, ctx) {
+  const user = requireUser(ctx.principal);
+  if (!["safety_admin", "team_leader"].includes(user.role)) throw new HttpError(403, "forbidden");
+  try {
+    const oc = await dbRequest("get_config_row", "GET", "operation_config", { query: { config_id: "eq.drop_threshold", select: "value,config_version", limit: 1 } });
+    const thr = Number(oc.data?.[0]?.value); const tver = String(oc.data?.[0]?.config_version || "—");
+    if (!Number.isFinite(thr)) throw new HttpError(500, "threshold_config_missing");
+    let pair = null;
+    { // 从最新真实采样日向前探测"相隔恰好 7 自然日的双真实日"（存在性用 count 检查，绝不补造日期）
+      const maxR = await dbRequest("list_resource", "GET", "score_history", { query: { select: "as_of_date", order: "as_of_date.desc", limit: 1 } });
+      let later = maxR.data?.[0]?.as_of_date || null;
+      const dcache = new Set();
+      const hasDay = async (d) => { if (dcache.has(d)) return true; const hr = await dbRequest("list_resource", "GET", "score_history", { query: { select: "as_of_date", as_of_date: `eq.${d}`, limit: 1 } }); if (hr.data?.length) { dcache.add(d); return true; } return false; };
+      for (let step = 0; step < 40 && later; step++) {
+        if (await hasDay(later)) { const earlier = addDaysIso(later, -7); if (await hasDay(earlier)) { pair = [earlier, later]; break; } }
+        else break;
+        const prev = await dbRequest("list_resource", "GET", "score_history", { query: { select: "as_of_date", as_of_date: `lt.${later}`, order: "as_of_date.desc", limit: 1 } });
+        later = prev.data?.[0]?.as_of_date || null;
+      }
+    }
+    if (!pair) return sendJson(response, 200, { data_status: "no_data", threshold: thr, threshold_version: tver, drop_count: 0, rows: [], not_comparable: [], note: "score_history 中不存在相隔恰好 7 个自然日的真实双日（不补造日期）" });
+    const hist = await dbRequest("list_resource", "GET", "score_history", { query: { select: "gpsno,driver_id,score_id,as_of_date,safety_score,score_status,confidence_level,source_version,rank", as_of_date: `in.(${pair[0]},${pair[1]})`, limit: 1800 } });
+    let inScope = null;
+    const scope = String(user.fleet_scope || "*");
+    if (scope !== "*") { const s = await fleetScopeSets(scope); inScope = new Set(s.gps); }
+    const qr = await dbRequest("list_resource", "GET", "review_queue", { query: { select: "gpsno,risk_level,review_queue,confidence_level,as_of_date", as_of_date: `eq.${pair[1]}`, limit: 700 } });
+    const qmap = {}; for (const x of qr.data || []) qmap[x.gpsno] = x;
+    const al = await dbRequest("list_resource", "GET", "alerts", { query: { select: "gpsno,owner_user_id,status", order: "occurred_at.desc", limit: 100 } });
+    const ownerByGps = {}; for (const x of al.data || []) if (!ownerByGps[x.gpsno]) ownerByGps[x.gpsno] = x.status !== "closed" ? (x.owner_user_id || "责任人待指派") : "已结案";
+    const byG = {};
+    for (const x of hist.data || []) { if (inScope && !inScope.has(String(x.gpsno))) continue; (byG[x.gpsno] = byG[x.gpsno] || {})[x.as_of_date] = x; }
+    const COMPARABLE = ["usable", "usable_with_review", "manual_review"];
+    const rowsOut = []; const notComp = [];
+    for (const [g, v] of Object.entries(byG)) {
+      const e = v[pair[0]]; const l = v[pair[1]];
+      if (!e || !l) { notComp.push({ gpsno: g, driver_id: (e || l || {}).driver_id || null, reason: !e ? "缺较早日（不记为未下滑）" : "缺较晚日（不记为未下滑）" }); continue; }
+      if (!COMPARABLE.includes(String(e.score_status)) || !COMPARABLE.includes(String(l.score_status))) { notComp.push({ gpsno: g, driver_id: l.driver_id, reason: "score_status 不可比：" + [e.score_status, l.score_status].join("/") }); continue; }
+      if (e.source_version !== l.source_version) { notComp.push({ gpsno: g, driver_id: l.driver_id, reason: "来源版本不同（" + e.source_version + "≠" + l.source_version + "），不比较" }); continue; }
+      const drop = Number(e.safety_score) - Number(l.safety_score);
+      const q = qmap[g] || {};
+      const base = { gpsno: g, driver_id: l.driver_id, early_date: pair[0], late_date: pair[1], early_score: Number(Number(e.safety_score).toFixed(4)), late_score: Number(Number(l.safety_score).toFixed(4)), drop: Number(drop.toFixed(4)), threshold: thr, threshold_version: tver, early_score_id: e.score_id, late_score_id: l.score_id, confidence: l.confidence_level || null, base_tags: [q.review_queue, q.risk_level ? "行为" + q.risk_level : null].filter(Boolean), owner: ownerByGps[g] || "未指派", next_step: String(l.confidence_level) === "low" ? "先设备/数据核验，再复核下滑" : "EV03 复核两日证据与扣分历史；分组仅定人工复核顺序" };
+      if (drop >= thr) { rowsOut.push({ ...base, route: `#/ev-fleet?gpsno=${g}` }); }
+      else { rowsOut.length; }
+    }
+    rowsOut.sort((a, b) => b.drop - a.drop);
+    sendJson(response, 200, { data_status: "ok", date_pair: pair, threshold: thr, threshold_version: tver, comparable: Object.keys(byG).length - notComp.length, drop_count: rowsOut.length, not_comparable_count: notComp.length, not_comparable: notComp.slice(0, 60), rows: rowsOut, scope_note: scope !== "*" ? "已按你会话的 fleet_scope 过滤" : "全范围会话", generated: "本分组不生成告警/扣分/惩罚/培训任务" });
+  } catch (e) {
+    if (e instanceof HttpError && e.status !== 500) throw e;
+    return sendJson(response, 200, { data_status: "query_failed", note: "下滑统计查询失败（不以 0 冒充）" });
+  }
+}
+async function handleDriverFleetSummary(request, response, url, ctx) {
+  const u = requireUser(ctx.principal);
+  if (u.role !== "driver") throw new HttpError(403, "forbidden");
+  const myDriver = String(u.driver_id || "");
+  if (!myDriver || !u.binding_verified) throw new HttpError(403, "unverified_binding_no_stats"); // 未绑定/未核实：不返回个人与车队统计
+  try {
+    const drows = await dbRequest("list_resource", "GET", "drivers", { query: { driver_id: `eq.${myDriver}`, select: "fleet_id", limit: 10 } });
+    const fleets = [...new Set((drows.data || []).map((x) => x.fleet_id).filter(Boolean))];
+    if (!fleets.length) return sendJson(response, 200, { data_status: "no_data", as_of_date: null, valid_count: null, average: null, distribution: null, note: "绑定司机暂无车辆档案" });
+    const fleet = fleets[0];
+    const drows0 = await dbRequest("list_resource", "GET", "score_snapshots", { query: { driver_id: `eq.${myDriver}`, select: "as_of_date", order: "as_of_date.desc", limit: 1 } });
+    const asOf = drows0.data?.[0]?.as_of_date || (await dbRequest("list_resource", "GET", "score_snapshots", { query: { select: "as_of_date", order: "as_of_date.desc", limit: 1 } })).data?.[0]?.as_of_date || null;
+    if (!asOf) return sendJson(response, 200, { data_status: "no_data", as_of_date: null, valid_count: null, average: null, distribution: null, note: "暂无评分快照" });
+    const fr2 = await dbRequest("list_resource", "GET", "drivers", { query: { select: "gpsno", fleet_id: `eq.${fleet}`, limit: 2000 } });
+    const inFleet = new Set((fr2.data || []).map((x) => x.gpsno));
+    const rows = await dbRequest("list_resource", "GET", "score_snapshots", { query: { select: "gpsno,risk_level,score_status,safety_score,source_version", as_of_date: `eq.${asOf}`, limit: 2000 } });
+    const mine = (rows.data || []).filter((x) => inFleet.has(x.gpsno));
+    if (!mine.length) return sendJson(response, 200, { data_status: "no_data", as_of_date: asOf, valid_count: null, average: null, distribution: null, note: "该车队当日无评分记录（空值不写成 0）" });
+    const usable = mine.filter((x) => ["usable", "usable_with_review", "manual_review"].includes(String(x.score_status)));
+    const sv = mine[0]?.source_version || null;
+    if (usable.length < 10) return sendJson(response, 200, { data_status: "insufficient_sample", as_of_date: asOf, source_version: sv, valid_count: null, average: null, distribution: null, note: "有效评分人数不足 10，出于隐私保护不展示均值与分布（不返回 0 或空壳）" });
+    const avg = usable.reduce((a, x) => a + Number(x.safety_score), 0) / usable.length;
+    const dist = {}; for (const x of usable) dist[String(x.risk_level)] = (dist[String(x.risk_level)] || 0) + 1;
+    const cells = Object.values(dist);
+    const derivable = cells.length <= 1 || cells.some((c) => c === 1) || cells.some((c) => c >= usable.length - 1);
+    return sendJson(response, 200, {
+      data_status: "ok", as_of_date: asOf, source_version: sv, valid_count: usable.length,
+      average: Math.round(avg * 10) / 10,
+      distribution: derivable ? null : { A: dist.A || 0, B: dist.B || 0, C: dist.C || 0, D: dist.D || 0 },
+      note: derivable ? "样本或等级类别过细，可能反推个人：本次不展示分布（人数与均值保留）" : "匿名车队统计：仅聚合值，无任何个人明细",
+    });
+  } catch (e) {
+    if (e instanceof HttpError) throw e;
+    return sendJson(response, 200, { data_status: "query_failed", as_of_date: null, valid_count: null, average: null, distribution: null, note: "统计查询失败，稍后重试（不以空值冒充 0）" });
+  }
+}
 async function handleOverview(request, response, url, ctx) {
   const user = requireUser(ctx.principal);
   if (!(ROLE_CAPABILITIES[user.role] || new Set()).has("view.fleet_overview")) throw new HttpError(403, "forbidden");
   const metrics = [];
   for (const m of OVERVIEW_METRICS) {
     try {
-      const r = await dbRequest("count_resource", "GET", m.table, {
-        query: { ...m.query, limit: 1 }, headers: { Prefer: "count=exact" },
-      });
-      metrics.push({ key: m.key, label: m.label, count: r.rangeHeader === null ? null : parseCount(r.rangeHeader) });
+      const qm = { ...m.query, limit: 1 };
+      let batches = [null];
+      { const scopeU = String(user.fleet_scope || "*");
+        if (scopeU !== "*" && ["safety_admin", "team_leader"].includes(user.role)) {
+          if (m.table === "drivers" || m.table === "user_bindings") qm.fleet_id = `eq.${scopeU}`;
+          else if (FLEET_GPS_TABLES.has(m.table) || FLEET_DRV_TABLES.has(m.table)) {
+            const s = await fleetScopeSets(scopeU);
+            const vals = FLEET_GPS_TABLES.has(m.table) ? s.gps : s.drv; const col = FLEET_GPS_TABLES.has(m.table) ? "gpsno" : "driver_id";
+            if (!vals.length) qm[col] = "in.()"; else { batches = []; for (let bi = 0; bi < vals.length; bi += 120) batches.push(vals.slice(bi, bi + 120)); } // 分批求和避免 414
+          }
+        } }
+      let cnt = 0;
+      const runs = batches.length && batches[0] !== null ? batches : [null];
+      for (const b of runs) {
+        const qq = { ...qm }; if (b) { const col2 = FLEET_GPS_TABLES.has(m.table) ? "gpsno" : "driver_id"; qq[col2] = `in.(${b.join(",")})`; }
+        const r = await dbRequest("count_resource", "GET", m.table, { query: qq, headers: { Prefer: "count=exact" } });
+        if (b) { const dl = (r.data || []); if (r.rangeHeader) cnt += parseCount(r.rangeHeader) ?? dl.length; }
+        else cnt = parseCount(r.rangeHeader) ?? (r.data ? r.data.length : null);
+      }
+      const rangeHeader = "0-0/" + cnt;
+      metrics.push({ key: m.key, label: m.label, count: cnt });
     } catch { metrics.push({ key: m.key, label: m.label, count: null, unread: true }); }
   }
   let asOf = null;
@@ -915,65 +1069,127 @@ async function handleImportCommit(request, response, url, ctx) {
 
 
 // ---------- Section: admin binding management (SM01/SM02) ----------
+// ===== R23：SM02 时段冲突引擎（闭区间：start 含当日，end 含当日；null=开放有效；相邻=start_next > end_prev） =====
+const BIND_OPEN = "9999-12-31T23:59:59.999Z";
+function normWin(s, e) {
+  const D = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
+  if (s && !D.test(s)) throw new HttpError(400, "bad_start_date");
+  if (e && !D.test(e)) throw new HttpError(400, "bad_end_date");
+  if (s && e && e < s) throw new HttpError(409, "invalid_window_end_before_start");
+  return { start: s ? s + "T00:00:00.000Z" : null, end: e ? e + "T23:59:59.999Z" : null };
+}
+function winOverlap(s1, e1, s2, e2) {
+  const lo = (s1 || "0000") > (s2 || "0000") ? (s1 || "0000") : (s2 || "0000");
+  const hi = (e1 || BIND_OPEN) < (e2 || BIND_OPEN) ? (e1 || BIND_OPEN) : (e2 || BIND_OPEN);
+  return lo <= hi;
+}
+async function findBindingConflicts({ driverId, userId, startS, endS, excludeBindingId }) {
+  const rows = await dbRequest("bind_conflict_q", "GET", "user_bindings", { query: { account_status: "eq.active", select: "binding_id,user_id,driver_id,effective_start,effective_end", limit: 500 } });
+  const out = [];
+  for (const b of rows.data || []) {
+    if (excludeBindingId && String(b.binding_id) === String(excludeBindingId)) continue;
+    if (!winOverlap(startS, endS, b.effective_start, b.effective_end)) continue;
+    if (driverId && b.driver_id && String(b.driver_id) !== String(userId ? "" : "") && String(b.driver_id) === String(driverId) && String(b.user_id) !== String(userId || "\u0000")) out.push({ kind: "driver_slot_taken", binding_id: b.binding_id, driver_id: b.driver_id, user_id: b.user_id });
+    if (userId && b.driver_id && String(b.driver_id) !== String(driverId || "\u0000") && String(b.user_id) === String(userId)) out.push({ kind: "user_multi_driver", binding_id: b.binding_id, driver_id: b.driver_id });
+  }
+  return out;
+}
+let bindingMutex = Promise.resolve();
+function withBindingLock(fn) { const run = bindingMutex.then(fn, fn); bindingMutex = run.then(() => undefined, () => undefined); return run; }
+
+async function handleBindingsList(request, response, url, ctx) { requireUser(ctx.principal, "manage.bindings"); const asOf = String(url.searchParams.get("as_of") || ""); const { data } = await dbRequest("bind_rows", "GET", "user_bindings", { query: { select: "binding_id,user_id,platform_user_id,role,driver_id,fleet_id,account_status,identity_status,effective_start,effective_end,note,updated_at", order: "effective_start.desc", limit: 300 } }); let rows = data || []; if (asOf && /^\d{4}-\d{2}-\d{2}$/.test(asOf)) { const d = asOf + "T12:00:00.000Z"; rows = rows.filter((x) => (!x.effective_start || x.effective_start <= d) && (!x.effective_end || x.effective_end >= d)); } sendJson(response, 200, { ok: true, rows, as_of: asOf || null, note: "按 as_of 过滤当日有效关系；未传 as_of 返回全部" }); }
+async function handleBindingPreview(request, response, url, ctx) {
+  requireUser(ctx.principal, "manage.bindings");
+  const q = url.searchParams;
+  const s = String(q.get("start") || "").slice(0, 10) || null;
+  const eRaw = q.get("end"); const e = eRaw === null || eRaw === "" ? null : eRaw.slice(0, 10);
+  let startS = null; let endS = null;
+  try { const w = normWin(s, e); startS = w.start; endS = w.end; } catch (er) { return sendJson(response, 400, { error: er.message || String(er) }); }
+  if (s && e && e < s) return sendJson(response, 200, { ok: true, invalid: true, conflicts: [], window: [s, e] });
+  const cf = await findBindingConflicts({ driverId: String(q.get("driver_id") || ""), userId: String(q.get("user_id") || ""), startS, endS, excludeBindingId: String(q.get("exclude") || "") || null });
+  sendJson(response, 200, { ok: true, conflicts: cf, window: [startS, endS], boundary_rule: "闭区间含首尾日；相邻(次日开始)允许；空结束=持续有效；编辑传 exclude=自身 binding_id" });
+}
+async function handleBindingDelete(request, response, url, ctx) {
+  requireUser(ctx.principal, "manage.bindings");
+  const body = await readBody(request);
+  const bindingId = String(body.binding_id || "");
+  const row = (await dbRequest("bind_rows", "GET", "user_bindings", { query: { binding_id: `eq.${bindingId}`, limit: 1 } })).data?.[0];
+  if (!row) throw new HttpError(404, "not_found");
+  if (["演示绑定（synthetic_demo_mapping）", "已核实"].includes(String(row.identity_status)) && row.account_status === "active" && String(row.user_id) !== "u-") {} // 生产行删除也走本端点：留全量快照审计
+  await dbRequest("bind_delete_row", "DELETE", "user_bindings", { query: { binding_id: `eq.${bindingId}` } });
+  const auditId = await appendAudit(ctx.principal, "account.binding_delete", "user_binding", String(bindingId), row.account_status, "deleted", ctx.requestId, null, { snapshot: row });
+  sendJson(response, 200, { ok: true, binding_id: bindingId, audit_id: auditId });
+}
+
+async function bind_rows1(id) { return (await dbRequest("bind_rows", "GET", "user_bindings", { query: { binding_id: `eq.${id}`, limit: 1 } })).data?.[0] || null; }
+async function handleBindingReschedule(request, response, url, ctx, bindingIdArg) {
+  const admin = requireUser(ctx.principal, "manage.bindings");
+  const body = await readBody(request);
+  const bindingId = String(bindingIdArg || body.binding_id || "");
+  return withBindingLock(async () => {
+    const cur = await bind_rows1(bindingId);
+    if (!cur) throw new HttpError(404, "not_found");
+    const w = normWin(body.start ? String(body.start).slice(0, 10) : null, body.end === undefined ? null : (body.end ? String(body.end).slice(0, 10) : null));
+    const startS = w.start || cur.effective_start; const endS = w.end !== null ? w.end : (body.end === null ? null : cur.effective_end);
+    if (startS && endS && endS < startS) throw new HttpError(409, "invalid_window_end_before_start");
+    if (cur.driver_id) await assertInScope(ctx.principal, { driverId: String(cur.driver_id) });
+    const cf = await findBindingConflicts({ driverId: cur.driver_id, userId: cur.user_id, startS, endS, excludeBindingId: bindingId }); // 编辑排除自身
+    if (cf.length) { await appendAudit(admin, "account.binding_conflict_refused", "user_binding", bindingId, null, "refused", ctx.requestId, null, { conflicts: cf.slice(0, 5), window: [startS, endS] }); throw new HttpError(409, "binding_window_conflict:" + [...new Set(cf.map((x) => x.kind))].join("/")); }
+    const at = nowIso();
+    await dbRequest("bind_patch_row", "PATCH", "user_bindings", { query: { binding_id: `eq.${bindingId}` }, body: { effective_start: startS, effective_end: endS, updated_at: at }, headers: { Prefer: "return=minimal" } });
+    await appendAudit(admin, "account.binding_reschedule", "user_binding", bindingId, [cur.effective_start, cur.effective_end].join("~"), [startS, endS].join("~"), ctx.requestId, null, { driver_id: cur.driver_id, user_id: cur.user_id });
+    sendJson(response, 200, { ok: true, binding_id: bindingId, old_window: [cur.effective_start, cur.effective_end], window: [startS, endS] });
+  });
+}
 async function handleBindingSet(request, response, url, ctx) {
-  const admin = requireUser(ctx.principal);
+  const admin = requireUser(ctx.principal, "manage.bindings");
   const body = await readBody(request);
   const targetUserId = String(body.user_id || "").slice(0, 64);
   const driverId = body.driver_id === null || body.driver_id === undefined || body.driver_id === "" ? null : String(body.driver_id).trim().slice(0, 64);
   const verified = Boolean(body.verified);
   const note = String(body.note ?? "").slice(0, 200);
   if (!targetUserId) throw new HttpError(400, "bad_request");
-  const ures = await dbRequest("get_binding_user", "GET", "app_users", {
-    query: { user_id: `eq.${targetUserId}`, select: "user_id,role,driver_id,account_status" },
-  });
+  if (driverId) await assertInScope(ctx.principal, { driverId });
+  const ures = await dbRequest("get_binding_user", "GET", "app_users", { query: { user_id: `eq.${targetUserId}`, select: "user_id,role,driver_id,account_status" } });
   const target = ures.data?.[0];
   if (!target) throw new HttpError(404, "not_found");
   if (!["safety_admin", "driver", "team_leader"].includes(target.role)) throw new HttpError(400, "bad_request");
   let driverProfile = null;
   if (driverId) {
-    const dres = await dbRequest("get_driver_profile", "GET", "drivers", {
-      query: { driver_id: `eq.${driverId}`, select: "driver_id,gpsno,identity_status,mapping_start,mapping_end" },
-    });
+    const dres = await dbRequest("get_driver_profile", "GET", "drivers", { query: { driver_id: `eq.${driverId}`, select: "driver_id,gpsno,identity_status,mapping_start,mapping_end", limit: 1 } });
     driverProfile = dres.data?.[0] || null;
     if (!driverProfile) throw new HttpError(409, "driver_not_imported");
-    const conflict = await dbRequest("count_driver_conflict", "GET", "app_users", {
-      query: { driver_id: `eq.${driverId}`, account_status: "eq.active", user_id: `neq.${targetUserId}`, select: "user_id", limit: 1 },
-    });
-    if ((conflict.data || []).length) throw new HttpError(409, "binding_conflict");
   }
   const at = nowIso();
-  const identityStatus = driverId
-    ? (verified ? (String(driverProfile.identity_status || "").includes("synthetic") ? "演示绑定（synthetic_demo_mapping）" : "已核实") : "待核实")
-    : null;
-  // 关闭该账号既有生效绑定，留历史行
-  await dbRequest("close_binding_rows", "PATCH", "user_bindings", {
-    query: { user_id: `eq.${targetUserId}`, account_status: "eq.active", platform_user_id: "is.null" }, // 本地账号绑定与平台SSO绑定分行管理，互不误伤
-    body: { account_status: "inactive", effective_end: at, updated_at: at },
-    headers: { Prefer: "return=minimal" },
+  const win = body.window ? normWin(String(body.window.start || "").slice(0, 10) || null, body.window.end === null ? null : String(body.window.end || "").slice(0, 10) || null) : null;
+  const startS = win && win.start ? win.start : at; const endS = win && win.end !== undefined ? win.end : null;
+  const identityStatus = driverId ? (verified ? (String(driverProfile.identity_status || "").includes("synthetic") ? "演示绑定（synthetic_demo_mapping）" : "已核实") : "待核实") : "未绑定";
+  return withBindingLock(async () => {
+    if (driverId) {
+      const legacy = await dbRequest("count_driver_conflict", "GET", "app_users", { query: { driver_id: `eq.${driverId}`, account_status: "eq.active", user_id: `neq.${targetUserId}`, select: "user_id", limit: 1 } });
+      if (!win && (legacy.data || []).length) throw new HttpError(409, "binding_conflict"); // 时段模式由窗口冲突引擎判定
+      const cf = await findBindingConflicts({ driverId, userId: targetUserId, startS, endS });
+      if (cf.length) { await appendAudit(admin, "account.binding_conflict_refused", "user_binding", targetUserId + ":" + driverId, null, "refused", ctx.requestId, null, { conflicts: cf.slice(0, 6), window: [startS, endS] }); throw new HttpError(409, "binding_window_conflict:" + [...new Set(cf.map((x) => x.kind))].join("/")); }
+      const idem = (await dbRequest("bind_rows", "GET", "user_bindings", { query: { user_id: `eq.${targetUserId}`, driver_id: `eq.${driverId}`, account_status: "eq.active", effective_start: `eq.${startS}`, effective_end: endS === null ? "is.null" : `eq.${endS}`, limit: 1 } })).data?.[0];
+      if (idem) { sendJson(response, 200, { ok: true, idempotent_replay: true, binding_id: idem.binding_id, user_id: targetUserId, driver_id: driverId, window: [startS, endS], identity_status: identityStatus }); return; }
+    }
+    if (!win) await dbRequest("close_binding_rows", "PATCH", "user_bindings", { query: { user_id: `eq.${targetUserId}`, account_status: "eq.active", platform_user_id: "is.null" }, body: { account_status: "inactive", effective_end: at, updated_at: at }, headers: { Prefer: "return=minimal" } }); // 平台SSO绑定行独立生命周期：本地解绑永不关闭之
+    if (win && verified) { const nowR = nowIso(); const coversNow = (!startS || startS <= nowR) && (!endS || endS >= nowR); if (coversNow || !endS) { await dbRequest("patch_binding_fields", "PATCH", "app_users", { query: { user_id: `eq.${targetUserId}` }, body: { driver_id: driverId, binding_verified: true, binding_note: note || identityStatus, updated_at: nowR }, headers: { Prefer: "return=minimal" } }); } }
+    const bindingId = newId("bd");
+    if (driverId) {
+      await dbRequest("bind_insert", "POST", "user_bindings", { body: [{ binding_id: bindingId, user_id: targetUserId, platform_user_id: null, role: target.role, driver_id: driverId, fleet_id: driverProfile.gpsno ? await (async () => { const fr = await dbRequest("drv_exists", "GET", "drivers", { query: { gpsno: `eq.${driverProfile.gpsno}`, select: "fleet_id", limit: 1 } }); return fr[0]?.fleet_id || null; })() : null, account_status: "active", identity_status: identityStatus, effective_start: startS, effective_end: endS, note, updated_at: at }], headers: { Prefer: "return=minimal" } });
+      const back = await findBindingConflicts({ driverId, userId: targetUserId, startS, endS, excludeBindingId: bindingId });
+      if (back.length) {
+        await dbRequest("bind_patch_row", "PATCH", "user_bindings", { query: { binding_id: `eq.${bindingId}` }, body: { account_status: "inactive", effective_end: nowIso(), updated_at: nowIso(), note: "并发回滚：写后回读发现重叠" }, headers: { Prefer: "return=minimal" } });
+        await appendAudit(admin, "account.binding_rolled_back", "user_binding", bindingId, "active", "inactive", ctx.requestId, null, { found: back.slice(0, 3) });
+        throw new HttpError(409, "binding_concurrent_conflict_rolled_back");
+      }
+    }
+    if (!win || !verified) await dbRequest("patch_binding_fields", "PATCH", "app_users", { query: { user_id: `eq.${targetUserId}` }, body: { driver_id: (win && verified) ? undefined : (verified ? driverId : null), binding_verified: Boolean(driverId) && verified, binding_note: driverId ? (note || identityStatus) : null, updated_at: at }, headers: { Prefer: "return=minimal" } });
+    const auditId = await appendAudit(admin, driverId ? "account.binding_set" : "account.binding_cleared", "app_user", targetUserId, target.driver_id || "未绑定", driverId ? `${driverId}/${identityStatus}` : "未绑定", ctx.requestId, null, { window: [startS, endS], binding_id: driverId ? bindingId : null });
+    sendJson(response, 200, { ok: true, binding_id: driverId ? bindingId : null, user_id: targetUserId, driver_id: verified ? driverId : null, identity_status: identityStatus, window: driverId ? [startS, endS] : null, audit_id: auditId });
   });
-  const bindingId = newId("bd");
-  if (driverId) {
-    await dbRequest("insert_binding_row", "POST", "user_bindings", {
-      body: [{
-        binding_id: bindingId, user_id: targetUserId, platform_user_id: null, role: target.role,
-        driver_id: driverId, fleet_id: driverProfile.gpsno ? null : null, account_status: "active",
-        identity_status: identityStatus, effective_start: at, effective_end: null,
-        verified_by: verified ? admin.user_id : null, verified_at: verified ? at : null,
-        note, updated_at: at,
-      }],
-      headers: { Prefer: "return=minimal" },
-    });
-  }
-  await dbRequest("patch_binding_fields", "PATCH", "app_users", {
-    query: { user_id: `eq.${targetUserId}` },
-    body: { driver_id: driverId, binding_verified: Boolean(driverId) && verified, binding_note: driverId ? (note || identityStatus) : null, updated_at: at },
-    headers: { Prefer: "return=minimal" },
-  });
-  const auditId = await appendAudit(ctx.principal, driverId ? "account.binding_set" : "account.binding_cleared", "app_user", targetUserId,
-    target.driver_id || "未绑定", driverId ? `${driverId}/${identityStatus}` : "未绑定", ctx.requestId);
-  sendJson(response, 200, { ok: true, binding_id: driverId ? bindingId : null, user_id: targetUserId, driver_id: driverId, identity_status: identityStatus, binding_note: note || identityStatus, audit_id: auditId });
 }
-
 
 // ---------- Section: gated writes (ops config versioning / course review / assignment gate) ----------
 const COURSE_APPROVED = "approved"; // 只有人工审核到达该状态才可正式分配/通知/被AI当制度引用
@@ -1009,6 +1225,11 @@ async function handleOpsConfigUpdate(request, response, url, ctx) {
   if (!/^[a-z][a-z0-9_]{1,40}$/.test(key) || !value) throw new HttpError(400, "bad_request");
   const { data } = await dbRequest("get_config_row", "GET", "operation_config", { query: { config_id: `eq.${key}`, select: "config_id,value,unit,config_version" } });
   const row = data?.[0];
+  if (!row && key === "ai_long_session" && ["on", "off"].includes(value)) {
+    await dbRequest("ops_insert", "POST", "operation_config", { body: [{ config_id: key, value, unit: "flag", config_version: 1, updated_at: nowIso() }], headers: { Prefer: "return=minimal" } });
+    const aid0 = await appendAudit(ctx.principal, "ops.config_create", "operation_config", key, null, value, ctx.requestId, [], { note: "AI 跨登录长期摘要开关（默认 off；仅存脱敏摘要于浏览器本地）" });
+    return sendJson(response, 201, { ok: true, config_id: key, old_value: null, new_value: value, old_version: 0, new_version: 1, audit_id: aid0 });
+  }
   if (!row) throw new HttpError(404, "not_found");
   const nextVersion = (Number(row.config_version) || 0) + 1;
   const at = nowIso();
@@ -1021,9 +1242,22 @@ async function handleOpsConfigUpdate(request, response, url, ctx) {
   sendJson(response, 200, { ok: true, config_id: key, old_value: row.value, new_value: value, old_version: row.config_version, new_version: nextVersion, effective_at: effectiveAt, audit_id: auditId });
 }
 
+// R30：发送链模板接入（approved-only；无参照/未审核→回退内置文案，不阻塞业务；缺事实渲染「待核」不编造）
+async function resolveTemplateForSend(templateRef, scene, facts) {
+  if (!templateRef || !(await probeTemplates())) return null;
+  const ref = String(templateRef).slice(0, 80);
+  let rows = [];
+  if (/^nt-/.test(ref)) rows = await listRows("tpl_list", "notification_templates", { template_id: `eq.${ref}`, select: "template_id,template_key,version,body,review_status,scene", limit: 1 });
+  else if (ref.includes(":")) { const [k, v] = ref.split(":"); rows = await listRows("tpl_list", "notification_templates", { template_key: `eq.${k}`, version: `eq.${Number(v) || 1}`, select: "template_id,template_key,version,body,review_status,scene", limit: 1 }); }
+  const row = rows[0];
+  if (!row || String(row.review_status) !== "approved" || String(row.scene) !== scene) { const err = new Error("template_not_usable"); err.templateDiag = row ? { id: row.template_id, status: row.review_status, scene: row.scene } : "not_found"; throw err; }
+  return { template_id: row.template_id, template_key: row.template_key, version: Number(row.version), body: String(row.body).replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (_m, name) => (facts[name] !== undefined && facts[name] !== null && facts[name] !== "" ? String(facts[name]) : `（待核：${name}）`)), fallback_used: false };
+}
+
 async function handleTrainingAssign(request, response, url, ctx) {
   const user = requireUser(ctx.principal);
   const body = await readBody(request);
+  await assertInScope(ctx.principal, { driverId: String(body.driver_id || "") });
   const courseId = String(body.course_id || "").slice(0, 40);
   const driverId = String(body.driver_id || "").slice(0, 60);
   if (!courseId || !driverId) throw new HttpError(400, "bad_request");
@@ -1056,8 +1290,15 @@ async function handleTrainingAssign(request, response, url, ctx) {
   });
   let notif = null;
   const acct0 = await dbRequest("get_binding_target", "GET", "app_users", { query: { driver_id: `eq.${driverId}`, account_status: "eq.active", binding_verified: "eq.true", select: "user_id", limit: 1 } });
-  if (acct0.data?.[0]) notif = await notify(acct0.data[0].user_id, "task_assigned", taskId, `新培训任务（课程 ${courseId}），请在“培训任务”查看并完成；本消息为站内演示通知，非外部渠道送达。`, `notif:taskas:${taskId}`);
-  const auditId = await appendAudit(ctx.principal, "training.assign", "training_task", taskId, null, "assigned", ctx.requestId);
+  let assignNoteUsed = null;
+  { const defMsg = `新培训任务（课程 ${courseId}），请在“培训任务”查看并完成；本消息为站内演示通知，非外部渠道送达。`;
+    let msg = defMsg;
+    if (body.template_ref) {
+      try { const tr = await resolveTemplateForSend(body.template_ref, "task_assigned", { driver_id: String(driverId), alert_id: String(body.alert_id || ""), event_date: null, evidence_type: null, review_note: null }); msg = tr.body + "\n（模板 " + tr.template_key + ":v" + tr.version + " 审核人 " + (tr.template_id && tr.template_id ? "已审核" : "") + "；本消息为站内演示通知，非外部渠道送达）"; assignNoteUsed = tr; }
+      catch (e) { if (String(e && e.message) === "template_not_usable") throw new HttpError(409, "template_not_approved_or_disabled"); throw e; }
+    }
+    if (acct0.data?.[0]) notif = await notify(acct0.data[0].user_id, "task_assigned", taskId, msg, `notif:taskas:${taskId}`); }
+  const auditId = await appendAudit(ctx.principal, "training.assign", "training_task", taskId, null, "assigned", ctx.requestId, null, { mandatory: Boolean(body.mandatory), template_ref: assignNoteUsed ? { template_id: assignNoteUsed.template_id, key: assignNoteUsed.template_key, version: assignNoteUsed.version } : null });
   sendJson(response, 200, { ok: true, task_id: taskId, audit_id: auditId, assigned_notification: notif, note: "司机为演示绑定身份，通知≠外发送达" });
 }
 
@@ -1080,6 +1321,7 @@ async function fetchQueueEvidence(gpsno, evidenceId, occurredAt) {
 
 async function handleAlertConfirm(request, response, url, ctx) {
   const user = requireUser(ctx.principal);
+  { const body0 = await peekBody(request); await assertInScope(ctx.principal, { gpsno: String(body0.gpsno || "") }); }
   const body = await readBody(request);
   const gpsno = String(body.gpsno || "").slice(0, 40);
   const ruleCode = String(body.rule_code || "");
@@ -1130,6 +1372,7 @@ async function loadAlert(id) {
 
 async function handleAlertStatus(request, response, url, ctx, alertId) {
   requireUser(ctx.principal);
+  await assertInScope(ctx.principal, { alertId });
   const alert = await loadAlert(alertId);
   const body = await readBody(request);
   const next = String(body.status || "");
@@ -1149,6 +1392,7 @@ async function handleAlertStatus(request, response, url, ctx, alertId) {
 
 async function handleInterventionDraft(request, response, url, ctx, alertId) {
   requireUser(ctx.principal);
+  await assertInScope(ctx.principal, { alertId });
   const alert = await loadAlert(alertId);
   if (alert.status !== "confirmed") throw new HttpError(409, "alert_not_confined_as_confirmed");
   const body = await readBody(request);
@@ -1329,6 +1573,236 @@ async function notify(targetUserId, type, sourceId, content, idem, entity = "tra
 async function adminAccountId() {
   const a = await dbRequest("get_task_row", "GET", "app_users", { query: { role: "eq.safety_admin", account_status: "eq.active", select: "user_id", limit: 1 } });
   return a.data?.[0]?.user_id || null;
+}
+
+// ===== R24：TR06 AI 辅助摘要（受控、只读、结构化、可点击回源；不改业务状态） =====
+const summaryCache = new Map();
+// ===== R26：AI04 管理动作并排预演（只读组装卡片事实底座 + 复用对话侧 action_preplan；零业务写） =====
+async function handleAiPreplan(request, response, url, ctx) {
+  const user = requireUser(ctx.principal);
+  if (user.role !== "safety_admin") throw new HttpError(403, "forbidden"); // 预演页仅安全管理员
+  const drvQ = cleanQuery(url.searchParams.get("driver_id"), 60);
+  const gpsQ = cleanQuery(url.searchParams.get("gpsno"), 40);
+  const asQ = String(url.searchParams.get("as_of_date") || "").slice(0, 10);
+  if (!drvQ && !gpsQ) throw new HttpError(400, "object_required");
+  if (asQ && !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(asQ)) throw new HttpError(400, "bad_as_of");
+  try {
+    const sQuery = { select: "score_id,driver_id,gpsno,safety_score,risk_level,confidence_level,as_of_date,source_version,top_reason_1,observed_behavior_deduction,fatigue_distraction_event_count,driving_stability_event_count,road_rule_event_count,history_event_count,imu_evidence_event_count,review_queue,forecast_40d_risk_prob,rank", order: "as_of_date.desc", limit: 1 };
+    if (drvQ) sQuery.driver_id = `eq.${drvQ}`; else sQuery.gpsno = `eq.${gpsQ}`;
+    let sc = (await dbRequest("list_resource", "GET", "score_snapshots", { query: sQuery })).data?.[0] || null;
+    if (asQ) { if (sc && sc.as_of_date !== asQ) { const sq2 = { ...sQuery, as_of_date: `eq.${asQ}` }; sc = (await dbRequest("list_resource", "GET", "score_snapshots", { query: sq2 })).data?.[0] || null; } else if (sc === null) { sc = null; } }
+    if (!sc) return sendJson(response, 200, { data_status: asQ ? "no_data_for_date" : "not_found", as_of_date: asQ || null, cards: [], note: asQ ? `该对象在 ${asQ} 无评分快照（不补造数据，可切回最新日期）` : "对象在本会话可见范围内不存在（越权与不存在同语义）" });
+    await assertInScope(ctx.principal, { driverId: String(sc.driver_id || ""), gpsno: String(sc.gpsno) });
+    const dateFor = asQ || String(sc.as_of_date);
+    const alertsAll = (await dbRequest("list_resource", "GET", "alerts", { query: { gpsno: `eq.${sc.gpsno}`, select: "alert_id,rule_code,evidence_id,occurred_at,status,owner_user_id,due_at", order: "occurred_at.desc", limit: 10 } })).data || [];
+    const openAlerts = alertsAll.filter((a) => ["confirmed", "pending_review", "supplement_data"].includes(String(a.status)));
+    const confirmed = alertsAll.filter((a) => String(a.status) === "confirmed");
+    const qrow = (await dbRequest("list_resource", "GET", "review_queue", { query: { gpsno: `eq.${sc.gpsno}`, as_of_date: `eq.${String(sc.as_of_date)}`, select: "queue_id,review_queue,confidence_level,action_deadline", limit: 1 } })).data?.[0] || null;
+    const courses = (await dbRequest("list_resource", "GET", "training_courses", { query: { content_status: "eq.approved", select: "course_id,title,completion_requirement", order: "course_id.asc", limit: 10 } })).data || [];
+    const ledg = (await dbRequest("list_resource", "GET", "deduction_ledger", { query: { gpsno: `eq.${sc.gpsno}`, select: "ledger_id,dimension,as_of_date", order: "as_of_date.desc", limit: 3 } })).data || [];
+    const tasks = (await dbRequest("list_resource", "GET", "training_tasks", { query: { driver_id: `eq.${String(sc.driver_id)}`, select: "task_id,status", order: "updated_at.desc", limit: 5 } })).data || [];
+    const low = String(sc.confidence_level) === "low";
+    const behaviorEvents = Number(sc.fatigue_distraction_event_count || 0) + Number(sc.driving_stability_event_count || 0) + Number(sc.road_rule_event_count || 0) + Number(sc.history_event_count || 0);
+    const scoreRef = "score:" + sc.score_id;
+    const commonBasis = [{ label: "近14天评分快照", table: "score_snapshots", record_id: sc.score_id, ref: scoreRef, note: `${sc.safety_score} · ${sc.risk_level} · 可信度 ${sc.confidence_level} · as_of ${sc.as_of_date} · ${sc.source_version}` }];
+    const cards = [
+      {
+        key: "verify", title: "先核验设备或数据",
+        basis: [...commonBasis, ...(qrow ? [{ label: "复核队列行", table: "review_queue", record_id: qrow.queue_id, ref: "queue:" + qrow.queue_id, note: `${qrow.review_queue} · 可信度 ${qrow.confidence_level}` }] : []), ...(ledg.length ? [{ label: "扣分台账（口径解释）", table: "deduction_ledger", record_id: String(ledg[0].ledger_id), ref: "ledger:" + String(ledg[0].ledger_id), note: "分摊用于核账非单事件因果" }] : [])],
+        plan: low ? "设备在线/数据覆盖/IMU 佐证核验（RM01 队列 + 需要时 RM03 核验向草稿问话）" : "常规数据覆盖抽查",
+        highlight: low,
+        missing: low && !qrow ? ["缺少当日队列行佐证"] : [],
+        todos: "本路径不新建业务记录；核验结论由人工回填案卷",
+        limits: "低可信度时行为扣减仅供参考；不外推概率变化",
+        operator: "safety_admin 人工执行核验并在案卷留痕",
+        actionable: true,
+        draft_entry: confirmed.length ? { kind: "rm3", label: `进入 RM03 核验向草稿（${confirmed[0].alert_id}）`, hash: `rm-alerts?alert_id=${encodeURIComponent(confirmed[0].alert_id)}` } : { kind: "queue", label: "无已确认案卷：去 RM01 队列按 gpsno 人工核验（不凭空开草稿）", hash: `rm-queue?gpsno=${encodeURIComponent(String(sc.gpsno))}` },
+      },
+      {
+        key: "communicate", title: "先人工沟通",
+        basis: [...commonBasis, ...(confirmed[0] ? [{ label: "关联案卷", table: "alerts", record_id: confirmed[0].alert_id, ref: "alert:" + confirmed[0].alert_id, note: `${confirmed[0].rule_code} · 证据 ${confirmed[0].evidence_id} · 事实日 ${confirmed[0].occurred_at}` }] : alertsAll.map((a) => ({ label: "案卷（非 open）", table: "alerts", record_id: String(a.status) === "closed" ? "" + String(a.alert_id) + "（closed）" : String(a.alert_id), ref: "alert:" + String(a.alert_id), note: `状态 ${a.status}` })).slice(0, 1))],
+        plan: confirmed.length ? "经 RM03 起草→人工确认发送本人沟通（当前对象有已确认案卷）" : "无可沟通案卷上下文",
+        highlight: false,
+        actionable: confirmed.length > 0,
+        disabled_reason: confirmed.length ? null : "存在案卷但无 confirmed 状态（closed/待核）→ 不凭空打开带告警上下文的 RM03 草稿；需先经 RM01/RM03 建立有效案卷",
+        missing: confirmed.length ? [] : ["无有效（confirmed）告警"],
+        todos: "确认后新增 interventions 一行（draft→sent）与本人站内通知",
+        limits: "沟通不改变评分/预测；发送前正文可编辑",
+        operator: "safety_admin 在 RM03 独立点击确认发送",
+        draft_entry: confirmed.length ? { kind: "rm3", label: `进入 RM03 可编辑草稿（${confirmed[0].alert_id}）`, hash: `rm-alerts?alert_id=${encodeURIComponent(confirmed[0].alert_id)}` } : null,
+      },
+      {
+        key: "training", title: "安排已审核课程",
+        basis: [...commonBasis, ...(courses[0] ? [{ label: "候选课程（已审核）", table: "training_courses", record_id: courses[0].course_id, ref: "course:" + courses[0].course_id, note: `${courses[0].title} · ${String(courses[0].completion_requirement || "").slice(0, 40)}` }] : []), ...(tasks[0] ? [{ label: "该司机既有任务（避免重复分配）", table: "training_tasks", record_id: tasks[0].task_id, ref: null, note: `状态 ${tasks[0].status}` }] : [])],
+        plan: "TR02 选已审核课程＋勾证据→人工确认分配（进入草稿不等于分配）",
+        highlight: false,
+        actionable: courses.length > 0 && behaviorEvents >= 1 && !low,
+        disabled_reason: courses.length === 0 ? "无 approved 课程——待团队审核课程不可正式分配" : low ? "低可信度对象：先核验通过再评估培训（不自动安排惩罚性课程）" : behaviorEvents < 1 ? "无已核实行为证据事件：培训分配缺少事实锚点" : null,
+        missing: low ? ["设备/数据核验先于培训"] : [],
+        todos: "确认后新增 training_tasks 一行 + 本人站内通知",
+        limits: "只引用 approved 版本；不宣称培训改善评分；行为事件数 " + behaviorEvents + "（fatigue/stability/road_rule/history 合计）",
+        operator: "safety_admin 在 TR02 独立点击“安全员确认分配”",
+        draft_entry: courses.length > 0 && !low && behaviorEvents >= 1 ? { kind: "tr2", label: "进入 TR02 可编辑草稿（携带本对象上下文）", hash: "tr-create" } : null,
+      },
+    ];
+    sendJson(response, 200, { data_status: "ok", mode: "preplan_readonly", title_tag: "操作预演，未写入", subject: { driver_id: sc.driver_id, gpsno: sc.gpsno, as_of_date: sc.as_of_date, source_version: sc.source_version }, facts_status: "AI 建议与已核实事实分列：basis 均为本会话授权查询的真实记录", cards, ai_note: "需要模型建议文字时用面板「让 AI 预演三路径」（走既有 action_preplan 工具与 ai.chat 审计，本页不另建调用链）" });
+  } catch (e) {
+    if (e instanceof HttpError) throw e;
+    sendJson(response, 200, { data_status: "query_failed", cards: [], note: "组装查询失败（不以空壳伪装预演完成）" });
+  }
+}
+
+// ===== R27 准备（未上线）：通知模板审核端点。表未迁移前全部路径优雅降级 migration_pending。
+async function probeTemplates() {
+  try { const r = await dbRequest("tpl_probe", "GET", "notification_templates", { query: { select: "template_id", limit: 1 } }); return Boolean(r.data); } catch { return false; }
+}
+const PLACEHOLDER_WHITELIST = ["event_date", "evidence_type", "review_note", "driver_id", "alert_id"];
+const TPL_FSM = { draft: ["pending_review"], pending_review: ["approved", "draft", "disabled"], approved: ["disabled"], disabled: [] };
+async function handleTemplatesAdmin(request, response, url, ctx, templateId) {
+  requireUser(ctx.principal, "manage.knowledge");
+  if (!(await probeTemplates())) return sendJson(response, 200, { ok: true, migration_pending: true, rows: [], latest: [], note: "迁移 005（notification_templates）尚未执行——待属主在平台数据库入口执行 scripts/contract/migrations/005_notification_templates.up.sql 后本页方可用；当前零写入零影响" });
+  const user = requireUser(ctx.principal, "manage.knowledge");
+  const body = await readBody(request);
+  const action = String(body.action || "");
+  if (request.method === "GET" && !templateId) {
+    const q = { select: "template_id,template_key,version,title,body,allowed_placeholders,scene,applicable_role,review_status,status_version,source_note,created_by,created_at,reviewed_by,reviewed_at,review_note", order: "template_key.asc,version.desc", limit: 200 };
+    if (["draft", "pending_review", "approved", "disabled"].includes(String(url.searchParams.get("review_status") || ""))) q.review_status = `eq.${url.searchParams.get("review_status")}`;
+    if (url.searchParams.get("scene")) q.scene = `eq.${String(url.searchParams.get("scene")).slice(0, 30)}`;
+    const rows = await listRows("tpl_list", "notification_templates", { query: q });
+    const latestMap = new Map(); for (const r of rows) { const cur = latestMap.get(r.template_key); if (!cur || Number(r.version) > Number(cur.version)) latestMap.set(r.template_key, r); }
+    const latest = [...latestMap.values()];
+    sendJson(response, 200, { ok: true, rows, latest, officially_referenceable: latest.filter((r) => r.review_status === "approved").map((r) => r.template_id), whitelist: PLACEHOLDER_WHITELIST });
+    return;
+  }
+  if (request.method === "POST" && !templateId) {
+    const key = String(body.template_key || "").trim().toLowerCase().slice(0, 48);
+    const title = String(body.title || "").slice(0, 160); const tplBody = String(body.body || "").slice(0, 4000);
+    if (!/^[a-z0-9_.-]{3,48}$/.test(key) || !title.trim() || !tplBody.trim()) throw new HttpError(400, "key_title_body_required");
+    const allowed = String(body.allowed_placeholders || "event_date,evidence_type,review_note").split(",").map((s) => s.trim()).filter(Boolean);
+    if (allowed.some((a) => !PLACEHOLDER_WHITELIST.includes(a))) throw new HttpError(409, "placeholder_not_whitelisted");
+    const used = [...tplBody.matchAll(/\{\{\s*([a-z_]+)\s*\}\}/g)].map((m) => m[1]);
+    if (used.some((u) => !allowed.includes(u))) throw new HttpError(409, "body_uses_disallowed_placeholder");
+    const at = nowIso();
+    const exist = await listRows("tpl_list", "notification_templates", { template_key: `eq.${key}`, select: "version", order: "version.desc", limit: 1 });
+    const version = Number(exist[0]?.version || 0) + 1;
+    const id = newId("nt");
+    await dbRequest("tpl_insert", "POST", "notification_templates", { body: [{ template_id: id, template_key: key, version, title, body: tplBody, allowed_placeholders: allowed.join(","), scene: ["rm3_draft", "task_assigned", "review_answer"].includes(body.scene) ? body.scene : "rm3_draft", applicable_role: ["driver", "safety_admin", "all"].includes(body.applicable_role) ? body.applicable_role : "driver", review_status: "draft", status_version: 0, source_note: String(body.source_note || "").slice(0, 300) || null, created_by: user.user_id, created_at: at, updated_at: at }], headers: { Prefer: "return=minimal" } });
+    const auditId = await appendAudit(ctx.principal, "template.create", "notification_template", `${key}:${version}`, null, "draft", ctx.requestId, [], { template_id: id });
+    sendJson(response, 201, { ok: true, template_id: id, template_key: key, version, review_status: "draft", audit_id: auditId, note: "新建模板初始 draft，永不自动批准；改已审核正文一律 new_version 新草稿，不静默覆盖" });
+    return;
+  }
+  const keyQ = String(templateId || "");
+  const rowsAll = await listRows("tpl_list", "notification_templates", { template_key: `eq.${keyQ.split(":")[0]}`, version: keyQ.includes(":") ? `eq.${keyQ.split(":")[1]}` : undefined, select: "template_id,template_key,version,title,body,review_status,status_version,created_by", order: "version.desc", limit: 1 });
+  const row = rowsAll[0]; if (!row) throw new HttpError(404, "not_found");
+  const at2 = nowIso(); let patch = null; let au = null;
+  if (action === "submit" && row.review_status === "draft") { patch = { review_status: "pending_review", status_version: Number(row.status_version || 0) + 1 }; au = ["draft", "pending_review", "template.submit"]; }
+  else if (action === "withdraw" && row.review_status === "pending_review") { patch = { review_status: "draft", status_version: Number(row.status_version || 0) + 1 }; au = ["pending_review", "draft", "template.withdraw"]; }
+  else if (action === "approve" && row.review_status === "pending_review") {
+    const sameActor = String(row.created_by) === String(user.user_id);
+    if (sameActor && body.confirm_same_actor !== true) throw new HttpError(409, "self_review_requires_explicit_confirm");
+    patch = { review_status: "approved", reviewed_by: user.user_id, reviewed_at: at2, status_version: Number(row.status_version || 0) + 1 }; au = ["pending_review", "approved", "template.approve"];
+    if (sameActor) patch.review_note = "同作者二次确认批准（留痕）";
+  }
+  else if (action === "disable" && TPL_FSM[row.review_status]?.includes("disabled")) { patch = { review_status: "disabled", reviewed_by: user.user_id, reviewed_at: at2, status_version: Number(row.status_version || 0) + 1 }; au = [row.review_status, "disabled", "template.disable"]; }
+  else if (action === "edit" && row.review_status === "draft") {
+    const b2 = String(body.body ?? row.body).slice(0, 4000); const al = String(row.allowed_placeholders || "").split(",");
+    if ([...b2.matchAll(/\{\{\s*([a-z_]+)\s*\}\}/g)].some((m) => !al.includes(m[1]))) throw new HttpError(409, "body_uses_disallowed_placeholder");
+    patch = { body: b2, title: body.title !== undefined ? String(body.title).slice(0, 160) : row.title, updated_at: at2 }; au = ["draft", "draft", "template.edit"];
+  }
+  else if (action === "new_version" && ["approved", "disabled"].includes(row.review_status)) {
+    const b2 = String(body.body || "").slice(0, 4000); if (!b2.trim()) throw new HttpError(400, "body_required");
+    const ex = await listRows("tpl_list", "notification_templates", { template_key: `eq.${row.template_key}`, select: "version", order: "version.desc", limit: 1 });
+    const vnext = Number(ex[0]?.version || row.version) + 1; const id2 = newId("nt");
+    await dbRequest("tpl_insert", "POST", "notification_templates", { body: [{ template_id: id2, template_key: row.template_key, version: vnext, title: String(body.title || row.title).slice(0, 160), body: b2, allowed_placeholders: row.allowed_placeholders, scene: "rm3_draft", applicable_role: "driver", review_status: "draft", status_version: 0, source_note: `基于 ${row.template_key}:${row.version} 修订`, created_by: user.user_id, created_at: at2, updated_at: at2 }], headers: { Prefer: "return=minimal" } });
+    const a3 = await appendAudit(ctx.principal, "template.new_version", "notification_template", `${row.template_key}:${vnext}`, row.review_status, "draft", ctx.requestId, [], { base_version: row.version });
+    sendJson(response, 200, { ok: true, template_id: id2, version: vnext, review_status: "draft", audit_id: a3 }); return;
+  }
+  if (!patch) throw new HttpError(409, `template_action_${action || "none"}_invalid_from_${row.review_status}`);
+  { const pq = { template_id: `eq.${row.template_id}`, review_status: `eq.${row.review_status}` };
+    await dbRequest("tpl_patch", "PATCH", "notification_templates", { query: pq, body: { ...patch, updated_at: at2 }, headers: { Prefer: "return=minimal" } }); }
+  const auditId = await appendAudit(ctx.principal, au[2], "notification_template", `${row.template_key}:${row.version}`, au[0], au[1], ctx.requestId);
+  sendJson(response, 200, { ok: true, template_key: row.template_key, version: row.version, old_status: au[0], new_status: au[1], audit_id: auditId });
+}
+async function handleTemplatePreview(request, response, url, ctx) {
+  requireUser(ctx.principal, "manage.knowledge");
+  if (!(await probeTemplates())) return sendJson(response, 200, { ok: true, migration_pending: true, rendered: null, note: "模板表未迁移，预览不可用（不伪造渲染结果）" });
+  const tid = cleanQuery(url.searchParams.get("template_id"), 80); const drv = cleanQuery(url.searchParams.get("driver_id"), 60); const gps = cleanQuery(url.searchParams.get("gpsno"), 40);
+  if (!tid || (!drv && !gps)) throw new HttpError(400, "bad_request");
+  await assertInScope(ctx.principal, drv ? { driverId: drv } : { gpsno: gps });
+  const row = (await listRows("tpl_list", "notification_templates", { select: "template_id,template_key,version,body,review_status", template_id: `eq.${tid}`, limit: 1 }))[0];
+  if (!row) throw new HttpError(404, "not_found");
+  if (row.review_status !== "approved") return sendJson(response, 200, { ok: false, error: "template_not_approved", review_status: row.review_status, rendered: null, note: `状态 ${row.review_status} 不可用于正式发送（预览仅供审阅）` });
+  const facts = {}; const missing = [];
+  const sc = (await listRows("tpl_list", "score_snapshots", { driver_id: drv ? `eq.${drv}` : undefined, gpsno: gps ? `eq.${gps}` : undefined, select: "gpsno,as_of_date,source_version", order: "as_of_date.desc", limit: 1 }))[0];
+  const al = sc ? (await listRows("tpl_list", "alerts", { gpsno: `eq.${sc.gpsno}`, select: "alert_id,rule_code,occurred_at", order: "occurred_at.desc", limit: 1 }))[0] : null;
+  if (al) { facts.event_date = String(al.occurred_at || "").slice(0, 10); facts.evidence_type = al.rule_code; facts.alert_id = al.alert_id; } else { missing.push("event_date", "evidence_type", "alert_id"); }
+  const iv = al ? (await listRows("tpl_list", "interventions", { alert_id: `eq.${al.alert_id}`, select: "reply_text,replied_at", order: "updated_at.desc", limit: 1 }))[0] : null;
+  if (iv && iv.reply_text) facts.review_note = "（引用司机本人回复，审阅意见需人工撰写，不由模板决定）"; else missing.push("review_note");
+  const alMap = (await listRows("tpl_list", "app_users", { driver_id: `eq.${drv || (sc ? "" : "")}`, binding_verified: "eq.true", account_status: "eq.active", select: "user_id", limit: 1 }))[0];
+  if (!drv && sc) { const dv = (await listRows("tpl_list", "drivers", { gpsno: `eq.${sc.gpsno}`, select: "driver_id", limit: 1 }))[0]; if (dv) facts.driver_id = dv.driver_id; else missing.push("driver_id"); } else facts.driver_id = drv;
+  const tplRow = row;
+  const rendered = String(tplRow.body).replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (_m, name) => (facts[name] !== undefined && facts[name] !== null ? String(facts[name]) : `（待核：${name}）`));
+  sendJson(response, 200, { ok: true, template_id: tplRow.template_id, version: Number(tplRow.version), rendered, missing_facts: [...new Set(missing)], bound_account: alMap ? true : false, delivered_label: alMap ? "站内可达（已绑定）" : "无已核实绑定：发送后也不会显示「已送达」", note: "预览只读；写入仍需 RM03 人工确认，正文进入草稿后可编辑" });
+}
+
+async function handleTaskSummary(request, response, url, ctx) {
+  const user = requireUser(ctx.principal, "review.training_feedback");
+  const body = await readBody(request);
+  const taskId = String(body.task_id || "").slice(0, 64);
+  if (!taskId) throw new HttpError(400, "bad_request");
+  if (!aiAvailable()) { try { await appendAudit(ctx.principal, "ai.task_summary", "ai_call", taskId, null, "provider_not_configured", ctx.requestId); } catch {} return sendJson(response, 200, { available: false, reason: "ai_provider_not_configured", note: "AI 摘要暂不可用（运行时模型未配置）；前三部分与人工审核照常可用" }); }
+  const cached = summaryCache.get(taskId);
+  if (cached && Date.now() - cached.at < 600000) { sendJson(response, 200, { ...cached.data, cached: true }); return; }
+  let task = null; const taskId2 = taskId;
+  try {
+    task = (await dbRequest("get_task_row", "GET", "training_tasks", { query: { task_id: `eq.${taskId}`, select: "task_id,driver_id,alert_id,course_id,goal,mandatory,due_at,status,learning_record,submitted_at", limit: 1 } })).data?.[0];
+    if (!task) { try { await appendAudit(ctx.principal, "ai.task_summary", "ai_call", taskId, null, "not_found", ctx.requestId); } catch {} throw new HttpError(404, "not_found"); }
+    if (!["submitted", "returned"].includes(String(task.status))) { try { await appendAudit(ctx.principal, "ai.task_summary", "ai_call", taskId, String(task.status), "rejected_state", ctx.requestId); } catch {} throw new HttpError(409, "summary_requires_submitted"); }
+    await assertInScope(ctx.principal, { driverId: String(task.driver_id) });
+    const facts = [];
+    if (task.learning_record) facts.push({ ref: "task:" + task.task_id, label: "司机原文（提交于 " + String(task.submitted_at || "").slice(0, 16) + "）", text: String(task.learning_record).slice(0, 1200) });
+    else facts.push({ ref: "task:" + task.task_id, label: "司机原文", text: "（未取得：该任务尚无提交文本）" });
+    const cs = (await dbRequest("ts_course", "GET", "training_courses", { query: { course_id: `eq.${task.course_id}`, select: "course_id,title,completion_requirement,content_status,version_no", limit: 1 } })).data?.[0] || null;
+    if (cs) facts.push({ ref: "course:" + cs.course_id, label: `课程《${cs.title}》分配版本记录 v${cs.version_no}（当前状态 ${cs.content_status}）`, text: "完成条件：" + String(cs.completion_requirement || "—").slice(0, 300) });
+    else facts.push({ ref: "course:" + task.course_id, label: "课程", text: "（未取得：课程记录不可读）" });
+    if (task.alert_id) {
+      const al = (await dbRequest("get_alert_row", "GET", "alerts", { query: { alert_id: `eq.${task.alert_id}`, select: "alert_id,gpsno,evidence_id,rule_code,status,occurred_at", limit: 1 } })).data?.[0];
+      if (al) {
+        facts.push({ ref: "alert:" + al.alert_id, label: `关联案卷 ${al.rule_code}（当前 ${al.status}，事实日 ${al.occurred_at}）`, text: "证据记录 " + String(al.evidence_id || "—") });
+        const sc = (await dbRequest("ts_facts", "GET", "score_snapshots", { query: { gpsno: `eq.${al.gpsno}`, select: "score_id,safety_score,risk_level,confidence_level,as_of_date,source_version", order: "as_of_date.desc", limit: 1 } })).data?.[0];
+        if (sc) facts.push({ ref: "score:" + sc.score_id, label: `关联评分（截止 ${sc.as_of_date}）`, text: `safety_score=${sc.safety_score} 等级=${sc.risk_level} 可信度=${sc.confidence_level} 来源=${sc.source_version}` });
+      } else facts.push({ ref: "alert-missing:" + task.alert_id, label: "关联案卷", text: "（未取得：案卷记录当前不可读）" });
+    } else facts.push({ ref: "task:" + task.task_id, label: "关联案卷/证据", text: "（未取得：任务未关联 alert_id——不臆造证据）" });
+    const allowed = new Set(facts.map((f) => f.ref));
+    const prompt = [
+      "你是培训反馈审核辅助员（只读）。基于且仅基于给定事实，输出对这条司机提交的【完成条件逐项核查草稿】。规则：",
+      "1) 每个判断附 fact（指出引用了事实的哪一处/缺什么）与 ref（只能取自给定 ref 列表原样值）；",
+      "2) 不得判定通过/退回；不得宣称培训改善评分或消除风险；state 只能取 覆盖/未见/无法判断；",
+      "3) 严格输出 JSON：",
+      '{"items":[{"judgment":"string","state":"覆盖|未见|无法判断","fact":"string","ref":"string"}],"limitations":["string"]}',
+      "事实：" + JSON.stringify({ task_id: task.task_id, goal: task.goal, mandatory: task.mandatory, due_at: task.due_at, status: task.status, facts: facts.map((f) => ({ ref: f.ref, label: f.label, text: f.text })) }),
+    ].join("\n");
+    const ai = await aiUpstreamOnce({ model: aiModel(), messages: [{ role: "system", content: "只输出一个 JSON 对象，不输出任何其它文字。" }, { role: "user", content: prompt.slice(0, 12000) }], temperature: 0.2, max_tokens: 1600, enable_thinking: false }, 150000);
+    let parsed = null;
+    try { const s = String((ai.choices && ai.choices[0] && ai.choices[0].message && ai.choices[0].message.content) || ai.content || ""); parsed = JSON.parse(s.slice(s.indexOf("{"), s.lastIndexOf("}") + 1)); } catch { parsed = null; }
+    if (!parsed || !Array.isArray(parsed.items)) { try { await appendAudit(ctx.principal, "ai.task_summary", "ai_call", taskId, null, "malformed_model_output", ctx.requestId); } catch {} return sendJson(response, 200, { available: false, reason: "malformed_model_output", note: "模型输出不合结构（已留审计，未落业务表）；前三部分与人工审核照常可用" }); }
+    const items = parsed.items.slice(0, 12).map((x) => ({ judgment: String(x.judgment || "").slice(0, 300), state: String(x.state || "无法判断"), fact: String(x.fact || "").slice(0, 400), ref: String(x.ref || ""), ref_ok: allowed.has(String(x.ref || "")) }));
+    const data = {
+      available: true, task_id: task.task_id, status: task.status,
+      course: cs ? { course_id: cs.course_id, title: cs.title, version_no: cs.version_no, current_status: cs.content_status, note: cs.content_status === "disabled" ? "课程现已停用：本卡片仍展示任务分配所指向的历史版本记录，并如实标当前状态" : null } : null,
+      facts: facts.map((f) => ({ ref: f.ref, label: f.label, missing: /（未取得/.test(f.text) })),
+      items, limitations: ["AI 辅助草稿：不自动判定通过/退回，不宣称评分改善或风险消除；缺失事实不由模型补齐", ...(Array.isArray(parsed.limitations) ? parsed.limitations.slice(0, 3).map(String) : [])],
+      model: aiModel(), generated_at: nowIso(), cached: false, audit_note: "调用已审计（角色/工具/引用ID/结果状态；不保留完整个人原文）",
+    };
+    summaryCache.set(taskId, { at: Date.now(), data });
+    try { await appendAudit(ctx.principal, "ai.task_summary", "ai_call", taskId, null, "answered_with_facts", ctx.requestId, items.filter((i) => i.ref_ok).map((i) => i.ref).slice(0, 8), { kind: "task_summary", model: aiModel(), items: items.length, refs_ok: items.filter((i) => i.ref_ok).length, refs_bad: items.filter((i) => !i.ref_ok).length, no_full_text_stored: true }); } catch {}
+    sendJson(response, 200, data);
+  } catch (e) {
+    if (e instanceof HttpError && e.status !== 502) throw e;
+    try { await appendAudit(ctx.principal, "ai.task_summary", "ai_call", taskId2, null, /502|abort|timeout|upstream/i.test(String((e && e.message) || "")) ? "upstream_error" : "chat_internal_error", ctx.requestId, null, { err: sanitizeText(String((e && e.message) || e)).slice(0, 60) }); } catch {}
+    if (e instanceof HttpError) throw e;
+    return sendJson(response, 200, { available: false, reason: "ai_upstream_unavailable", note: "AI 摘要暂不可用（上游错误/超时，已留审计）；人工四部分审核照常" });
+  }
 }
 
 async function handleTaskStart(request, response, url, ctx, taskId) {
@@ -1516,7 +1990,9 @@ async function handleRRAdvance(request, response, url, ctx, id) {
   let notif = null;
   if (next === "answered" || next === "closed") {
     const acct = await dbRequest("get_binding_target", "GET", "app_users", { query: { driver_id: `eq.${row.driver_id}`, account_status: "eq.active", select: "user_id", limit: 1 } });
-    if (acct.data?.[0] && typeof notify === "function") notif = await notify(acct.data[0].user_id, "rr_answered", id, `复核申请 ${id} 状态：${next}。答复见“复核申请”页（站内演示通知）。`, `notif:rra:${id}:${next}`, "review_request", "复核申请有进展");
+    { let rrMsg = `复核申请 ${id} 状态：${next}。答复见“复核申请”页（站内演示通知）。`;
+      if (body.template_ref) { try { const tr = await resolveTemplateForSend(body.template_ref, "review_answer", { driver_id: String(row.driver_id || ""), alert_id: String(row.alert_id || ""), event_date: null, evidence_type: String(row.reason_code || ""), review_note: String(body.response_note || "").slice(0, 300) }); rrMsg = tr.body + "\n（模板 " + tr.template_key + ":v" + tr.version + "；站内演示通知）"; } catch (e) { if (String(e && e.message) === "template_not_usable") throw new HttpError(409, "template_not_approved_or_disabled"); throw e; } }
+      if (acct.data?.[0] && typeof notify === "function") notif = await notify(acct.data[0].user_id, "rr_answered", id, rrMsg, `notif:rra:${id}:${next}`, "review_request", "复核申请有进展"); }
   }
   const auditId = await appendAudit(ctx.principal, `review_request.${next}`, "review_request", id, row.status, next, ctx.requestId);
   sendJson(response, 200, { ok: true, request_id: id, old_status: row.status, new_status: next, reviewer_id: user.user_id, at, audit_id: auditId, driver_notified: notif, note: "源数据问题→仅 awaiting_data_owner 并注明转数据负责人；本接口无评分写路径" });
@@ -1562,6 +2038,7 @@ async function handleAdminUserCreate(request, response, url, ctx) {
   const username = String(body.username || "").trim().toLowerCase();
   const role = String(body.role || "");
   if (!/^[a-z0-9_.-]{3,32}$/.test(username) || !["safety_admin", "team_leader", "driver"].includes(role)) throw new HttpError(400, "bad_request");
+  if (String(ctx.principal.user.fleet_scope || "*") !== "*" && role === "safety_admin") throw new HttpError(403, "cannot_grant_admin_in_scope"); // 受限管理员不能再铸造管理员
   const exist = await dbRequest("get_user_by_name", "GET", "app_users", { query: { username: `eq.${username}`, select: "user_id", limit: 1 } });
   if (exist.data?.length) throw new HttpError(409, "username_exists");
   const pw = randomBytes(9).toString("base64url");
@@ -1574,9 +2051,45 @@ async function handleAdminUserCreate(request, response, url, ctx) {
     headers: { Prefer: "return=minimal" },
   });
   const auditId = await appendAudit(ctx.principal, "account.create", "app_user", userId, null, "active", ctx.requestId);
-  sendJson(response, 201, { ok: true, user_id: userId, username, role, initial_password: pw, audit_id: auditId, note: "初始口令仅返回一次，请让使用者登录后自改（SM01 改密在后续轮次）" });
+  sendJson(response, 201, { ok: true, user_id: userId, username, role, ...(body.reveal_password === true ? { initial_password: pw } : { initial_password: "(redacted——需一次性查看请传 reveal_password=true，本演示页面不渲染口令)" }), audit_id: auditId, note: "初始口令仅返回一次，请让使用者登录后自改（SM01 改密在后续轮次）" });
 }
 
+async function assertAccountScope(principal, target) {
+  const u = principal.user; const scope = String(u.fleet_scope || "*");
+  if (scope === "*" || u.role !== "safety_admin") return;
+  if (target.user_id === u.user_id) return;
+  const s = await fleetScopeSets(scope);
+  const mine = target.role !== "safety_admin" && ((target.driver_id && s.drv.includes(String(target.driver_id))) || String(target.fleet_scope || "") === scope);
+  if (!mine) { try { await appendAudit(principal, "account.scope_refused", "app_user", String(target.user_id), null, "refused_scope", principal.requestId); } catch {} throw new HttpError(403, "out_of_fleet_scope"); }
+}
+async function handleAdminUserEdit(request, response, url, ctx, userId) {
+  requireUser(ctx.principal, "manage.accounts");
+  const body = await readBody(request);
+  const tu = await dbRequest("get_user_by_id", "GET", "app_users", { query: { user_id: `eq.${userId}`, select: "user_id,username,role,display_name,fleet_scope,driver_id,binding_verified,account_status", limit: 1 } });
+  const tr = tu.data?.[0]; if (!tr) throw new HttpError(404, "not_found");
+  await assertAccountScope(ctx.principal, tr);
+  const patch = {}; const changed = {};
+  if (body.display_name !== undefined) { const dn = String(body.display_name).slice(0, 60); if (!dn.trim()) throw new HttpError(400, "display_name_required"); patch.display_name = dn; changed.display_name = [tr.display_name, dn]; }
+  if (body.fleet_scope !== undefined) { const fs = String(body.fleet_scope).trim(); if (!/^[\w.-]{1,40}$/.test(fs) && fs !== "*") throw new HttpError(400, "bad_fleet_scope");
+    if (fs !== "*") { const fl = await dbRequest("drv_exists", "GET", "drivers", { query: { fleet_id: `eq.${fs}`, select: "fleet_id", limit: 1 } }); if (!fl.data?.length) throw new HttpError(409, "unknown_fleet"); }
+    patch.fleet_scope = fs; changed.fleet_scope = [tr.fleet_scope, fs]; }
+  if (body.driver_id !== undefined) {
+    const dv = String(body.driver_id).trim();
+    if (dv) {
+      if (!tr.binding_verified) throw new HttpError(409, "unverified_identity_cannot_bind");
+      const dr = await dbRequest("drv_exists", "GET", "drivers", { query: { driver_id: `eq.${dv}`, select: "driver_id,gpsno", limit: 1 } });
+      if (!dr.data?.length) throw new HttpError(409, "driver_not_found");
+      const act = await dbRequest("bind_active_check", "GET", "app_users", { query: { driver_id: `eq.${dv}`, account_status: `eq.active`, select: "user_id", limit: 5 } });
+      const clash = (act.data || []).filter((x) => x.user_id !== userId);
+      if (clash.length) throw new HttpError(409, "driver_already_bound_active");
+    }
+    patch.driver_id = dv || null; changed.driver_id = [tr.driver_id, dv || null]; }
+  if (body.clear_binding === true) { patch.driver_id = null; patch.binding_verified = false; changed.driver_id = [tr.driver_id, null]; changed.binding_verified = [tr.binding_verified, false]; }
+  if (!Object.keys(patch).length) throw new HttpError(400, "no_fields");
+  await dbRequest("user_edit", "PATCH", "app_users", { query: { user_id: `eq.${userId}` }, body: { ...patch, updated_at: nowIso() }, headers: { Prefer: "return=minimal" } });
+  const auditId = await appendAudit(ctx.principal, "account.edit", "app_user", userId, tr.account_status, tr.account_status, ctx.requestId, null, { changed, actor_scope: ctx.principal.user.fleet_scope || "*" });
+  sendJson(response, 200, { ok: true, user_id: userId, changed, audit_id: auditId, note: "口令类字段永不经此路径（USER_PUBLIC_COLS 无 password_hash）" });
+}
 async function handleAdminUserStatus(request, response, url, ctx, userId) {
   requireUser(ctx.principal);
   const body = await readBody(request);
@@ -1585,6 +2098,7 @@ async function handleAdminUserStatus(request, response, url, ctx, userId) {
   const tu = await dbRequest("get_binding_user", "GET", "app_users", { query: { user_id: `eq.${userId}`, select: "user_id,account_status,username", limit: 1 } });
   const tr = tu.data?.[0];
   if (!tr) throw new HttpError(404, "not_found");
+  await assertAccountScope(ctx.principal, tr);
   if (tr.user_id === ctx.principal.user.user_id && next === "disabled") throw new HttpError(409, "cannot_disable_self");
   await dbRequest("patch_binding_fields", "PATCH", "app_users", { query: { user_id: `eq.${userId}` }, body: { account_status: next, updated_at: nowIso() }, headers: { Prefer: "return=minimal" } });
   await dbRequest("delete_session", "DELETE", "app_sessions", { query: { user_id: `eq.${userId}` } }).catch(() => {}); // 停用即踢会话
@@ -1933,7 +2447,8 @@ function cleanQuery(raw, max = 40) {
   return safe;
 }
 async function listRows(op, table, query) {
-  const q = query && query.query ? query.query : query;
+  const q0 = query && query.query ? query.query : query;
+  const q = Object.fromEntries(Object.entries(q0).filter(([, v]) => v !== undefined && v !== null));
   const { data } = await dbRequest(op, "GET", table, { query: q });
   return data || [];
 }
@@ -1987,7 +2502,7 @@ async function handleGlobalSearch(request, response, url, ctx) {
   } else if (myBound) {
     const rd = await countList("search_read", "drivers", { select: "driver_id,gpsno,display_name,fleet_id,identity_status", driver_id: `eq.${myDriver}`, or: `(driver_id.${like},gpsno.${like},display_name.${like})`, order: "gpsno.asc", limit: 8 }, 0, 7);
     groups.push({ type: "drivers", total: rd.total, items: rd.rows.map((x) => ({ record_id: `${x.driver_id}:${x.gpsno}`, title: `${x.driver_id} · 车 ${x.gpsno}`, summary: "本人车辆", route: `#/ev-fleet?driver_id=${encodeURIComponent(x.driver_id)}` })) });
-    const ra = await countList("search_read", "alerts", { select: "alert_id,gpsno,rule_code,status,occurred_at", driver_id: `eq.${myDriver}`, or: `(alert_id.${like},gpsno.${like},rule_code.${like})`, order: "occurred_at.desc", limit: 8 }, 0, 7);
+    const ra = await countList("search_read", "alerts", { select: "alert_id,gpsno,driver_id,rule_code,status,occurred_at", driver_id: `eq.${myDriver}`, or: `(alert_id.${like},gpsno.${like},driver_id.${like},rule_code.${like})`, order: "occurred_at.desc", limit: 8 }, 0, 7);
     groups.push({ type: "alerts", total: ra.total, items: ra.rows.map((x) => ({ record_id: x.alert_id, title: `案卷 ${x.alert_id} · ${x.rule_code}`, summary: `车 ${x.gpsno} · ${x.status}`, route: `#/rm-alerts?alert_id=${encodeURIComponent(x.alert_id)}` })) });
     const rt = await countList("search_read", "training_tasks", { select: "task_id,course_id,goal,status,due_at", driver_id: `eq.${myDriver}`, or: `(task_id.${like},course_id.${like},goal.${like})`, order: "updated_at.desc", limit: 8 }, 0, 7);
     groups.push({ type: "training_tasks", total: rt.total, items: rt.rows.map((x) => ({ record_id: x.task_id, title: `培训任务 ${x.task_id}`, summary: `${x.course_id} · ${x.status}${x.due_at ? " · 截止 " + x.due_at : ""}`, route: `#/?task_id=${encodeURIComponent(x.task_id)}` })) });
@@ -1997,6 +2512,101 @@ async function handleGlobalSearch(request, response, url, ctx) {
   sendJson(response, 200, { ok: true, q, groups, visible_types: groups.map((g) => g.type), note: user.role === "driver" && !myBound ? "未核实司机绑定：不返回个人对象与计数" : "结果均按当前会话授权过滤；点击目标路由后再验权" });
 }
 const ERD_STATUS = { draft: ["pending_review", "archived"], pending_review: ["draft", "archived"], archived: [] };
+async function safeAuditWhere(url) {
+  const w = { select: "audit_id,actor_id,actor_role,action,entity_type,entity_id,old_status,new_status,request_id,occurred_at", order: "occurred_at.desc" };
+  const actor = String(url.searchParams.get("actor") || "").trim().slice(0, 64);
+  const eid = String(url.searchParams.get("entity_id") || "").trim().slice(0, 80);
+  const etype = String(url.searchParams.get("entity_type") || "").trim().slice(0, 40);
+  const ap = String(url.searchParams.get("action_prefix") || "").trim().toLowerCase();
+  const from = String(url.searchParams.get("from") || "").trim();
+  const to = String(url.searchParams.get("to") || "").trim();
+  if (actor) w.actor_id = `eq.${actor}`;
+  if (eid) w.entity_id = `eq.${eid}`;
+  if (etype && /^[\w.-]{1,40}$/.test(etype)) w.entity_type = `eq.${etype}`;
+  if (ap && /^[a-z][a-z_.]{1,30}$/.test(ap)) w.action = `like.${ap}%`;
+  if (/^[\dT:.Z-]{4,40}$/.test(from)) w.occurred_at = `${w.occurred_at ? w.occurred_at + "," : ""}gte.${from}`;
+  if (/^[\dT:.Z-]{4,40}$/.test(to)) w.occurred_at = `${w.occurred_at || ""}${w.occurred_at ? "," : ""}lte.${to}`;
+  return w;
+}
+async function queryAudits(url, limit, offset) {
+  const query = await safeAuditWhere(url);
+  query.limit = limit; query.offset = offset;
+  const r = await dbRequest("audits_q", "GET", "audit_logs", { query, headers: { Prefer: "count=exact" } });
+  return { rows: r.data || [], total: parseCount(r.rangeHeader) ?? (r.data ? r.data.length : 0) };
+}
+async function handleAuditConsole(request, response, url, ctx) {
+  requireUser(ctx.principal, "view.audit");
+  const fmt = String(url.searchParams.get("format") || "");
+  const limit = Math.min(Number(url.searchParams.get("limit")) || 25, fmt === "csv" ? 500 : 100);
+  const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
+  const { rows, total } = await queryAudits(url, limit, offset);
+  if (fmt === "csv") {
+    const head = "audit_id,occurred_at,actor_role,actor_id,action,entity_type,entity_id,old_status,new_status,request_id";
+    const body = rows.map((x) => [x.audit_id, x.occurred_at, x.actor_role, x.actor_id, x.action, x.entity_type, x.entity_id, x.old_status ?? "", x.new_status ?? "", x.request_id ?? ""].join(",")).join("\n");
+    response.writeHead(200, { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="audit_${Date.now()}.csv"` });
+    response.end("\ufeff" + head + "\n" + body);
+    return;
+  }
+  sendJson(response, 200, { ok: true, rows, total, limit, offset, note: "服务端过滤+分页+计数；不含 detail 正文与任何口令字段" });
+}
+async function handleAuditDetail(request, response, url, ctx, auditId) {
+  requireUser(ctx.principal, "view.audit");
+  const { data } = await dbRequest("audits_get", "GET", "audit_logs", { query: { audit_id: `eq.${auditId}`, limit: 1 } });
+  const row = data?.[0]; if (!row) throw new HttpError(404, "not_found");
+  let meta = null;
+  try { const d = JSON.parse(row.detail_json || "null"); if (d && typeof d === "object") meta = Object.fromEntries(Object.entries(d).map(([k, v]) => [k, /pw|password|token|answer|text|content|body/i.test(k) ? "(redacted)" : typeof v === "object" ? JSON.stringify(v).slice(0, 120) : String(v).slice(0, 120)])); } catch {}
+  const { detail_json, evidence_refs, ...safe } = row;
+  sendJson(response, 200, { ok: true, audit: safe, evidence_refs: (() => { try { return JSON.parse(evidence_refs || "[]"); } catch { return []; } })(), detail_meta: meta ?? null, redaction_note: "口令/完整问答/详情正文永不返回（写入时即为摘要）" });
+}
+async function handleOpsList(request, response, url, ctx) {
+  requireUser(ctx.principal);
+  if (ctx.principal.user.role === "driver") throw new HttpError(403, "forbidden");
+  const rows = await listRows("ops_list", "operation_config", { select: "config_id,value,unit,config_version,updated_at", order: "config_id.asc", limit: 30 });
+  sendJson(response, 200, { ok: true, rows });
+}
+async function handleCoursesBoard(request, response, url, ctx) {
+  requireUser(ctx.principal);
+  if (ctx.principal.user.role === "driver") throw new HttpError(403, "forbidden");
+  const rows = await listRows("course_list", "training_courses", { select: "course_id,title,dimension,content,completion_requirement,content_status,version_no,source_version,updated_at", order: "course_id.asc", limit: 40 });
+  const au = await dbRequest("audits_q", "GET", "audit_logs", { query: { entity_type: "eq.training_course", select: "audit_id,actor_id,actor_role,action,entity_id,old_status,new_status,occurred_at", order: "occurred_at.asc", limit: 400 } });
+  const byCourse = {};
+  for (const a of au.data || []) { (byCourse[a.entity_id] ||= []).push(a); }
+  const merged = rows.map((c) => {
+    const ev = byCourse[c.course_id] || [];
+    const created = ev.find(x => ["course.create", "import.upsert"].includes(x.action));
+    const lastReview = [...ev].reverse().find(x => x.new_status === "approved" || x.new_status === "disabled");
+    return { ...c, authored_by: created?.actor_id || "导入基线", authored_at: created?.occurred_at || null, reviewed_by: lastReview?.actor_id || null, reviewed_at: lastReview?.occurred_at || null, review_trail: ev.map(x => ({ action: x.action, from: x.old_status, to: x.new_status, by: x.actor_id, at: x.occurred_at, audit_id: x.audit_id })) };
+  });
+  sendJson(response, 200, { ok: true, courses: merged, note: "作者/审核人/审核时间由 audit_logs 合成（training_courses 无该列，平台无 DDL 通道——用既有内容审核结构补齐，课程文本零丢失）" });
+}
+async function handleCourseDraft(request, response, url, ctx) {
+  const user = requireUser(ctx.principal, "review.content");
+  const body = await readBody(request);
+  const at = nowIso();
+  if (request.method === "POST" && body.action === "create") {
+    const courseId = String(body.course_id || "").trim().toUpperCase().slice(0, 30);
+    const title = String(body.title || "").slice(0, 120), content = String(body.content || "").slice(0, 8000);
+    if (!/^[A-Z0-9_.:-]{3,30}$/.test(courseId) || !title.trim() || !content.trim()) throw new HttpError(400, "course_id_title_content_required");
+    const dup = await listRows("course_list", "training_courses", { course_id: `eq.${courseId}`, select: "course_id" });
+    if (dup.length) throw new HttpError(409, "course_id_exists");
+    await dbRequest("course_insert", "POST", "training_courses", {
+      body: [{ course_id: courseId, title, dimension: String(body.dimension || "").slice(0, 40) || null, content, completion_requirement: String(body.completion_requirement || "提交本人的行动计划文本").slice(0, 200), content_status: "draft", version_no: 1, source_version: "r19_selfbuilt", updated_at: at }],
+      headers: { Prefer: "return=minimal" } });
+    const auditId = await appendAudit(ctx.principal, "course.create", "training_course", courseId, null, "draft", ctx.requestId);
+    return sendJson(response, 201, { ok: true, course_id: courseId, content_status: "draft", audit_id: auditId, note: "自建课程初始 draft：不得被 TR02 分配、不得被 AI 当正式课引用" });
+  }
+  const courseId = String(body.course_id || "").trim(); if (!courseId) throw new HttpError(400, "bad_request");
+  const cr = await listRows("course_list", "training_courses", { course_id: `eq.${courseId}` });
+  const c = cr[0]; if (!c) throw new HttpError(404, "not_found");
+  if (!["draft", "pending_review", "demo_draft_requires_team_review"].includes(String(c.content_status))) throw new HttpError(409, "only_unapproved_editable_approved_needs_disable_plus_new");
+  if (c.content !== undefined && body.content !== undefined && !String(body.content).trim()) throw new HttpError(400, "content_required");
+  await dbRequest("course_patch", "PATCH", "training_courses", {
+    query: { course_id: `eq.${courseId}` },
+    body: { title: body.title !== undefined ? String(body.title).slice(0, 120) : c.title, dimension: body.dimension !== undefined ? String(body.dimension).slice(0, 40) : c.dimension, content: body.content !== undefined ? String(body.content).slice(0, 8000) : c.content, completion_requirement: body.completion_requirement !== undefined ? String(body.completion_requirement).slice(0, 200) : c.completion_requirement, version_no: (Number(c.version_no) || 0) + 1, updated_at: at },
+    headers: { Prefer: "return=minimal" } });
+  const auditId = await appendAudit(ctx.principal, "course.edit", "training_course", courseId, c.content_status, c.content_status, ctx.requestId, [], { version_no: (Number(c.version_no) || 0) + 1 });
+  sendJson(response, 200, { ok: true, course_id: courseId, version_no: (Number(c.version_no) || 0) + 1, audit_id: auditId });
+}
 async function handleRuleDrafts(request, response, url, ctx, draftId) {
   const user = requireUser(ctx.principal, "manage.rule_drafts");
   if (request.method === "GET") {
@@ -2199,6 +2809,11 @@ async function handleEvidenceCheck(request, response, url, ctx) {
     }
     const r = await dbRequest("get_rr_row", "GET", def[0], { query: q });
     const hit = r.data?.[0] || null;
+    if (hit && ["safety_admin", "team_leader"].includes(user.role) && String(user.fleet_scope || "*") !== "*") {
+      const s = await fleetScopeSets(String(user.fleet_scope));
+      const viol = hit.gpsno ? !s.gps.includes(String(hit.gpsno)) : (hit.driver_id ? !s.drv.includes(String(hit.driver_id)) : true);
+      if (viol) { try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", kind + ":out_of_fleet_scope", null, "refused_scope", ctx.requestId); } catch {} return sendJson(response, 404, NOLEAK); }
+    }
     if (user.role === "driver") { try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", kind + (hit ? ":ok" : ":miss"), null, hit ? "ok" : "not_found_or_stale", ctx.requestId); } catch {} }
     if (!hit) return sendJson(response, 404, NOLEAK);
     let route = null;
@@ -2246,10 +2861,14 @@ const API_ROUTES = [
   { method: "POST", path: "/api/auth/login", needAuth: false, handler: handleLogin },
   { method: "POST", path: "/api/auth/logout", needAuth: true, handler: handleLogout },
   { method: "GET", path: "/api/me", needAuth: false, handler: handleMe },
+  { method: "GET", path: "/api/driver/fleet-summary", needAuth: true, handler: handleDriverFleetSummary },
+  { method: "GET", path: "/api/rm/drop7", needAuth: true, handler: handleDrop7 },
   { method: "GET", path: "/api/overview", needAuth: true, handler: handleOverview },
   { method: "GET", path: "/api/meta/history-dates", needAuth: true, handler: handleHistoryDates },
   { method: "POST", path: "/api/ai/chat", needAuth: true, handler: handleAiChat },
   { method: "GET", path: "/api/ai/selftest", needAuth: true, handler: handleAiSelftest },
+  { method: "POST", path: "/api/ai/task-summary", needAuth: true, cap: "review.training_feedback", handler: handleTaskSummary },
+  { method: "GET", path: "/api/ai/preplan", needAuth: true, handler: handleAiPreplan },
   { method: "POST", path: "/api/ai/confirm", needAuth: true, handler: handleAiConfirm },
   { method: "GET", path: "/api/ai/evidence-check", needAuth: true, handler: handleEvidenceCheck },
   { method: "GET", path: "/api/ai/calls", needAuth: true, handler: async (request, response, url, ctx) => {
@@ -2269,7 +2888,19 @@ const API_ROUTES = [
   { method: "POST", path: "/api/import/check", needAuth: true, cap: "import.data", handler: handleImportCheck },
   { method: "POST", path: "/api/import/commit", needAuth: true, cap: "import.data", handler: handleImportCommit },
   { method: "POST", path: "/api/admin/bindings", needAuth: true, cap: "manage.bindings", handler: handleBindingSet },
+  { method: "GET", path: "/api/admin/bindings", needAuth: true, cap: "manage.bindings", handler: handleBindingsList },
+  { method: "GET", path: "/api/admin/binding-conflicts", needAuth: true, cap: "manage.bindings", handler: handleBindingPreview },
+  { method: "POST", path: "/api/admin/binding-reschedule", needAuth: true, cap: "manage.bindings", handler: (r, s, u, c) => handleBindingReschedule(r, s, u, c, null) },
+  { method: "POST", path: "/api/admin/binding-delete", needAuth: true, cap: "manage.bindings", handler: handleBindingDelete },
   { method: "POST", path: "/api/admin/course-review", needAuth: true, cap: "review.content", handler: handleCourseReview },
+  { method: "GET", path: "/api/admin/courses", needAuth: true, handler: handleCoursesBoard },
+  { method: "GET", path: "/api/admin/ops", needAuth: true, handler: handleOpsList },
+  { method: "GET", path: "/api/admin/templates", needAuth: true, cap: "manage.knowledge", handler: handleTemplatesAdmin },
+  { method: "POST", path: "/api/admin/templates", needAuth: true, cap: "manage.knowledge", handler: handleTemplatesAdmin },
+  { method: "GET", path: "/api/admin/template-preview", needAuth: true, cap: "manage.knowledge", handler: handleTemplatePreview },
+  { method: "POST", path: "/api/admin/course-draft", needAuth: true, cap: "review.content", handler: handleCourseDraft },
+  { method: "PATCH", path: "/api/admin/course-draft", needAuth: true, cap: "review.content", handler: handleCourseDraft },
+  { method: "GET", path: "/api/admin/audit", needAuth: true, cap: "view.audit", handler: handleAuditConsole },
   { method: "POST", path: "/api/admin/ops-config", needAuth: true, cap: "manage.operation_config", handler: handleOpsConfigUpdate },
   { method: "POST", path: "/api/admin/training-assign", needAuth: true, cap: "assign.training", handler: handleTrainingAssign },
   { method: "POST", path: "/api/alerts/confirm", needAuth: true, cap: "handle.alert", handler: handleAlertConfirm },
@@ -2309,6 +2940,9 @@ const CASE_ROUTES = [
   { method: "POST", re: /^\/api\/alerts\/([^/]+)\/note$/, h: (q, r, u, cx, id) => handleAlertPatch(q, r, u, cx, id, "note") },
   { method: "POST", re: /^\/api\/alerts\/([^/]+)\/contact$/, h: (q, r, u, cx, id) => handleAlertPatch(q, r, u, cx, id, "contact") },
   { method: "POST", re: /^\/api\/admin\/users\/([^/]+)\/status$/, h: handleAdminUserStatus },
+  { method: "GET", re: /^\/api\/admin\/audit\/([^/]+)$/, h: (req, res, url, ctx, id) => handleAuditDetail(req, res, url, ctx, decodeURIComponent(String(id))) },
+  { method: "PATCH", re: /^\/api\/admin\/users\/([^/]+)$/,  h: (req, res, url, ctx, id) => handleAdminUserEdit(req, res, url, ctx, decodeURIComponent(String(id))) },
+  { method: "PATCH", re: /^\/api\/admin\/templates\/([^/]+)$/, h: (req, res, url, ctx, id) => handleTemplatesAdmin(req, res, url, ctx, decodeURIComponent(String(id))) },
   { method: "POST", re: /^\/api\/notes\/([^/]+)\/read$/, h: handleNoteRead },
   { method: "GET", re: /^\/api\/notes$/, h: handleMyNotes },
 ];

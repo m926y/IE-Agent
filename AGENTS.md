@@ -142,3 +142,95 @@
 - 现网样本实测：K01-K04 全 pending → AI 正式引用 0（chat refused 语义 + cites=[]）；本轮创建→批准→AI 按版本引用 knowledge:K6.1+证据卡 200→停用→404/refs=0。TR05 三课未审核 409 门禁在位（回归）。
 - 根因坑：新 re 路由必须放 CASE_ROUTES（matchCaseRoute 传解好的 id 字符串，非 match 数组）；path 型条目勿误入 CASE 表；API_ROUTES 元素后漏逗号= ASI 静默 undefined 元素（运行时才爆）；principal.user 是 raw snake_case 行（binding_verified/driver_id/fleet_scope）；pkill pattern 误杀自 spawn server→端口预清。
 - 电池 scripts/r17-search-sm05-sm06-battery.cjs 28/28；verify-local 断言演化（knowledge 门禁自适应）119/119；V25 发布。
+
+## 第18轮（SM01 账号面板挂载 + 第一轮 R1-01~08 复测）；**本轮未发布**（指令：不发新页、不删原页；线上保持 V25）
+
+- 复用既有后端（A23 创建/停用端点、handleBindingSet、manage.accounts 门禁、USER_PUBLIC_COLS 无口令列），未重建账号体系。新增：PATCH /api/admin/users/:id（display_name/fleet_scope[存在车队校验 unknown_fleet]/driver_id[binding_verified=false→unverified_identity_cannot_bind；active 占用→driver_already_bound_active]/clear_binding），审计 account.edit changed+actor 范围；POST create 加 reveal_password（默认 redacted——**页面不渲染口令**，ui18 DOM 扫描 input[type=password]=0 且无口令文本）；list_resource 对 app_users 按当前管理员 fleet_scope≠* 过滤（本人+本fleet司机绑定账号），现网无 scoped 活跃管理员→该代码路径标未验证。
+- 前端 sm18.tsx AccountAdminPanel：表格（用户/角色/状态/driver(核实标注)/fleet/updated）+ 角色/状态/车队筛选 + 编辑抽屉 + 行级停用/恢复 + 创建（角色下拉仅 safety_admin/driver 两类，无第三种管理员登录）；挂载 #/sm-accounts（原 ResourceTable+硬编码 AccountAdmin 移除，BindPanel 保持 SM02）。
+- 复测（两会话交错，本地=repo 同码实例，端口级干净）：r18 API 26/26 + r18 UI 7/7 + 主回归 119/119。R1-08 全链（创建→登录→门禁403→未核实拒绑→非法车队拒→fleet 编辑审计→SM02 核实 D0289→唯一性 409→停用旧会话401/重登403→恢复→可检索本人案卷→停自己409→8条审计）；账号头尾清理（stale sm01_retest_* clear+disable 幂等前提）；R1-01 confirm discard 后 calls 查得 decision；R1-02/03/05/06/07 全过（详见 CSV：output/第一轮验收复测记录.csv）。R1-04 补司机跨页旧上下文+owner 隔离 UI 复测；**发布留待用户指令**。
+
+## 第19轮（TR05 课程审核面板 + SM04 审计控制台 + AI 长期摘要 opt-in）；**未发布，线上仍 V25**
+
+- 核对：API_ROUTES=精确 path 或单段 case；matchDynamic 仅两片段；handleAiChat=手动消息路由列表；ops 无 GET 端点——本轮补 GET /api/admin/ops 与 /api/admin/courses、GET+CSV /api/admin/audit(:id)。
+- training_courses 无 authored/reviewed_* 列且平台零 RPC/DDL（swagger RPCS=[] 实测）→ 用户允许的"已有内容审核结构"路径：**作者/审核人/审核时间由 audit_logs(entity_type=training_course) 合成**，课程文本零丢失；状态映射 demo_draft_requires_team_review|draft→pending_review→approved→disabled（复用第14轮 handleCourseReview FLOW + course.create/course.edit 新审计动作；停用后禁静默修订 409 only_unapproved_editable）。
+- TR05：sm19.tsx CourseBoard 挂 #/tr-courses（筛选/抽屉/window.confirm 明确批准/修订仅未审核/轨迹 audit_id 内链）。三门主课原状态全程保持（C01 approved、C02/C03 待团队审核）——UI 批准动作作用于本轮自建验收课程（多次运行留下 DEMO_UI_R19xxx approved 样本，属真实管理员会话操作；R19C 因行错位 bug 被误批一次，已由管理员会话 disabled 纠正并留审计 aud-96e0…见下——诚实披露）。
+- SM04：AuditConsole=服务端 actor/entity_id/action_prefix(like.%)/from/to 筛选+total+分页+CSV 导出（走同一鉴权），详情端点白名单列+detail_meta 正则(redact)+evidence_refs；不返回口令/完整问答。app_users/driver 注入与旧 ResourceTable 保留导入台账。
+- AI 长期摘要：operation_config.ai_long_session 行**运行时首开自动建**（ops.config_create 审计）；AiPanel 复选框（默认关/仅 safety_admin），localStorage `claw_ai_long_<uid>`={exp:2h, items:excerpt≤90 脱敏+refs}，重登恢复标 ⌛，一键清除+过期自清+关闭即删；司机不渲染开关不读该键（断言验证）。**绝不存令牌/明文个人数据/业务状态**。
+- 根因坑：python str.replace 计数默认=-1 全局——ops 特例块曾被复制进 4 个 load* 函数（key 未定义→review-requests 500），清除后仅在 handleOpsConfigUpdate 注入 1 处；import 行 regex 重写漏 opsList（运行时 ReferenceError 面板白屏）；evaluate 拼接 splice 弄坏脚本文件（重写解决）。
+- 电池 r19 API 27/27 + UI 12/12 + 主回归 119/119（TR05 断言演化允许验收课程）。
+
+## 第20轮（真实 scoped 管理员 + 服务端 fleet scope 引擎）；未发布（线上 V25）
+
+- 数据事实：全 DB 仅一个真实车队 DEMO_FLEET（drivers 500/500、queue top1000 全队），**无第二车队/外队对象** → "跨车队对象不可见"保留未验证（不造假）；本轮以真实账号做**机制级验证**（可见集差异、参数扩权拒绝、非本队写拒绝、账号管理接口 scope 一致性）。
+- 18 轮遗留缺陷曝光并修复：app_users 过滤 `or=(user_id.in.())` 嵌套括号从未被真实触发（无 scoped 样本）→ 首触发 400/503；改**内存过滤 keep 集合**（self+本队司机绑定账号+标本队 scope 的账号），杜绝超长 in-list。
+- 新 scope 引擎（list_resource 统一入口，AI aiQ 同路生效）：FLEET_GPS_TABLES(gpsno)/FLEET_DRV_TABLES(driver_id+interventions 修正——该表无 gpsno 列曾致 overview 400→null)；空集合 `in.()`=零行零计数不回落；overview count **按 120 gps/批求和**（414 URI_TOO_LONG 边界实测）；写路径 assertInScope（alert/task/gps/driver）失败并入 **404 不泄漏存在性** + scope_refused.write 审计；证据卡 staff guard 同样 404+审计。
+- SM01 接口 scope 一致性：assertAccountScope（scoped 编辑/停用他管理员 → 403 + account.scope_refused 审计；编辑自己/管理本队司机账号放行）；scoped 铸造新 safety_admin → 403 cannot_grant_admin_in_scope；显式 fleet_id=他队 → 403 out_of_fleet_scope。
+- readBody 为**同步签名**且被多处 await——peek 缓存包装（WeakMap）+ readBody→peekBody，保证 guard 先读体不炸二次读（peekBody undefined 500 修复）。
+- r20 API 21/21、UI（SM01 创建+授权+受限列表差异+EV01 渲染）5/5、主回归 119/119。测试账号终态全部 disabled，UI 全程无口令渲染。
+
+## 第21轮（EV04 匿名车队聚合）；未发布（线上 V25）
+
+- `GET /api/driver/fleet-summary`：无参数（fleet 范围只从可信会话 driver_id+fleet_id 关联推导，不读 URL/body）；司机角色限定；未绑定/binding_verified=false → 403 unverified_binding_no_stats（不区分"无车队"避免探测）。
+- 聚合口径：本人最新 as_of_date（回退全库最新）→ 该车队全部司机的当日 score_snapshots（内存过滤 gpsno∈车队）；有效=score_status∈{usable,usable_with_review,manual_review}；返回 valid_count/average(1位小数)/distribution(A-D)/as_of_date/source_version/note；**不返回姓名、driver_id、gpsno、个人分、排名、record_id 列表**（响应零个人字段断言）。
+- 隐私保护：不足 10 人 → data_status=insufficient_sample（null，不写 0）；分布可反推（类别=1 人、单一等级、某类≥total−1）→ distribution=null + note 保留人数均值；query_failed/no_data/error 三态分离。EV04 前端独立蓝色面板"匿名车队统计"与 score-hero 分区。
+- 实测（真库对账）：as_of=2026-07-31、snapshot_ffbc02143fcb、valid=500、avg=74.4、分布 A100/B200/C150/D50 与 DB 直查一致；篡改 fleet_id/driver_id 与不带参完全一致；未绑定/未核实/管理员 三种 403；保护分支以等价纯函数验证 + **现网无小车队 → 真实小样本"未验证"**（未伪造数据，min 类别=50）。r21 测试账号全部 disabled；UI21 1/1，主回归 119/119。
+- 坑：低层 dbRequest 不过 listResource 但 select 忘列 gpsno 致过滤全空（no_data 假象）；托管库 max-rows≈2000（limit:3000 → 400/503）；DBG select 漏列 latest undefined。
+
+## 第22轮（RM01「7 天下滑」分组）；未发布（线上 V25）
+
+- 事实基线：score_history 2026-07-24…07-31 共 8 日 × 500 行=4000（count 精确核对，limit 截断曾致"无日期对"假阴性——改为**最新日+eq/lt 探测循环**找相隔恰好 7 自然日的真实双日）；drop_threshold=10（config_version=ops_v1）；RM01 分组=review_queue 字段五组，drop7 作第六组。
+- `GET /api/rm/drop7`（无参数可注入；staff 限；scope 用 fleetScopeSets 内存过滤防 414 长 URL）：Δ=早分−晚分 ≥ 阈值命中；缺日/来源版本不一致/score_status 不可比 → not_comparable（**不记为未下滑、不编造日期**）；行含两 score_id、两日分、Δ、阈值版本、可信度、责任人（alerts owner 或 未指派）、下一步（低可信→"先设备/数据核验"）、原队列标签**保留**；route=EV03 深链。**不生成任何 alerts/tasks/扣分**。
+- 对账：api 命中=32=冻结 CSV 同阈值基准（集合完全一致，diff 空）；抽查 95201298(21.7887)/95201323(21.1987)/95200904(17.0244) 全字段一致；未命中 95302803(Δ8.16)/95305079(Δ8.74) 正确不在列且不误判不可比；现网无 low 可信命中（提示词分支 N/A）、不补日期分支无真实样本（无缺日数据）→ 标未验证。
+- 权限：driver 403；scoped(DEMO_FLEET 新建真实账号) 结果同车队=32 且带 scope_note、参数注入无效；伪造 gpsno 直查 0 行；alerts/trainings 行数前后 (2,5)→(2,5) 零写入。r22 API 15/15、UI22 4/4（截图67/68）、主回归 119/119。
+- UI：RM01 数量卡「7天下滑 32」+ tab；表行含两日期/score_id/Δ/阈值版本/confidence/基础标签/责任人/下一步 + EV03 跳转实测。
+
+## 第23轮（SM02 时段冲突校验）；未发布（线上 V25）
+
+- 核对：handleBindingSet 旧语义=立即生效+无界+close-all（会误关 SSO 平台行）；user_bindings 有 effective_start/end 列（seed sso 行两枚 b-sso-*：修复期间被误 close 已恢复 active，并在 close 查询永久加 platform_user_id=is.null 隔离）；drivers.mapping_* 为冻结数据事实，本轮零触碰。
+- 新引擎（复用 manage.bindings/cap/审计）：GET /api/admin/bindings(as_of 当日有效过滤·当前/历史双区)、GET /api/admin/binding-conflicts(预览不落库)、POST binding-reschedule(编辑排除自身)、POST binding-delete(快照+审计留痕)；带 window=追加时段制不 close 旧行，legacy 无窗保持 close(仅本地行)；verified=false 不再向 app_users 写 driver_id（my.* 403 binding_not_verified；完全未绑定仍 409——vl 断言语义分层）。
+- 边界规则：**闭区间含首尾日**；相邻=次日开始合法；空 end=持续有效(+∞)；overlap=max(.starts)<=min(ends)。拒绝码 invalid_window_end_before_start / binding_window_conflict:driver_slot_taken|user_multi_driver，全部先验后写+account.binding_conflict_refused 审计。
+- 并发：进程内互斥（bindingMutex 串行化写段）+写后回读自检，检出重叠自动 inactive 回滚+审计；多副本部署下降级（平台无事务/唯一约束，如实标注限制）。
+- 幂等：同 user+driver+窗口重复提交 → idempotent_replay 同 binding_id。
+- 测试全部走 DEMO_D046x/D0470 未来窗口，跑完 binding-delete 清行 + 账号 disabled：**终态零残留**（R23 note 0 行、D046x/D0470 active 0 行、sso 双行 active、demo bd-d2b59f113a444910 在位）。r23 API 17/17 + UI 5/5、r20 回归（含 SSO 平台行保护）、r21/r22 复跑全绿、主回归 121/121（三条旧断言按新语义更新：demo 已绑不再重绑破坏 close、my.score 正/负双例、conflict 前缀匹配）。
+- 教训固化：清理脚本必须 platform_user_id is null 白名单；行内注释吞 `});`、sed 破坏反引号、`replace` 无 count=1 的三处复发——均已在本轮内修正并入 vl 断言。
+
+## 第24轮（TR06 AI 辅助摘要）；未发布（线上 V25）
+
+- 核对：handleTaskReview 四决定（approved/returned/observe/interview→reviewed/returned/observation/interview）已存在且校验旧状态 eq.submitted + 必填理由 + replay；ReviewBench 原两栏、队列 submitted——四栏+AI 升级复用原端点。
+- 新 `POST /api/ai/task-summary`（cap review.training_feedback + assertInScope driverId + 仅 submitted/returned 409 summary_requires_submitted）：受控事实包（司机原文 slice、课程 v+当前状态含停用注记、alert/评分记录）→ aiUpstreamOnce(150s, enable_thinking false——60/95s abort 与 max_tokens 900 截断两坑已修，取 j.choices[0].message.content)→ 强制 JSON、items 逐条 ref 白名单验证（越界标 BAD 不生效）；limitations 固定声明不判定/不宣称改善；10 分钟进程内缓存（重复点击 cached=true 不重复调模型）；审计 ai.task_summary（refs/refs_ok/refs_bad 计数，**不存完整原文**）。零写 training_tasks。
+- TR06 UI 四栏：①原文+提交时间（可定位 id）②课程分配版本 v+完成条件+目标+当前状态（停用时保留历史指向）③关联证据或「未取得：未关联案卷——不臆造」④摘要卡（每条判断→ref 按钮 evidence-check 复验，task: ref 滚回①原文）。人工确认仍原按钮+理由必填；司机端 my.trainings 无摘要草稿字段。
+- 真实链（本会话）：assign(task-80bc51798d71a009/task-0ea61e6fbae5459a 等，含 alert-1e7ec 关联）→driver start+submit 真文→摘要 available（items 全 ref_ok，states 覆盖/未见/无法判断；audit aud-667fb66111d44c3d 型）→observe 人工确认（aud-c71bd4a428bf2150 型）→重放 replay；无 alert 任务 ③「未取得」；停用课程任务（R19_422）②标当前 disabled 保留历史要求；**AI 无凭据（第二进程剥 key）→ available:false reason provider_not_configured 页面「AI 摘要暂不可用」前3部照常**；driver 403、不存在 404、非法状态 409、点击复验 course ref→200 route #/tr-courses。r24 API 19/19、UI 4/4、主回归 121/121。
+- 限制：公网 Page env 的模型密钥为会话级（属主正式配置后需线上复测——本地已验证）；team_leader 越权样本无口令不可测（未验证）。
+
+## 第25轮（EV03 四标签完善）；未发布（线上 V25）
+
+- 核对：EvDriver 四 tabs 骨架 15 轮已有（六维对账/SixBars/deep-link 参数），但 **q 深链从未驱动 driver 加载**（断链，本轮修复：deep-link effect getData limit1 order as_of_date.desc→无记录/失败/加载 三态）；admin.alerts/trainings/risk 按 gpsno/driver_id 现取（facts effect，含 drivers identity_status 页首持续标注）。
+- tab①六维「合计=100−安全分」+保守下界+top3 沿用冻结快照值（零重算；D0149 71.857424 对账通过）；tab② risk_snapshots 空→「该时点不可用（未取得）」（现网 500 车全有 0731 预测 → 空分支真实载体=未验证）；tab③ 台账维度行可展开（as_of/ledger_id/口径声明沿用）、tab④ 管理动作：队列原因+告警(status)+任务列表+四入口——EV05 链接、RM03?alert_id 深链（D0177 无告警→按钮 disabled）、TR02 claw_fill 上下文（goal 预填修复 R18 take 漏赋 goal 的缺陷）、AI04 预演经新「claw:ai-preset」事件→App 开面板+AiPanel sendRef 定时派发真模型（截图75 预演完成）。D0289 页首低可信 Banner+④「先完成设备/数据覆盖核验；不自动惩罚性培训」。
+- 权限矩阵实测：司机直查 admin.score_snapshots(本人 gpsno)/alerts/trainings/deduction_ledger 全 403；admin 不存在 gpsno total=0；D0149/D0289/D0177 页首全字段与 DB 一致（28.142576/D/high/0.347875505971/rank/版本、88.105364/B/low、82.969886/B）。RM03 入口实测 hash=rm-alerts?alert_id=alert-1e7… 抽屉打开（进草稿非发送）。
+- r25 电池 15/15（UI 内嵌断言含 AI04 真实模型），主回归 121/121。截图 72-75。
+
+## 第26轮（AI04 管理动作并排预演独立页）；未发布（线上 V25）
+
+- `GET /api/ai/preplan?driver_id|gpsno[&as_of_date]`（role=safety_admin 限定，driver 403；参数仅查询条件、车队范围 assertInScope 双维；无该行→not_found 同语义；指定日无→no_data_for_date 不补造）。**只读组装**三卡（A 核验/B 沟通/C 已审核课程），每卡 basis[]=真实 record_id（score/queue/ledger/alert/course/task）+ 拟处理对象/责任人+确认操作者/预计待办/所缺/限制；页首与卡内固定「操作预演，未写入」。不新建模型链：AI 建议文字复用对话 action_preplan（claw:ai-preset 通道第25轮已建）。
+- 卡门禁实测：D0149 B disabled（唯一案卷 closed→不凭空 RM3 草稿）·C actionable（3 approved 课+行为证据）；D0289 A 高亮(低可信)+B 进入 RM03 可编辑草稿（9f4b confirmed，抽屉「草稿，未发送」）+ **C 禁用：低可信先核验（不自动惩罚性培训）**；D0177 B 禁（无告警）+ C draft_entry→TR02 预填「AI04 预演携入」+「草稿状态，未分配」。basis 回源按钮 evidence-check 200→EV03。旧对象证据切换即清空（noOld 断言）。
+- 路由 #/ai-preplan（RM 组菜单 AI04）；EV03「打开并排预演页」互跳；**tab=3 URL 记忆**实现「返回 EV03 保留对象+标签」（EvDriver tab 初值解析）。司机窄屏直达该 hash 不渲染数据、无卡片泄漏。
+- 零写入证明：alerts 2 · interventions 2 · training_tasks 9 · notification_events 110 前后一致 + 案卷状态序列化一致；ai.chat 审计沿用既有（组装页本身不产 ai.chat，仅回源校验记 ai.evidence_check）。r26 电池 12/12、主回归 121/121。截图 76/77。UI 脚本沉淀：窄屏登出按钮在小 viewport 折叠→上下文内改用 API logout+clearCookies（既有确认框需 dialog handler）。
+
+## 第27轮（SM06 通知模板：方案+代码准备）；**未执行 DDL、未发布、未发送通知**
+
+- 实测核对：库 22 表=原15+扩展4+平台运行3；notification_events 12 列零外键方案；DDL 通道无（RPCs 空）→待属主。migration 005 up/down 备妥（scripts/contract/migrations/），app_tables.json 扩至 5 张扩展表（新表入 tables 契约）；占位符白名单 event_date/evidence_type/review_note/driver_id/alert_id。
+- 代码就绪（probe 降级）：/api/admin/templates GET/POST/PATCH(含 submit/approve[same-actor confirm]/withdraw/disable/edit[new_version 不覆盖 approved])/template-preview（scope 验权+缺事实「待核」+无绑定不显已送达）；SM06 第三标签 + RM03 TemplateInsertRow（选择/预览零写、正文进既有可编辑草稿、发送仍人工幂等确认）。零外键 → 回退=删表，audit 保留。
+- 现状验收 7/7 PASS（pending 降级面）+ BLOCKED 清单（B1-B8 待迁移执行后复跑 scripts/notification-template-acceptance）。r27 电池入库；主回归 121/121 待跑后附。截图78。方案文档 output/通知模板实施方案.md。
+
+## 第29轮（V26 发布，属主指令）
+
+- 门禁：staging=HEAD 2ae1f34 构建（publish 目录 670KB；prepare+build 同步）；能力串扫描 17 项全命中（SM01/SM02/SM04/SM05/SM06+模板/TR05/TR06/EV03/EV04/RM01 drop7/RM03/AI01-04）；DB 23 表、notification_templates key_version/pkey/status_enum 约束实存、NT=7 行、alerts2/iv2/tasks9；同包本地全矩阵复跑（登录双角色、403 矩阵、fleet-summary=500、AI chat 200 含真值 call=aud-8017c9da7eeaecd5、停自己409）+ 主回归 121/121。
+- 发布：2026-10-24T07:39:30Z，PUT env 刷新 QW_AI_*（属主令牌管道），publish.py → Page app-5d12ecfd-4ed153f9 / ls7d7ste.qwenwork.host **V26 deployed**（同页、同库、未新建/删除、未 down.sql、未重导快照）。
+- 公网 SSO 浏览器实操无法由代理代会话（平台登录墙）；功能等价证据=同一构建产物+同一库的本地全矩阵；属主实操清单：EV03 四标签/EV04 聚合/RM01 7天下滑/SM02 绑定双区/TR06 摘要/AI04 预演零写/SM06 模板+RM03 选择预览。RM03 真实发送：无 confirmed-未发送案卷 → 标未验证（不造告警）。
+
+## 第30轮（发送链模板接入收口 + GitHub 同步）；V26 已在线上，本轮改动待下一次发布指令（V27）
+
+- task_assigned（TR02 分配通知）与 review_answer（EV05 答复通知）接入模板：body.template_ref 可选 → resolveTemplateForSend 仅 approved+scene 匹配（否则 409 template_not_approved_or_disabled，不静默回退）；渲染缺事实=「待核」；不选=内置文案原样（T8 回退零破坏）；通知尾部自动附（模板 key:vN 溯源+站内演示声明）；training.assign 审计 detail.template_ref 溯源。
+- UI：TR02/EV05 各挂 TemplateScenePicker（approved 下拉+预览只读；选择/预览零写）；sm27.tsx 组件共享。
+- 真实闭环验收（本地同码+真库）：r30 T1–T10 全绿（含司机 notification body 渲染真值 alert-1e7ec/待核 event_date）、r30b B1–B5 全绿（真实 rr-129b5b5830f462dc answered→driver 站内通知含模板渲染+response_note 真值+审计 aud-17964959f072af2c）；主回归 121/121。
+- 修 bug 两处：rr facts 误读 body.answer_note→正确 response_note；driverIdForPicker 类型。断言校准三处（幂等重放路径、动作实名 review_request.answered、reason 枚举真实值）——均为测试自身而非功能问题。

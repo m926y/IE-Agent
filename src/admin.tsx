@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MeUser, OverviewResult, ImportCheckReport, ImportCommitReport } from "./api";
-import { ApiError, alertConfirm, alertContact, alertHandoff, alertNote, alertStatus, caseView, courseReview, createUser, egressProbe, getData, getHistoryDates, getOverview, importCheck, importCommit, interventionDraft, interventionEdit, interventionSend, myNotes, noteRead, notesSummary, opsConfigUpdate, rrAdvance, rrView, setBinding, setUserStatus, taskReview, taskView, trainingAssign } from "./api";
+import {ApiError, alertConfirm, alertContact, alertHandoff, alertNote, alertStatus, caseView, courseReview, createUser, egressProbe, getData, getHistoryDates, getOverview, importCheck, importCommit, interventionDraft, interventionEdit, interventionSend, myNotes, noteRead, notesSummary, opsConfigUpdate, rrAdvance, rrView, setBinding, setUserStatus, taskReview, taskView, trainingAssign, taskSummary, TaskSummary, aiEvidenceCheck} from "./api";
 import type { RRView } from "./api";
 import type { CaseView as CaseViewT } from "./api";
 import { Banner, EmptyState, ResourceTable, Tag, GlobalSearch } from "./ui";
 import { SmDraftsPage, SmKnowledgePage } from "./sm17";
+import { AccountAdminPanel } from "./sm18";
+import { BindingsConsole } from "./sm23";
+import { AiPreplanPage } from "./sm26";
+import { TemplatesTab, TemplateScenePicker } from "./sm27";
+import { AuditConsole, CourseBoard } from "./sm19";
 
 const IMPORTABLE_TABLES = [
   "drivers", "risk_snapshots", "score_snapshots", "review_queue", "score_history", "deduction_ledger",
@@ -168,11 +173,12 @@ function EvReview() {
   const [sel, setSel] = useState<string | null>(null);
   const [v, setV] = useState<RRView | null | "error">(null);
   const [note, setNote] = useState("");
+  const [rrTpl, setRrTpl] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   useEffect(() => { if (sel) rrView(sel).then(setV).catch(() => setV("error")); else setV(null); }, [sel, tick]);
   async function move(st: string) {
     setMsg(null);
-    try { const r = await rrAdvance(sel!, st, note || (st === "checking" ? "" : note)); setMsg(`→ ${r.new_status} · 审计 ${r.audit_id}${r.driver_notified ? " · 已站内通知司机" : ""}`); setNote(""); setTick((x) => x + 1); }
+    try { const r = await rrAdvance(sel!, st, note || (st === "checking" ? "" : note), rrTpl); setMsg(`→ ${r.new_status} · 审计 ${r.audit_id}${r.driver_notified ? " · 已站内通知司机" : ""}`); setNote(""); setTick((x) => x + 1); }
     catch (e) { const c = e instanceof ApiError ? e.code : "network"; setMsg({ response_note_required: "该状态必须填写答复/说明（进审计）" }[c] || `拒绝：${c}`); }
   }
   return <div>
@@ -191,6 +197,7 @@ function EvReview() {
           {v.ledger !== null && v.ledger.length > 0 && <><h4 style={{ fontSize: 12.5, marginTop: 6 }}>关联台账证据</h4>{v.ledger.map((l) => <div key={String(l.ledger_id)} className="meta mono" style={{ fontSize: 11.5 }}>{String(l.ledger_id)} · {String(l.dimension)} · {String(l.event_type)} · 分摊 {String(l.allocated_points)}</div>)}</>}
         </div>
       </div>
+      <TemplateScenePicker scene="review_answer" driverId={v && typeof v === "object" ? String((v as unknown as { request?: { driver_id?: string } }).request?.driver_id ?? "") : ""} onPick={(r) => setRrTpl(r)} label="答复通知模板（可选，仅 approved）" />
       <div className="field" style={{ marginTop: 8 }}><label>答复/处理说明（answered、awaiting_data_owner、closed 必填，进审计与司机端）</label>
         <textarea style={{ width: "100%", minHeight: 56, borderRadius: 8, border: "1px solid var(--line)", padding: 8, font: "inherit" }} value={note} onChange={(e) => setNote(e.target.value)} aria-label="答复说明" /></div>
       <div className="row">
@@ -214,8 +221,18 @@ function EvFleet() {
   const [driver, setDriver] = useState<ScoreRow | null>(null);
   const parseQ = () => { const m = location.hash.match(/[?&](driver_id|gpsno)=([^&#]+)/); return m ? { key: m[1], val: decodeURIComponent(m[2]) } : null; };
   const [q, setQ] = useState<{ key: string; val: string } | null>(parseQ);
+  const [deepErr, setDeepErr] = useState<string | null>(null);
   useEffect(() => {
-    const onHash = () => { if (location.hash.startsWith("#/ev-fleet")) { setQ(parseQ()); setDriver(null); } };
+    if (!q) return;
+    let alive = true; setDriver(null); setDeepErr("加载中…");
+    getData<ScoreRow>("admin.score_snapshots", { limit: 1, order: "as_of_date.desc", ...(q.key === "driver_id" ? { driver_id: q.val } : { gpsno: q.val }) })
+      .then((r) => { if (!alive) return; if ((r.rows || []).length) { setDriver(r.rows[0] as ScoreRow); setDeepErr(null); } else setDeepErr("无记录：该标识在当日评分快照中不存在（或超出你的车队范围）"); })
+      .catch(() => alive && setDeepErr("查询失败（会话过期或服务异常），请重试"));
+    return () => { alive = false; };
+  }, [q]);
+
+  useEffect(() => {
+    const onHash = () => { if (location.hash.includes("ev-fleet")) { setQ(parseQ()); setDriver(null); setDeepErr(null); } };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -240,6 +257,7 @@ function EvFleet() {
     return () => { alive = false; };
   }, []);
   if (driver) return <EvDriver row={driver} onBack={() => setDriver(null)} />;
+  if (deepErr && !driver) return <div><button className="btn" onClick={() => { setDeepErr(null); setQ(null); history.pushState("", "", location.pathname + location.search + "#/ev-fleet"); window.dispatchEvent(new HashChangeEvent("hashchange")); }}>← 返回车队总览</button><div style={{ height: 10 }} />{deepErr === "加载中…" ? <EmptyState kind="loading" /> : <EmptyState kind="nomatch" hint={deepErr} />}</div>;
   const setF = (v: string) => () => setFilter((cur) => (cur === v ? null : v));
   const filterParams: Record<string, string> = !filter ? {} : filter.startsWith("conf") ? { confidence_level: "low" } : { risk_level: filter };
   return <div>
@@ -333,12 +351,23 @@ function EvWeek() {
 }
 
 function EvDriver({ row, onBack, sourceQueueId }: { row: Record<string, unknown>; onBack: () => void; sourceQueueId?: string }) {
-  const [tab, setTab] = useState(0);
+  const [tab, setTab] = useState(() => { const m = /[?&]tab=([0-3])/.exec(location.hash); return m ? Number(m[1]) : 0; });
+  const [facts, setFacts] = useState<{ risk: number; alerts: Record<string, unknown>[]; tasks: Record<string, unknown>[] } | null>(null);
   const tabs = ["已观察行为", "未来风险预测", "事件证据", "管理动作"];
+  const drvId = String(row.driver_id); const gps = String(row.gpsno); const low = String(row.confidence_level) === "low";
+  useEffect(() => { setFacts(null); let alive = true;
+    Promise.all([
+      getData<Record<string, unknown>>("admin.risk_snapshots", { gpsno: gps, limit: 1 }).catch(() => ({ rows: [] as Record<string, unknown>[] })),
+      getData<Record<string, unknown>>("admin.alerts", { gpsno: gps, limit: 10 }).catch(() => ({ rows: [] as Record<string, unknown>[] })),
+      getData<Record<string, unknown>>("admin.trainings", { driver_id: drvId, limit: 10 }).catch(() => ({ rows: [] as Record<string, unknown>[] })),
+      getData<Record<string, unknown>>("admin.drivers", { driver_id: drvId, limit: 5 }).catch(() => ({ rows: [] as Record<string, unknown>[] })),
+    ]).then(([rk, al, tr, dv]) => { if (alive) setFacts({ risk: (rk.rows || []).length, alerts: (al.rows || []) as Record<string, unknown>[], tasks: (tr.rows || []) as Record<string, unknown>[], ident: ((dv.rows || [])[0] || {}).identity_status ? String(((dv.rows || [])[0] || {}).identity_status) : null } as never); });
+    return () => { alive = false; };
+  }, [gps, drvId]);
   return <div>
     <button className="btn" onClick={onBack}>← 返回车队总览</button>
     <div style={{ height: 10 }} />
-    <PageHead code={`EV03 · ${String(row.driver_id)} · 车辆 ${String(row.gpsno)}`} title="司机评价详情" desc="页首分栏区分“近14天观察”与“未来40天预测”，两口径不可互相换算；全部值为只读事实。" />
+    <PageHead code={`EV03 · ${String(row.driver_id)} · 车辆 ${String(row.gpsno)}${facts && (facts as { ident?: string | null }).ident ? " · " + (String((facts as { ident?: string }).ident).includes("synthetic") ? "演示身份（synthetic_demo_mapping，持续标注）" : String((facts as { ident?: string }).ident)) : ""}`} title="司机评价详情" desc="页首分栏区分“近14天观察”与“未来40天预测”，两口径不可互相换算；全部值为只读事实。" />
     <Banner tone={row.confidence_level === "low" ? "warn" : "info"}>
       <span>近14天观察：安全分 <b>{String(row.safety_score)}</b> · 等级 <b>{String(row.risk_level)}</b> · 7天变化 {String(row.score_change_7d)} · 可信度 <b>{String(row.confidence_level)}（{String(row.confidence_score)}）</b> · 截止 {String(row.as_of_date)}（窗口起 {String(row.window_start)}）{row.confidence_level === "low" ? " → 低可信度：请先核验设备与数据覆盖，不自动奖惩" : ""}</span>
     </Banner>
@@ -358,15 +387,52 @@ function EvDriver({ row, onBack, sourceQueueId }: { row: Record<string, unknown>
     <div className="row">{tabs.map((tb, i) => <button key={tb} className="btn" style={i === tab ? { borderColor: "var(--navy)", color: "var(--navy)" } : undefined} onClick={() => setTab(i)}>{tb}</button>)}</div>
     <div style={{ height: 10 }} />
     {tab === 0 && <ResourceTable resource="admin.score_snapshots" pageSize={5} params={{ driver_id: String(row.driver_id) }} />}
-    {tab === 1 && <ResourceTable resource="admin.risk_snapshots" pageSize={10} params={{ gpsno: String(row.gpsno) }} />}
+    {tab === 1 && <>{facts && facts.risk === 0 ? <div className="alert info">该时点无此车辆的 40 天预测快照 → 不可用（未取得）；系统不以观察分反推概率。</div> : <ResourceTable resource="admin.risk_snapshots" pageSize={10} params={{ gpsno: String(row.gpsno) }} />}</>}
     {tab === 2 && <>
       <p className="page-desc">事件台账（deduction_ledger）按维度解释扣分分摊，可展开每行 event_type/事件数/衰减严重度/分摊扣分/维度合计/as_of_date/ledger_id。<b>台账归因仅用于解释与对账，不宣称任何单条事件具有独立因果效应</b>；若此表无该车辆记录：可能是确无可记录事件，也可能是设备未覆盖——必须结合其可信度与 score_status 判断，不据此推断“有覆盖”或“风险为零”。</p>
       <ResourceTable resource="admin.deduction_ledger" pageSize={20} params={{ gpsno: String(row.gpsno) }} labels={{ ledger_id: "台账ID", gpsno: "车辆", event_type: "事件类型", dimension: "维度", event_count: "事件数", decayed_severity: "衰减严重度", allocated_points: "分摊扣分", dimension_points: "维度扣分", as_of_date: "截止日" }} />
     </>}
-    {tab === 3 && <div className="panel"><p>当前该对象告警/干预/培训记录为 0（业务执行表空）。写操作按钮在第4轮接入。</p><div className="row"><button className="btn" disabled>发起人工复核</button><button className="btn" disabled>创建干预草稿</button><button className="btn" disabled>分配培训</button></div></div>}
+    {tab === 3 && <div className="panel">
+      <h3>管理动作（只读现状 + 草稿入口；进入草稿≠发送/分配，目标页重新验权）</h3>
+      {low && <div className="alert warn">低可信度对象：<b>先完成设备/数据覆盖核验</b>（RM03 核验向草稿 / SM02 绑定核对），再讨论处置；本页不自动安排惩罚性培训。</div>}
+      {!facts ? <div className="meta">读取处置现状…</div> : <>
+        <div className="kv"><span className="kk">队列原因（冻结 review_queue 快照）</span><b>{String(row.review_queue)} · {String((row as { action_deadline?: string }).action_deadline || "—")}{sourceQueueId ? " · 队列记录 " + sourceQueueId : ""}</b></div>
+        <div className="kv"><span className="kk">告警（alerts，按本车 gpsno）</span><b>{facts.alerts.length ? facts.alerts.map((a) => String(a.alert_id) + "（" + String(a.status) + "）").join("、") : "无记录"}</b></div>
+        <div className="kv"><span className="kk">培训任务（training_tasks）</span><b>{facts.tasks.length ? facts.tasks.map((x) => String(x.task_id) + " " + String(x.status)).join("、") : "无记录"}</b></div>
+        <div className="row" style={{ gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+          <button className="btn" onClick={() => { location.hash = "ev-review"; }}>EV05 复核处理（列表含 {drvId} 相关申请）→</button>
+          {facts!.alerts.map((a) => <button key={String(a.alert_id)} className="btn" onClick={() => { location.hash = "rm-alerts?alert_id=" + encodeURIComponent(String(a.alert_id)); }}>RM03 干预草稿 · {String(a.alert_id)}（{String(a.status)}）→</button>)}
+          {!facts!.alerts.length && <button className="btn" disabled>RM03 干预草稿（无告警上下文）</button>}
+          <button className="btn" onClick={() => { try { sessionStorage.setItem("claw_fill", JSON.stringify({ form: "tr2", driver_id: drvId, alert_id: !facts ? null : facts.alerts[0] ? String(facts.alerts[0].alert_id) : null, goal: (low ? "【先核设备/数据，不建议惩罚性课程】" : "") + "围绕 " + String((row as { primary_risk_dimension?: string }).primary_risk_dimension || "主维度") + " 制定短路径（EV03 上下文携入，逐项可改，确认分配才写库）", note: "来自 EV03 管理动作入口" })); } catch { /* ignore */ } window.dispatchEvent(new CustomEvent("claw:fill")); location.hash = "tr-create"; }}>TR02 培训草稿（带对象上下文）→</button>
+          <button className="btn" onClick={() => { window.dispatchEvent(new CustomEvent("claw:ai-preset", { detail: { prompt: "对 " + drvId + "（车辆 " + gps + "）做 AI04 三种管理路径并排预演（沟通/培训/设备核验路径对比），只预演不写入" } })); }}>AI 动作预演（对话侧栏，预演不写入）→</button>
+          <button className="btn" onClick={() => { window.dispatchEvent(new CustomEvent("claw:ev-cache", { detail: null })); location.hash = "ai-preplan?" + (String(row.driver_id) === "—" ? "gpsno=" + encodeURIComponent(String(row.gpsno)) : "driver_id=" + encodeURIComponent(String(row.driver_id))); }}>打开并排预演页（AI04 独立页）→</button>
+        </div>
+        <div className="meta">完整并排预演页面下一轮实现；入口只携带当前对象与证据上下文，写入仍走目标页人工确认。</div>
+      </>}
+    </div>}
     <p className="login-note">record_id：评分 {String(row.score_id)} · 来源 {String(row.source_version)}{sourceQueueId ? <> · 队列来源 <span className="mono">{sourceQueueId}</span></> : null}</p>
   </div>;
 }
+
+function Drop7Panel({ data, openRow }: { data: Drop7ish; openRow: (gps: string) => void }) {
+  return <div>
+    <div className="alert info" style={{ fontSize: 12 }}>{data.data_status === "ok" ? `比较对 ${data.date_pair?.[0]} → ${data.date_pair?.[1]}（相隔恰好 7 自然日，只读比较）· 阈值 ${data.threshold} 分（版本 ${data.threshold_version}）· 可比 ${data.comparable} · 命中 ${data.drop_count} · 无法比较 ${data.not_comparable_count}（缺日/版本不一致/状态不可比，均不记为未下滑） · ${data.scope_note || ""} · ${data.generated || ""}` : data.note || "无数据"}</div>
+    {(data.rows || []).length === 0 && <EmptyState kind="nomatch" hint="按你的车队范围与阈值，无 7 天下降达到阈值的对象" />}
+    <table className="tbl"><thead><tr><th>车辆 / 司机</th><th>两日采样（早→晚）</th><th>原分→现分（Δ）</th><th>score_id（早 / 晚）</th><th>可信度 / 原标签</th><th>责任人 / 下一步</th><th></th></tr></thead>
+      <tbody>{(data.rows || []).map((x) => <tr key={x.gpsno + x.early_score_id}>
+        <td><b>{x.gpsno}</b><div className="meta">{x.driver_id || "—"}</div></td>
+        <td>{x.early_date} → {x.late_date}<div className="meta">阈值 {x.threshold}（{x.threshold_version}）</div></td>
+        <td><b>{x.early_score}</b> → <b>{x.late_score}</b><div style={{ color: "#b3261e", fontWeight: 700 }}>▼ {x.drop}</div></td>
+        <td className="meta" style={{ fontSize: 11 }}>{x.early_score_id}<br />{x.late_score_id}</td>
+        <td><Tag tone={x.confidence === "low" ? "amber" : "blue"}>{x.confidence === "low" ? "低可信度·先核验" : "可信度 " + (x.confidence ?? "—")}</Tag>{x.base_tags.map((bg) => <span key={bg} style={{ marginLeft: 4 }}><Tag tone={bg.includes("priority") ? "red" : "gray"}>{bg}</Tag></span>)}</td>
+        <td className="meta">{x.owner}<div>{x.next_step}</div></td>
+        <td><button className="btn" style={{ padding: "2px 8px" }} onClick={() => openRow(x.gpsno)}>EV03 详情/证据 ↗</button></td>
+      </tr>)}</tbody></table>
+    {((data.not_comparable || []) as unknown[]).length > 0 && <details style={{ marginTop: 6 }}><summary className="meta">无法比较清单（{data.not_comparable_count}，不记为未下滑）</summary>
+      <ul>{(data.not_comparable || []).slice(0, 20).map((x: Record<string, string | null>) => <li key={String(x.gpsno)} className="meta">{x.gpsno}（{x.driver_id || "—"}）：{x.reason}</li>)}</ul></details>}
+  </div>;
+}
+type Drop7ish = import("./api").Drop7;
 
 const QUEUE_GROUPS: [string, string, string][] = [
   ["priority_review", "优先复核（priority_review）", "red"],
@@ -374,9 +440,12 @@ const QUEUE_GROUPS: [string, string, string][] = [
   ["prediction_review", "预测核查（prediction_review）", "blue"],
   ["data_quality_review", "低可信/数据质量（data_quality_review）", "amber"],
   ["routine", "常规（routine）", "gray"],
-];
+
+  ["drop7", "7天下滑", "score_history 两真实日比较"], ];
 
 function RmQueue() {
+  const [drop7Data, setDrop7] = useState<Drop7ish | null>(null);
+  useEffect(() => { import("./api").then((m) => m.drop7().then(setDrop7).catch(() => setDrop7(null))); }, []);
   const [rows, setRows] = useState<ScoreRow[] | null>(null);
   const [err, setErr] = useState(false);
   const [openG, setOpenG] = useState<string>("priority_review");
@@ -401,7 +470,7 @@ function RmQueue() {
   if (detail) return <EvDriver row={detail} onBack={() => setDetail(null)} sourceQueueId={detail.__queue_id as string | undefined} />;
   if (err) return <EmptyState kind="error" />;
   if (!rows) return <EmptyState kind="loading" />;
-  const counts = Object.fromEntries(QUEUE_GROUPS.map(([k]) => [k, rows.filter((r) => r.review_queue === k).length]));
+  const counts = Object.fromEntries(QUEUE_GROUPS.map(([k]) => [k, k === "drop7" ? (drop7Data?.drop_count ?? 0) : rows.filter((r) => r.review_queue === k).length]));
   return <div>
     <PageHead code="RM01 · 队列来源 review_queue（as_of 2026-07-31）" title="风险工作台" desc="优先队列直接来自已入库 review_queue 算法输出（只读）；排序只决定先处理谁，不生成新风险分，也不会自动创建告警——当前告警表 0 条即为事实。点击队列行进入 EV03（回带 queue_id 来源）。" />
     <div className="cards">
@@ -414,9 +483,10 @@ function RmQueue() {
     <div className="row" style={{ marginBottom: 8 }}>
       {QUEUE_GROUPS.map(([k, label]) => <button key={k} className="btn" style={openG === k ? { borderColor: "var(--navy)", color: "var(--navy)" } : undefined} onClick={() => setOpenG(k)}>{label} {counts[k]}</button>)}
     </div>
-    <ResourceTable key={`q-${openG}`} resource="admin.review_queue" pageSize={25} params={{ review_queue: openG }}
-      onRowClick={openDriver} labels={{ queue_id: "queue_id(来源)", gpsno: "车辆", safety_score: "14天安全分", rank: "车队排名", risk_level: "等级", forecast_40d_risk_prob: "40天概率", action_deadline: "处置时限", confidence_level: "可信度", top_reason_1: "首要原因", as_of_date: "截止日", source_version: "来源版本" }} />
-    <QueueConfirm group={openG} />
+    {openG === "drop7" ? <>{drop7Data ? <Drop7Panel data={drop7Data} openRow={(gps) => { location.hash = `ev-fleet?gpsno=${encodeURIComponent(gps)}`; }} /> : <EmptyState kind="loading" />}</> : null}
+    {openG !== "drop7" && <ResourceTable key={`q-${openG}`} resource="admin.review_queue" pageSize={25} params={{ review_queue: openG }}
+      onRowClick={openDriver} labels={{ queue_id: "queue_id(来源)", gpsno: "车辆", safety_score: "14天安全分", rank: "车队排名", risk_level: "等级", forecast_40d_risk_prob: "40天概率", action_deadline: "处置时限", confidence_level: "可信度", top_reason_1: "首要原因", as_of_date: "截止日", source_version: "来源版本" }} />}
+    {openG !== "drop7" && <QueueConfirm group={openG} />}
     <p className="login-note">分组与阈值出自 review_queue 快照与运营口径（7天下降≥10分等规则第4-5轮接入产生 alerts 写入）；本页仅排序展示，未写入任何业务对象。</p>
   </div>;
 }
@@ -564,6 +634,7 @@ function RmAlerts({ initialAlertId }: { initialAlertId?: string | null }) {
           </div>}
           {st === "confirmed" && !draftRow && <div className="stack">
             <div className="row" style={{ margin: 0 }}><span className="tag" style={{ background: "#fff7e6", color: "#ad6800", borderColor: "#ffd591", fontSize: 12 }}>草稿，未发送（AI 填入内容可直接编辑）</span></div>
+          <TemplateInsertRow gpsno={"—"} driverId={String(cs?.alert?.driver_id ?? ((location.hash.match(/driver_id=([^&]+)/)||[])[1] ?? ""))} onInsert={(txt) => setDraft(txt)} />
           <textarea className="btn" style={{ width: "100%", minHeight: 76, textAlign: "left", fontFamily: "inherit" }} aria-label="干预草稿" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="人工撰写沟通正文（发送前不落任何 sent 字段）" />
             <button className="btn primary" style={{ width: "auto" }} disabled={sending || !draft.trim()} onClick={() => act(() => interventionDraft(String(al.alert_id), draft), "干预草稿已建（仅草稿）")}>保存草稿（不构成送达）</button>
           </div>}
@@ -655,29 +726,68 @@ function ReviewBench() {
   const [decision, setDecision] = useState("approved");
   const [reason, setReason] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
-  const load = () => { getData<Record<string, unknown>>("admin.trainings", { limit: 100 }).then((r) => setRows(r.rows.filter((x) => x.status === "submitted"))).catch(() => setRows([])); };
+  const [sum, setSum] = useState<TaskSummary | "loading" | null>(null);
+  const [chk, setChk] = useState<string | null>(null);
+  const load = () => { getData<Record<string, unknown>>("admin.trainings", { limit: 100 }).then((r) => setRows(r.rows.filter((x) => x.status === "submitted" || x.status === "returned"))).catch(() => setRows([])); };
   useEffect(load, [msg]);
-  useEffect(() => { if (sel) taskView(sel).then(setDetail).catch(() => setDetail(null)); }, [sel]);
+  useEffect(() => { if (sel) { taskView(sel).then((v) => setDetail(v)).catch(() => setDetail(null)); setSum(null); setChk(null); } }, [sel]);
   if (!rows) return <EmptyState kind="loading" />;
-  async function send() { setMsg(null); try { const r = await taskReview(sel!, decision, reason); setMsg(`审核完成：${r.new_status} · 审计 ${r.audit_id}${r.idempotent_replay ? "（幂等重放）" : ""}`); setSel(null); } catch (e) { setMsg(`拒绝：${e instanceof ApiError ? e.code : "network"}`); } }
+  async function send() { setMsg(null); try { const r = await taskReview(sel!, decision, reason); setMsg(`审核完成：${r.new_status} · 业务=${r.task_id} · 审计 ${r.audit_id}${r.idempotent_replay ? "（旧状态复核：仅返回原结果，未重复写入）" : ""}`); setSel(null); load(); } catch (e) { setMsg("审核被拒：" + (e instanceof ApiError ? e.code : "network") + "（需 submitted/returned 态 + 理由）"); } }
   return <div>
-    <h3 style={{ fontSize: 14 }}>TR06 反馈与复核工作台（待复核队列）</h3>
-    {rows.length === 0 && <EmptyState kind="nomatch" hint="当前没有已提交、待复核的任务（真实状态：3 条任务均已人工复核 reviewed）。历史复核结论/退回记录在 TR01 台账点任务查看 TR03 时间轴；司机补交后会实时进入此队列。不为演示造队列数据。" />}
-    <ResourceTable resource="admin.trainings" pageSize={20} params={{ status: "submitted" }} onRowClick={(r) => setSel(String(r.task_id))} labels={{ task_id: "task_id", driver_id: "司机", course_id: "课程", submitted_at: "提交时间", status: "状态" }} />
-    {detail && <div className="panel" style={{ marginTop: 10 }}>
-      <h3>待复核：{String(detail.task.task_id)}</h3>
-      <div className="grid2">
-        <div><h4 style={{ fontSize: 12.5 }}>司机原文</h4><p style={{ whiteSpace: "pre-wrap", fontSize: 13, background: "var(--bg)", borderRadius: 8, padding: 8 }}>{String(detail.task.learning_record || "—")}</p>{detail.task.feedback ? <><h4 style={{ fontSize: 12.5 }}>反馈</h4><p style={{ fontSize: 13 }}>{String(detail.task.feedback)}</p></> : null}</div>
-        <div><div className="kv"><span className="kk">课程/完成条件</span><b>{String(detail.course?.title)}：{String(detail.course?.completion_requirement || "—")}</b><span className="kk">关联事实</span><b className="mono">{detail.alert ? `alert ${String(detail.alert.alert_id)}（${String(detail.alert.rule_code)}）证据 ${String(detail.alert.evidence_id)}` : "—"}</b><span className="kk">目标/截止</span><b>{String(detail.task.goal)} · {String(detail.task.due_at || "—")}</b></div></div>
+    <h3 style={{ fontSize: 14 }}>TR06 反馈与复核工作台（待复核队列：submitted / returned）</h3>
+    {rows.length === 0 && <EmptyState kind="nomatch" hint="当前没有已提交待复核的任务（历史 reviewed 任务可经 TR01 台账查看，不生成假待办）" />}
+    <ResourceTable resource="admin.trainings" pageSize={20} params={{}} onRowClick={(r) => { if (r.status === "submitted" || r.status === "returned") setSel(String(r.task_id)); }} labels={{ task_id: "task_id", driver_id: "司机", course_id: "课程", status: "状态", submitted_at: "提交时间", due_at: "截止" }} />
+    {sel && detail && <div className="panel" style={{ marginTop: 10 }}>
+      <h3>复核详情：{String(detail.task.task_id)}（原文与摘要只读；仅下方人工操作会写库）</h3>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 }}>
+        <div className="task-card" style={{ padding: 8 }}>
+          <div className="t">① 司机提交原文（永不改写/覆盖，AI 仅引用）</div>
+          <p style={{ whiteSpace: "pre-wrap", fontSize: 13, background: "var(--bg)", borderRadius: 8, padding: 8 }} id="tr06-original">{String((detail.task as { learning_record?: string }).learning_record || "—")}{(detail.task as { feedback?: string }).feedback ? "\n[反馈] " + String((detail.task as { feedback?: string }).feedback) : ""}</p>
+          <div className="meta">提交时间：{String(detail.task.submitted_at || "—")} · 状态：{String(detail.task.status)}</div>
+        </div>
+        <div className="task-card" style={{ padding: 8 }}>
+          <div className="t">② 课程要求（任务分配指向的版本记录）</div>
+          <div className="kv"><span className="kk">课程</span><b>{String(detail.course?.title || "—")} · v{String((detail.course as { version_no?: number } | undefined)?.version_no ?? "—")}</b></div>
+          <div className="kv"><span className="kk">完成条件</span><b>{String(detail.course?.completion_requirement || "—")}</b></div>
+          <div className="kv"><span className="kk">学习目标</span><b>{String(detail.task.goal || "—")}{detail.task.mandatory ? " · 强制" : ""}</b></div>
+          <div className="meta">课程当前状态：{String((detail.course as { content_status?: string } | undefined)?.content_status || "—")}{(detail.course as { content_status?: string } | undefined)?.content_status === "disabled" ? "（课程已停用——本处仍展示分配时的历史版本要求，不回写不删除）" : ""}</div>
+        </div>
+        <div className="task-card" style={{ padding: 8 }}>
+          <div className="t">③ 已授权且可核实的关联证据</div>
+          {detail.task.alert_id ? <>
+            <div className="kv"><span className="kk">关联案卷</span><b className="mono">{String(detail.task.alert_id)}</b></div>
+            <div className="kv"><span className="kk">规则/证据</span><b>{String((detail as { alert?: { rule_code?: string; evidence_id?: string } }).alert?.rule_code || "—")} · {String((detail as { alert?: { evidence_id?: string } }).alert?.evidence_id || "—")}</b></div>
+            <div className="kv"><span className="kk">事实日期</span><b>{String((detail as { alert?: { occurred_at?: string } }).alert?.occurred_at || "—")}</b></div>
+          </> : <div className="alert info">未取得：该任务未关联 alert_id（系统不臆造证据）</div>}
+        </div>
+        <div className="task-card" style={{ padding: 8, borderColor: "#b9cbe8", background: "#f6f9ff" }}>
+          <div className="t">④ AI 辅助摘要（只读草稿，不判定通过/退回）</div>
+          <button className="btn" disabled={sum === "loading"} onClick={async () => { setSum("loading"); try { setSum(await taskSummary(sel!)); } catch { setSum({ available: false, note: "生成失败（服务端已留审计）" }); } }}>{sum === "loading" ? "生成中…" : sum && typeof sum === "object" && sum.available ? "重新生成摘要" : "生成 AI 辅助摘要（受控只读）"}</button>
+          {sum === "loading" && <div className="meta">模型运行中（读取的是本页同源事实，生成不改任务状态/reviewer/时间戳）</div>}
+          {sum && typeof sum === "object" && !sum.available && <div className="alert warn">AI 摘要暂不可用：{String(sum.reason || "")} —— {String(sum.note || "前三部分与人工审核照常可用")}</div>}
+          {sum && sum !== "loading" && sum.available && <>
+            {sum.cached ? <div className="meta">（10 分钟内复用缓存结果，未重复计费/调用）</div> : null}
+            {sum.course ? <div className="meta">课程版本核对：v{sum.course.version_no} · 当前 {sum.course.current_status}{sum.course.note ? " · " + sum.course.note : ""}</div> : null}
+            {(sum.items || []).map((it, n) => <div key={n} className="task-card" style={{ padding: 6, marginTop: 5 }}>
+              <div style={{ fontSize: 12.5 }}><b>{it.judgment}</b> <Tag tone={it.state === "覆盖" ? "green" : it.state === "未见" ? "amber" : "gray"}>{it.state}</Tag>{!it.ref_ok ? <Tag tone="red">ref 不在白名单（已隔离不生效）</Tag> : null}</div>
+              <div className="meta" style={{ fontSize: 11.5 }}>依据：{it.fact} → <button className="btn" style={{ padding: "0 6px", fontSize: 11 }} onClick={async () => { const ref = it.ref.startsWith("task:") ? null : it.ref; if (!ref) { document.getElementById("tr06-original")?.scrollIntoView({ block: "center" }); setChk("已定位到 ① 原文（同一记录）"); return; } try { const rr = await aiEvidenceCheck(ref); if (rr.ok && rr.route) { location.hash = rr.route.replace(/^#/, ""); setChk("引用重新验权通过：" + ref); } else setChk("该引用重新验权未通过或记录已变化（不缓存旧数据）"); } catch { setChk("引用验权失败"); } }}>{it.ref} ↗</button></div>
+            </div>)}
+            <div className="meta">{(sum.limitations || []).join(" ")}</div>
+            <div className="meta">{sum.audit_note} · 模型 {sum.model}</div>
+          </>}
+          {chk && <div className="alert info">{chk}</div>}
+        </div>
       </div>
       <div className="row" style={{ marginTop: 8 }}>
-        <select className="btn" style={{ background: "#fff" }} value={decision} onChange={(e) => setDecision(e.target.value)}><option value="approved">通过</option><option value="returned">退回补充</option><option value="observe">继续观察</option><option value="interview">转人工面谈</option></select>
-        <input className="btn" style={{ flex: 1, textAlign: "left", minWidth: 200 }} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="审核理由（必填，写审计）" aria-label="审核理由" />
-        <button className="btn primary" style={{ width: "auto" }} onClick={send} disabled={!reason.trim()}>确认审核并留痕</button>
+        <select className="btn" style={{ background: "#fff" }} value={decision} onChange={(e) => setDecision(e.target.value)} aria-label="审核决定"><option value="approved">通过</option><option value="returned">退回补充</option><option value="observe">继续观察</option><option value="interview">转面谈</option></select>
+        <input className="btn" style={{ flex: 1, textAlign: "left", minWidth: 200 }} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="审核理由（必填；先看原文再填写）" aria-label="审核理由" />
+        <button className="btn primary" style={{ width: "auto" }} onClick={send} disabled={!reason.trim()}>人工确认（写入并留痕）</button>
         <button className="btn" onClick={() => setSel(null)}>收起</button>
       </div>
+      <p className="meta">AI 摘要与人工确认相互独立：摘要生成/刷新零写库；确认走原有状态机（校验角色、旧状态版本、幂等——旧已审任务重复点击仅回放原业务结果）。</p>
       {msg && <div className="alert info">{msg}</div>}
     </div>}
+    {sel && !detail && <div className="meta">任务读取失败或无权访问</div>}
   </div>;
 }
 
@@ -706,185 +816,42 @@ function TrLedger()  {
 }
 
 function TrCourses() {
-  const [rows, setRows] = useState<ScoreRow[] | null>(null);
-  const [open, setOpen] = useState<ScoreRow | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [driverId, setDriverId] = useState("DEMO_D0149");
-  useEffect(() => { getData<ScoreRow>("admin.training_courses").then((r) => setRows(r.rows)).catch(() => setRows([])); }, []);
-  if (!rows) return <EmptyState kind="loading" />;
-  async function act(next: string) {
-    if (!open) return; setMsg(null);
-    try {
-      const r = await courseReview({ course_id: String(open.course_id), new_status: next, note: next === "pending_review" ? "内容核验通过，提交团队人工审核" : "管理员操作" });
-      setMsg(`${r.old_status} → ${r.new_status} · v${r.version_no} · 审核轨迹审计 ${r.audit_id}`);
-      const g = await getData<ScoreRow>("admin.training_courses"); setRows(g.rows); setOpen(g.rows.find((x) => x.course_id === open.course_id) || open);
-    } catch (e) { setMsg(`拒绝：${e instanceof ApiError ? e.code : "network_error"}`); }
-  }
-  async function tryAssign() {
-    if (!open) return; setMsg(null);
-    try { const r = await trainingAssign({ course_id: String(open.course_id), driver_id: driverId, goal: "演示分配路径" }); setMsg(`分配成功 task_id=${r.task_id}`); }
-    catch (e) { setMsg(`服务端拒绝正式分配：${e instanceof ApiError ? e.code : "network_error"}（门禁=课程必须处于 approved，导入≠审核）`); }
-  }
   return <div>
-    <PageHead code="TR05 / SM06" title="课程库与内容审核" desc="真实查询 training_courses：保留原始 content_status；“已审核approved”前不得正式分配、不得向司机发课程通知、AI 不得当作已批准制度引用。审核轨迹写 audit_logs，导入动作不等于审核通过。" />
-    <ResourceTable resource="admin.training_courses" onRowClick={(r) => { setOpen(r); setMsg(null); }} labels={{ course_id: "课程ID", title: "标题", dimension: "适用维度", completion_requirement: "完成条件", content_status: "内容状态", version_no: "版本", source_version: "来源", updated_at: "更新" }} />
-    {open && <div className="panel"><h3>内容核验：{String(open.title)}（{String(open.course_id)} · v{String(open.version_no)}）</h3>
-      <div className="kv"><span className="kk">content_status</span><b>{String(open.content_status) === "demo_draft_requires_team_review" ? "demo_draft_requires_team_review —— 演示草稿，待团队审核" : String(open.content_status)}</b>
-        <span className="kk">适用维度</span><b>{String(open.dimension)}</b><span className="kk">完成条件</span><b>{String(open.completion_requirement)}</b></div>
-      <p style={{ whiteSpace: "pre-wrap", background: "var(--bg)", borderRadius: 8, padding: 10, fontSize: 13 }}>{String(open.content)}</p>
-      <div className="row">
-        {String(open.content_status) === "demo_draft_requires_team_review" || String(open.content_status) === "draft" ? <button className="btn" onClick={() => act("pending_review")}>标记待审（内容核验已看）</button> : null}
-        {String(open.content_status) === "pending_review" ? <><button className="btn" onClick={() => act("approved")}>人工审核通过 → approved</button><button className="btn" onClick={() => act("draft")}>退回草稿</button></> : null}
-        {String(open.content_status) === "approved" ? <button className="btn" onClick={() => act("disabled")}>停用</button> : null}
-        <input className="btn" style={{ width: 160, textAlign: "left" }} value={driverId} onChange={(e) => setDriverId(e.target.value)} aria-label="目标司机" />
-        <button className="btn primary" style={{ width: "auto" }} onClick={tryAssign}>尝试正式分配（门禁演示）</button>
-      </div>
-      {msg && <div className="alert warn" style={{ marginTop: 8 }}>{msg}</div>}
-      <p className="login-note">本轮三门课程保持 demo_draft_requires_team_review；未人工approved前任何“尝试正式分配”都应收到 409 course_not_approved。</p>
-    </div>}
+    <PageHead code="TR05 / SM06" title="课程库与人工审核" desc="真实 training_courses：保留原 content_status 与课程文本；作者/审核人/审核时间由 audit_logs 合成（表无该列，平台无 DDL 通道）。三门 DEMO_C01–C03 保持待团队审核，不因挂载自动批准。批准/停用为明确确认动作；TR02 与 AI 只引用 approved 版本，草稿/待审/停用直接接口请求被服务端拒绝。" />
+    <CourseBoard />
   </div>;
 }
 
-function TrCreate() {
-  const [courses, setCourses] = useState<Record<string, unknown>[]>([]);
-  const [alerts, setAlerts] = useState<Record<string, unknown>[]>([]);
-  const [driver, setDriver] = useState("DEMO_D0149");
-  const [course, setCourse] = useState("DEMO_C01");
-  const [alertId, setAlertId] = useState<string>("");
-  const [goal, setGoal] = useState("");
-  const [due, setDue] = useState("2026-11-15");
-  const [mand, setMand] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [aiFill, setAiFill] = useState<string | null>(null);
-  useEffect(() => {
-    const take = () => { try { const raw = sessionStorage.getItem("claw_fill"); if (!raw) return; const ft = JSON.parse(raw); if (ft.form !== "tr2") return;
-      if (ft.driver_id) setDriver(String(ft.driver_id)); if (ft.course_id) setCourse(String(ft.course_id));
-      const gc = (ft.goal_candidates || [])[0]; if (gc && !course) setCourse(String(gc));
-      if (ft.due_at) setDue(String(ft.due_at)); setMand(Boolean(ft.mandatory)); if (ft.alert_id) setAlertId(String(ft.alert_id));
-      if (!goal && ft.note) setGoal(""); sessionStorage.removeItem("claw_fill"); setAiFill("已填入 AI 草稿（全部可改）；确认分配前不写 training_tasks；未审核课程将被服务端 409 拒绝"); } catch {} };
-    take(); window.addEventListener("claw:fill", take); return () => window.removeEventListener("claw:fill", take);
-  }, []);
-  useEffect(() => { Promise.all([getData<Record<string, unknown>>("admin.training_courses", { limit: 20 }), getData<Record<string, unknown>>("admin.alerts", { limit: 50 })]).then(([c, a]) => { setCourses(c.rows); setAlerts(a.rows.filter((x) => x.status !== "closed")); }).catch(() => {}); }, []);
-  const approved = courses.filter((c) => c.content_status === "approved");
-  async function submit() {
-    setBusy(true); setMsg(null);
-    try { const r = await trainingAssign({ course_id: course, driver_id: driver, goal: goal || `结合 ${driver} 已核实证据完成 ${course} 复盘`, mandatory: mand, due_at: due, alert_id: alertId || undefined } as never); setMsg(`分配成功 task_id=${(r as { task_id?: string }).task_id}（分配通知已面向有效绑定账号生成）`); }
-    catch (e) { const c2 = e instanceof ApiError ? e.code : "network"; setMsg({ course_not_approved: "服务端拒绝：课程处于待审核演示草稿——安全管理员团队人工审核通过前不得正式分配（training_tasks 不新增）", driver_binding_unverified: "服务端拒绝：目标司机绑定未核实", evidence_driver_mismatch: "服务端拒绝：所选告警证据与该司机不匹配", evidence_alert_not_found: "服务端拒绝：告警不存在" }[c2] || `拒绝：${c2}`); }
-    setBusy(false);
-  }
-  return <div>
-    <PageHead code="TR02" title="创建培训（分配受审核门禁）" desc="表单强制顺序：已审核课程 → 关联真实证据（本车队告警）→ 目标/强制性/截止 → 安全员页面确认分配。低可信度且行为证据不足时应优先设备核验而非惩罚培训。" />
-    <div className="panel stack">
-      <div className="field"><label>目标司机（已核实绑定对象；演示口径）</label><input value={driver} onChange={(e) => setDriver(e.target.value)} /></div>
-      <div className="field"><label>从告警关联证据（可选，须与司机匹配）</label>
-        <select className="btn" style={{ background: "#fff", textAlign: "left" }} aria-label="关联告警" value={alertId} onChange={(e) => setAlertId(e.target.value)}><option value="">不关联</option>{alerts.map((a) => <option key={String(a.alert_id)} value={String(a.alert_id)}>{String(a.gpsno)} · {String(a.rule_code)} · {String(a.status)}</option>)}</select></div>
-      <div className="field"><label>课程（approved 才允许正式分配）</label>
-        <select className="btn" style={{ background: "#fff", textAlign: "left" }} value={course} onChange={(e) => setCourse(e.target.value)}>{(approved.length ? approved.map((c) => <option key={String(c.course_id)}>{String(c.course_id)}</option>) : courses.map((c) => <option key={String(c.course_id)}>{String(c.course_id)}（{String(c.content_status)}）</option>))}</select>
-        <span className="login-note">当前已审核课程：{approved.length} / {courses.length}——{approved.length === 0 ? "全部仍为演示草稿待团队审核（TR05 人工动作）" : ""}</span></div>
-      <div className="field"><label>学习目标</label><input value={goal} onChange={(e) => setGoal(e.target.value)} aria-label="学习目标" placeholder="结合已核实证据写可观察目标" /></div>
-      <div className="field"><label>截止日（逾期将入展示分支）</label><input value={due} onChange={(e) => setDue(e.target.value)} aria-label="截止日期" type="date" /></div>
-      <label className="row" style={{ fontSize: 13 }}><input type="checkbox" checked={mand} onChange={(e) => setMand(e.target.checked)} /> 强制（仅授权安全员可指定，AI 不得自动设为强制）</label>
-      {aiFill && <div className="alert info">{aiFill}</div>}
-      <div className="row"><span className="tag blue" style={{ fontSize: 12 }}>草稿状态，未分配</span><button className="btn primary" style={{ width: "auto" }} disabled={busy} onClick={submit}>安全员确认分配（正式写入需点击）</button></div>
-      {msg && <div className="alert warn">{msg}</div>}
-      <p className="login-note">司机提交/复核反馈仅在任务存在后于 TR04/TR06 发生；本页面自身不产生任何假任务。</p>
-    </div>
-  </div>;
-}
-
-function AccountAdmin() {
-  const [username, setUsername] = useState("temp_qa");
-  const [role, setRole] = useState("team_leader");
-  const [created, setCreated] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [tickU, setTickU] = useState(0);
-  async function create() {
-    setMsg(null);
-    try { const r = await createUser({ username: `${username}_${Date.now() % 100000}`, display_name: "临时QA账号", role }); setCreated(`${r.username} 初始口令：${r.initial_password}（仅此一次展示；user_id=${r.user_id}）`); setTickU((x) => x + 1); }
-    catch (e) { setMsg(`拒绝：${e instanceof ApiError ? e.code : "network"}`); }
-  }
-  async function setStatus(id: string, st: string) {
-    setMsg(null);
-    try { const r = await setUserStatus(id, st); setMsg(`${id} → ${r.account_status} · 审计 ${r.audit_id} · ${r.note ?? ""}`); setTickU((x) => x + 1); }
-    catch (e) { setMsg(`拒绝：${e instanceof ApiError ? e.code : "network"}`); }
-  }
-  return <div className="panel"><h3>账号创建 / 停用 / 恢复（SM01 · 停用即时清除会话并拒绝旧 Cookie）</h3>
-    <div className="row">
-      <input className="btn" style={{ width: 150, textAlign: "left" }} value={username} onChange={(e) => setUsername(e.target.value.replace(/[^a-z0-9_.-]/g, ""))} aria-label="账号名前缀" />
-      <select className="btn" style={{ background: "#fff" }} value={role} onChange={(e) => setRole(e.target.value)} aria-label="角色"><option value="team_leader">团队长 team_leader</option><option value="driver">司机 driver</option><option value="safety_admin">安全管理员 safety_admin</option></select>
-      <button className="btn primary" style={{ width: "auto" }} onClick={create}>创建账号</button>
-      <button className="btn" onClick={() => { setMsg(null); egressProbe().then((r) => setMsg("探针结果：" + JSON.stringify(r))).catch((e) => setMsg(`探针失败：${e instanceof ApiError ? e.code : "net"}`)); }}>出站连通探针（AI 前置）</button>
-    </div>
-    {created && <div className="alert ok">{created}</div>}
-    {msg && <div className="alert info">{msg}</div>}
-    <div className="row" style={{ marginTop: 6 }}>
-      <button className="btn" onClick={() => setStatus("u-driver-0001", "disabled")}>停用 driver_demo（会中断当前演示，慎用）</button>
-      <button className="btn" onClick={() => setStatus("u-driver-0001", "active")}>恢复 driver_demo</button>
-    </div>
-    <p className="login-note">A23 推荐流程：创建临时账号 → 用其登录验证可读 → 停用 → 旧会话立即 401/403 → 审计 account.status_change 留痕。</p>
+// SM01：挂载完整账号管理面板（组件与 manage.accounts 门禁复用第2/13轮后端，未重建账号体系）
+function AccountAdmin() { return null; }
+function TemplateInsertRow(props: { gpsno: string; driverId: string; onInsert: (t: string) => void }) {
+  const [opts, setOpts] = useState<{ migration_pending?: boolean; latest?: { template_id: string; template_key: string; version: number; title: string; review_status: string }[] } | null>(null);
+  const [sel, setSel] = useState(""); const [note, setNote] = useState<string | null>(null);
+  useEffect(() => { fetch("/api/admin/templates?review_status=approved&scene=rm3_draft", { credentials: "include" }).then((r) => r.json()).then((j) => setOpts(j)).catch(() => setOpts({ latest: [] })); }, []);
+  const approved = (opts?.latest || []).filter((x) => x.review_status === "approved");
+  if (opts && opts.migration_pending) return <div className="meta">通知模板：迁移 005 未执行（待属主）——选择/预览不写 interventions / notification_events；模板可用后此处可选已审核模板生成<b>可编辑草稿</b>，发送仍须你点击原确认按钮。</div>;
+  return <div className="row" style={{ gap: 6, margin: "4px 0", flexWrap: "wrap" }}>
+    <select className="btn" style={{ width: "auto", maxWidth: 260 }} value={sel} onChange={(e) => setSel(e.target.value)} aria-label="模板选择"><option value="">从已审核模板插入…（{approved.length ? approved.length + " 个可用" : "暂无 approved 模板——不会凭空插入"}）</option>{approved.map((a) => <option key={a.template_id} value={a.template_id}>{a.template_key}:v{a.version} · {a.title}</option>)}</select>
+    <button className="btn" disabled={!sel} onClick={async () => { try { const r = await fetch(`/api/admin/template-preview?template_id=${encodeURIComponent(sel)}&driver_id=${encodeURIComponent(props.driverId)}`, { credentials: "include" }).then((x) => x.json()); if (r.ok && r.rendered) { props.onInsert(String(r.rendered)); setNote("预览已插入正文（可编辑；缺事实保留（待核：…））" + (r.missing_facts?.length ? " · 缺：" + r.missing_facts.join("、") : "") + (r.bound_account ? "" : " · 该司机无已核实绑定：发送后不会显示已送达") + "；发送仍需人工确认"); } else setNote(String(r.error || r.note || "预览不可用（未审核模板已拒绝）")); } catch { setNote("预览失败"); } }}>预览并插入草稿</button>
+    {note && <span className="meta">{note}</span>}
   </div>;
 }
 
 function SmAccounts() {
   return <div>
-    <PageHead code="SM01" title="账号与角色" desc="账号筛选表 + 编辑抽屉；创建、停用、恢复、车队范围与司机绑定；每次变更写入 audit_logs。应用不存储明文密码；启用平台 SSO 后登录身份以千问账号为准。" />
-    <ResourceTable resource="admin.accounts" labels={{ user_id: "用户ID", username: "登录名", display_name: "姓名/显示名", role: "角色", fleet_scope: "车队范围", driver_id: "绑定司机", binding_verified: "绑定已核实", account_status: "状态", last_login_at: "最近登录" }} />
-    <p className="login-note">第2轮：编辑抽屉与停用/恢复；演示司机 driver_demo 初始为“未绑定身份”，故其端上看不到个人明细（符合“未核实不展示”口径）。</p>
+    <PageHead code="SM01" title="账号与角色管理" desc="列表按当前管理员 fleet_scope 过滤；角色/状态/车队筛选；创建（演示仅 safety_admin 与 driver 两类登录）、编辑抽屉（显示名/车队范围/司机绑定）、停用与恢复。服务端唯一性：登录名唯一、司机有效绑定唯一、未核实身份不可自动绑定演示司机；停用即时清会话。任何页面与日志均不出现口令明文。" />
+    <AccountAdminPanel />
+    <p className="login-note">同一 safety_admin 兼具系统配置与安全处置两组能力（capability 矩阵见后端 ROLE_CAPABILITIES），不设第三种管理员登录。绑定核实入口保持在 SM02（BindPanel）。</p>
   </div>;
 }
 
-function BindPanel() {
-  const [users, setUsers] = useState<{ user_id: string; username: string; role: string; driver_id: string | null; binding_verified: boolean; binding_note: string | null; account_status: string }[]>([]);
-  const [userId, setUserId] = useState("");
-  const [driverId, setDriverId] = useState("DEMO_D0149");
-  const [verified, setVerified] = useState(true);
-  const [note, setNote] = useState("演示数据绑定：仅用于工作台演示，非真实司机身份核验");
-  const [result, setResult] = useState<string | null>(null);
-  useEffect(() => { getData<Record<string, unknown>>("admin.accounts").then((r) => setUsers(r.rows.map((x) => x as never))).catch(() => {}); }, []);
-  async function submit() {
-    setResult(null);
-    try {
-      const r = await setBinding({ user_id: userId, driver_id: driverId.trim() || null, verified, note });
-      setResult(`绑定成功：binding_id=${r.binding_id ?? "（已解绑）"} · identity_status=${r.identity_status} · 审计=${r.audit_id}`);
-    } catch (e) {
-      const code = e instanceof ApiError ? e.code : "network_error";
-      const text = code === "driver_not_imported" ? "driver_id 不在 drivers 表（先导入该对象档案）"
-        : code === "binding_conflict" ? "该 driver_id 已被另一有效账号绑定，禁止双绑定"
-        : code === "forbidden" ? "仅安全管理员可执行绑定" : code === "not_found" ? "账号不存在" : `失败：${code}`;
-      setResult(text);
-    }
-  }
-  const u = users.find((x) => x.user_id === userId);
-  return <div className="panel">
-    <h3>绑定操作（SM01/SM02 · 仅安全管理员 · 服务端验权）</h3>
-    <p className="page-desc">绑定 = 账号↔driver_id 的当前有效映射；变更前检查时段与双绑定冲突；历史绑定保留为 inactive 行。演示绑定必须填写说明并持续展示“演示映射”水印，不称为真实司机身份核验。</p>
-    <div className="stack">
-      <div className="field"><label>工作台账号</label>
-        <select className="btn" value={userId} onChange={(e) => setUserId(e.target.value)} style={{ background: "#fff", textAlign: "left" }}>
-          <option value="">— 选择账号 —</option>
-          {users.map((x) => <option key={x.user_id} value={x.user_id}>{x.username}（{x.role}·当前 {x.driver_id || "未绑定"}·{x.account_status}）</option>)}
-        </select>
-      </div>
-      <div className="field"><label>driver_id（留空=解绑；须存在于 drivers 表）</label><input value={driverId} onChange={(e) => setDriverId(e.target.value)} placeholder="如 DEMO_D0149" /></div>
-      <div className="field"><label>备注（演示绑定会作为水印持续显示在司机端与档案页）</label><input value={note} onChange={(e) => setNote(e.target.value)} disabled={!driverId} /></div>
-      <label className="row" style={{ fontSize: 13 }}><input type="checkbox" checked={verified} onChange={(e) => setVerified(e.target.checked)} /> 绑定生效（允许读取该对象本人数据）— 勾选不等于实名核验</label>
-      {u && <div className="login-note mono">当前：{u.driver_id || "未绑定"} · {u.binding_note || "无备注"} · verified={String(u.binding_verified)}</div>}
-      <div className="row"><button className="btn primary" style={{ width: "auto" }} onClick={submit} disabled={!userId}>保存绑定</button>
-      <button className="btn" onClick={() => { setUserId(""); setResult(null); }}>重置</button></div>
-      {result && <div className="alert info">{result}</div>}
-    </div>
-  </div>;
-}
+function BindPanel() { return <BindingsPanelLazy />; }
+function BindingsPanelLazy() { const [drv, setDrv] = useState<{ driver_id: string; gpsno: string }[] | null>(null); useEffect(() => { import("./api").then((m) => m.getData<{ driver_id: string; gpsno: string }>("admin.drivers", { limit: 600 }).then((r) => setDrv(r.rows)).catch(() => setDrv([]))); }, []); if (!drv) return <div className="meta">读取车队司机档案…</div>; return <BindingsConsole drivers={drv} />; }
 
 function SmBindings() {
   return <div>
-    <PageHead code="SM02" title="司机档案与绑定" desc="当前/历史绑定双区（gpsno、driver_id、identity_status、有效期）；变更前校验时段冲突；禁止两名有效司机绑定同一车辆。" />
-    <BindPanel />
-    <h3 style={{ fontSize: 14, margin: "6px 0" }}>当前绑定（active）</h3>
-    <ResourceTable resource="admin.bindings" params={{ account_status: "active" }} labels={{ binding_id: "绑定ID", user_id: "账号", role: "角色", driver_id: "司机ID", account_status: "状态", identity_status: "身份口径", effective_start: "生效", verified_by: "核实人", note: "备注" }} />
-    <h3 style={{ fontSize: 14, margin: "6px 0" }}>绑定历史</h3>
-    <EmptyState kind="nomatch" hint="尚无绑定记录。绑定将在导入 drivers 表后经 SM02 表单创建（第2轮）。" />
+    <PageHead code="SM02" title="司机档案与车辆绑定（当前/历史双区 + 时段冲突校验）" desc="绑定关系写 user_bindings（account/user 体系），展示 gpsno、driver_id、平台账号、identity_status、生效起止与演示身份标识；drivers 表冻结映射、历史评分与预测快照永不改写。日期语义：闭区间含首尾日；相邻(次日开始)允许；空结束=持续有效。结束早于开始、同车重叠跨账号、同账号同窗多司机均在服务端强制拒绝（编辑排除自身；并发经进程内互斥+写后回读自动回滚——多副本部署时该保护降级，需平台事务/唯一约束）。未核实的绑定不会下发个人明细（my.* 403）。as_of 可回看历史当日有效关系。" />
+    <BindingsPanelLazy />
   </div>;
 }
 
@@ -943,13 +910,74 @@ function SmAudit() {
     <Banner tone="info">导入包 manifest 六项 checks 均为 passed（数据侧本地验证结果）。审计日志为真实记录：登录/登出/预检/提交均在此可查。</Banner>
     <h3 style={{ fontSize: 14, margin: "6px 0" }}>导入运行台账（import_runs）</h3>
     <ResourceTable resource="admin.import_runs" labels={{ run_id: "run_id", filename: "文件", target_table: "目标表", source_version: "版本口径", check_status: "预检", row_total: "行数", accepted_count: "接受", rejected_count: "拒绝", dup_pk_count: "重复主键", type_error_count: "类型错误", unknown_columns: "未知列", actor_id: "操作者", created_at: "预检时间", committed_at: "写入时间", created_audit_id: "预检审计ID", commit_audit_id: "提交审计ID" }} />
-    <h3 style={{ fontSize: 14, margin: "6px 0" }}>操作审计（audit_logs）</h3>
-    <ResourceTable resource="admin.audit" labels={{ audit_id: "审计ID", actor_id: "操作者", actor_role: "角色", action: "动作", entity_type: "对象类型", entity_id: "对象ID", old_status: "旧状态", new_status: "新状态", occurred_at: "时间" }} />
+    <h3 style={{ fontSize: 14, margin: "6px 0" }}>操作审计（服务端筛选/分页/CSV 导出；不显示口令、完整问答或越权目标详情）</h3>
+    <AuditConsole />
   </div>;
 }
 
+function TrCreate() {
+  const [courses, setCourses] = useState<Record<string, unknown>[]>([]);
+  const [alerts, setAlerts] = useState<Record<string, unknown>[]>([]);
+  const [driver, setDriver] = useState("DEMO_D0149");
+  const [course, setCourse] = useState("DEMO_C01");
+  const [alertId, setAlertId] = useState<string>("");
+  const [goal, setGoal] = useState("");
+  const [due, setDue] = useState("2026-11-15");
+  const [mand, setMand] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [tplRef, setTplRef] = useState<string | null>(null);
+  const [aiFill, setAiFill] = useState<string | null>(null);
+  useEffect(() => {
+    const take = () => { try { const raw = sessionStorage.getItem("claw_fill"); if (!raw) return; const ft = JSON.parse(raw); if (ft.form !== "tr2") return;
+      if (ft.driver_id) setDriver(String(ft.driver_id)); if (ft.course_id) setCourse(String(ft.course_id));
+      const gc = (ft.goal_candidates || [])[0]; if (gc && !course) setCourse(String(gc));
+      if (ft.due_at) setDue(String(ft.due_at)); setMand(Boolean(ft.mandatory)); if (ft.alert_id) setAlertId(String(ft.alert_id));
+      if (ft.goal) setGoal(String(ft.goal)); else if (ft.note) setGoal(""); sessionStorage.removeItem("claw_fill"); setAiFill("已填入 AI 草稿（全部可改）；确认分配前不写 training_tasks；未审核课程将被服务端 409 拒绝"); } catch {} };
+    take(); window.addEventListener("claw:fill", take); return () => window.removeEventListener("claw:fill", take);
+  }, []);
+  useEffect(() => { Promise.all([getData<Record<string, unknown>>("admin.training_courses", { limit: 20 }), getData<Record<string, unknown>>("admin.alerts", { limit: 50 })]).then(([c, a]) => { setCourses(c.rows); setAlerts(a.rows.filter((x) => x.status !== "closed")); }).catch(() => {}); }, []);
+  const approved = courses.filter((c) => c.content_status === "approved");
+  async function submit() {
+    setBusy(true); setMsg(null);
+    try { const r = await trainingAssign({ course_id: course, driver_id: driver, goal: goal || `结合 ${driver} 已核实证据完成 ${course} 复盘`, mandatory: mand, due_at: due, alert_id: alertId || undefined, template_ref: tplRef || undefined } as never); setMsg(`分配成功 task_id=${(r as { task_id?: string }).task_id}（分配通知已面向有效绑定账号生成）`); }
+    catch (e) { const c2 = e instanceof ApiError ? e.code : "network"; setMsg({ course_not_approved: "服务端拒绝：课程处于待审核演示草稿——安全管理员团队人工审核通过前不得正式分配（training_tasks 不新增）", driver_binding_unverified: "服务端拒绝：目标司机绑定未核实", evidence_driver_mismatch: "服务端拒绝：所选告警证据与该司机不匹配", evidence_alert_not_found: "服务端拒绝：告警不存在" }[c2] || `拒绝：${c2}`); }
+    setBusy(false);
+  }
+  return <div>
+    <PageHead code="TR02" title="创建培训（分配受审核门禁）" desc="表单强制顺序：已审核课程 → 关联真实证据（本车队告警）→ 目标/强制性/截止 → 安全员页面确认分配。低可信度且行为证据不足时应优先设备核验而非惩罚培训。" />
+    <div className="panel stack">
+      <div className="field"><label>目标司机（已核实绑定对象；演示口径）</label><input value={driver} onChange={(e) => setDriver(e.target.value)} /></div>
+      <div className="field"><label>从告警关联证据（可选，须与司机匹配）</label>
+        <select className="btn" style={{ background: "#fff", textAlign: "left" }} aria-label="关联告警" value={alertId} onChange={(e) => setAlertId(e.target.value)}><option value="">不关联</option>{alerts.map((a) => <option key={String(a.alert_id)} value={String(a.alert_id)}>{String(a.gpsno)} · {String(a.rule_code)} · {String(a.status)}</option>)}</select></div>
+      <div className="field"><label>课程（approved 才允许正式分配）</label>
+        <select className="btn" style={{ background: "#fff", textAlign: "left" }} value={course} onChange={(e) => setCourse(e.target.value)}>{(approved.length ? approved.map((c) => <option key={String(c.course_id)}>{String(c.course_id)}</option>) : courses.map((c) => <option key={String(c.course_id)}>{String(c.course_id)}（{String(c.content_status)}）</option>))}</select>
+        <span className="login-note">当前已审核课程：{approved.length} / {courses.length}——{approved.length === 0 ? "全部仍为演示草稿待团队审核（TR05 人工动作）" : ""}</span></div>
+      <div className="field"><label>学习目标</label><input value={goal} onChange={(e) => setGoal(e.target.value)} aria-label="学习目标" placeholder="结合已核实证据写可观察目标" /></div>
+      <div className="field"><label>截止日（逾期将入展示分支）</label><input value={due} onChange={(e) => setDue(e.target.value)} aria-label="截止日期" type="date" /></div>
+      <label className="row" style={{ fontSize: 13 }}><input type="checkbox" checked={mand} onChange={(e) => setMand(e.target.checked)} /> 强制（仅授权安全员可指定，AI 不得自动设为强制）</label>
+      {aiFill && <div className="alert info">{aiFill}</div>}
+      <TemplateScenePicker scene="task_assigned" driverId={driver} onPick={(r) => setTplRef(r)} label="分配通知模板（可选，仅 approved；选择/预览不写库）" />
+      <div className="row"><span className="tag blue" style={{ fontSize: 12 }}>草稿状态，未分配</span><button className="btn primary" style={{ width: "auto" }} disabled={busy} onClick={submit}>安全员确认分配（正式写入需点击）</button></div>
+      {msg && <div className="alert warn">{msg}</div>}
+      <p className="login-note">司机提交/复核反馈仅在任务存在后于 TR04/TR06 发生；本页面自身不产生任何假任务。</p>
+    </div>
+  </div>;
+}
+
+// SM01：挂载完整账号管理面板（组件与 manage.accounts 门禁复用第2/13轮后端，未重建账号体系）
 function SmDrafts() { return <SmDraftsPage />; }
-function SmKnowledge() { return <SmKnowledgePage />; }
+function SmKnowledge() {
+  const [tab, setTab] = useState<"knowledge" | "templates">("knowledge");
+  return <div>
+    <div className="row" style={{ gap: 6, margin: "4px 0 8px" }}>
+      <button className="btn" style={tab === "knowledge" ? { borderColor: "var(--navy)", color: "var(--navy)" } : undefined} onClick={() => setTab("knowledge")}>知识条目（SM06）</button>
+      <button className="btn" style={tab === "templates" ? { borderColor: "var(--navy)", color: "var(--navy)" } : undefined} onClick={() => setTab("templates")} aria-label="通知模板标签">通知模板（第三类内容）</button>
+      <a className="meta" href="#/tr-courses" style={{ marginLeft: 8 }}>课程审核在 TR05 ↗（同门禁）</a>
+    </div>
+    {tab === "knowledge" ? <SmKnowledgePage /> : <TemplatesTab />}
+  </div>;
+}
 
 export function AdminShell({ user }: { user: MeUser }) {
   const [route, setRoute] = useState(() => (location.hash.replace(/^#\/?/, "") || "overview").split("?")[0]);
@@ -973,6 +1001,7 @@ export function AdminShell({ user }: { user: MeUser }) {
       case "sm-accounts": return <SmAccounts />;
       case "sm-bindings": return <SmBindings />;
       case "sm-config": return <SmConfig />;
+      case "ai-preplan": return <AiPreplanPage />;
       case "sm-audit": return <SmAudit />;
       case "sm-drafts": return <SmDrafts />;
       case "sm-knowledge": return <SmKnowledge />;

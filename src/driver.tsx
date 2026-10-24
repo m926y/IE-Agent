@@ -1,7 +1,38 @@
 import { useEffect, useState } from "react";
-import type { MeUser } from "./api";
-import { ApiError, getData, interventionRead, interventionReply, logout, myNotes, noteRead, rrCreate, taskSaveDraft, taskStart, taskSubmit } from "./api";
+import type { FleetSummary } from "./api";import type { MeUser } from "./api";
+import { ApiError, fleetSummary, getData, interventionRead, interventionReply, logout, myNotes, noteRead, rrCreate, taskSaveDraft, taskStart, taskSubmit } from "./api";
 import { Banner, EmptyState, ResourceTable, Tag, GlobalSearch} from "./ui";
+
+function FleetStatsPanel() {
+  const [fs, setFs] = useState<FleetSummary | "loading" | "error" | null>(null);
+  useEffect(() => { fleetSummary().then((r) => setFs(r)).catch(() => setFs("error")); }, []);
+  return <div className="panel" style={{ borderColor: "#b9cbe8", background: "#f4f8ff" }} aria-label="anonymous fleet statistics panel">
+    <h3>匿名车队统计（与“我的安全”分区：仅聚合值，无姓名/司机ID/车辆ID/个人分/排名/事件）</h3>
+    {fs === "loading" && <EmptyState kind="loading" />}
+    {fs === "error" && <div className="alert warn">无法获取车队统计：本账号未绑定/未核实或查询失败（服务端拒绝时不返回任何个人与车队数据）</div>}
+    {typeof fs === "object" && fs && fs.data_status !== "ok" && (
+      <div className={"alert " + (fs.data_status === "query_failed" ? "warn" : "info")}>
+        {fs.data_status === "insufficient_sample" ? "样本不足：该车队有效评分人数少于 10，均值与分布已隐藏（隐私保护，不以 0 或空壳冒充）"
+          : fs.data_status === "no_data" ? "无数据：" + fs.note : "统计查询失败：请稍后重试（未以空值冒充 0）"}
+        {fs.as_of_date ? " · 数据截止 " + fs.as_of_date : ""}
+      </div>)}
+    {typeof fs === "object" && fs && fs.data_status === "ok" && <>
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 13 }}>
+        <span>数据截止 <b>{fs.as_of_date}</b></span>
+        <span>有效评分人数 <b>{fs.valid_count}</b></span>
+        <span>车队平均安全分 <b>{fs.average ?? "—"}</b></span>
+        <span className="meta">版本 {fs.source_version}</span>
+      </div>
+      {fs.distribution ? <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, marginTop: 8 }}>
+        {(["A", "B", "C", "D"] as const).map((k) => { const v = (fs.distribution as Record<string, number>)[k] ?? 0; return <div key={k} className="task-card" style={{ padding: 6, textAlign: "center" }}>
+          <div className="meta">{k} 级</div><div style={{ fontSize: 18, fontWeight: 700 }}>{v}</div>
+          <div style={{ height: 4, background: "#dfe8f6", borderRadius: 2 }}><div style={{ height: 4, width: Math.round((v / (fs.valid_count || 1)) * 100) + "%", background: k === "D" ? "#b3261e" : k === "C" ? "#ad6800" : k === "B" ? "#1a56c4" : "#1a6b2a", borderRadius: 2 }} /></div>
+        </div>; })}
+      </div> : <div className="alert info" style={{ marginTop: 6 }}>{fs.note || "等级类别过细可能反推个人：本次不展示分布（人数与均值保留）"}</div>}
+      <p className="login-note">{fs.note} · 统计随每日快照版本更新，不代表处罚口径。</p>
+    </>}
+  </div>;
+}
 
 function TabBtn({ active, ico, label, onClick }: { active: boolean; ico: string; label: string; onClick: () => void }) {
   return <button className={active ? "active" : ""} onClick={onClick}><span className="ico" aria-hidden="true">{ico}</span>{label}</button>;
@@ -83,6 +114,7 @@ function OwnScoreDetail() {
       <div className="l">等级 {String(row.risk_level)}（车队内复核优先级）· 7天变化 {String(row.score_change_7d)}</div>
     </div>
     {low && <Banner tone="warn">可信度低：说明数据覆盖或设备状态待核实，先做数据/设备核验，不会被当作“安全”或自动奖惩。</Banner>}
+    <FleetStatsPanel />
     <div className="panel"><h3>下一步建议（只读口径）</h3><div className="kv">
       <span className="kk">主风险维度</span><b>{String(row.primary_risk_dimension ?? "—")}</b>
       <span className="kk">建议动作</span><b>{String(row.recommended_action ?? "—")}</b>
