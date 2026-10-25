@@ -8,13 +8,11 @@ coverage/
 *.log
 .DS_Store
 .runtime-tmp/
-.playwright-cli/
 .runtime-tmp/
+.playwright-cli/
 dist/
 .qw-pages/
 *.log
+*.png
+!src/**/*.png
 node_modules/
-
-/f1.png
-/f2.png
-/shots21.png

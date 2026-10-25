@@ -2374,8 +2374,19 @@ async function aiUpstreamOnce(body, ms) {
   } finally { clearTimeout(timer); }
 }
 async function aiUpstream(body) {
-  try { return await aiUpstreamOnce(body, 60000); }
-  catch (e) { return await aiUpstreamOnce(Object.assign({}, body), 95000); } // 一次重试：上游排队/抖动
+  // 三段容错（V31）：8s 快速探测抖动 → 60s → 110s；401/403 类不重试直接抛（凭据问题不掩盖）
+  const attempts = [8000, 60000, 110000];
+  let last = null;
+  for (let i = 0; i < attempts.length; i++) {
+    try { return await aiUpstreamOnce(Object.assign({}, body), attempts[i]); }
+    catch (e) {
+      last = e;
+      const msg = String((e && e.message) || e);
+      if (/401|403|invalid_api_key|Unauthorized/i.test(msg)) throw e;
+      if (i < attempts.length - 1) await new Promise((r) => setTimeout(r, 1200));
+    }
+  }
+  throw last;
 }
 
 async function handleAiChat(request, response, url, ctx) {

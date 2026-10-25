@@ -234,3 +234,20 @@
 - UI：TR02/EV05 各挂 TemplateScenePicker（approved 下拉+预览只读；选择/预览零写）；sm27.tsx 组件共享。
 - 真实闭环验收（本地同码+真库）：r30 T1–T10 全绿（含司机 notification body 渲染真值 alert-1e7ec/待核 event_date）、r30b B1–B5 全绿（真实 rr-129b5b5830f462dc answered→driver 站内通知含模板渲染+response_note 真值+审计 aud-17964959f072af2c）；主回归 121/121。
 - 修 bug 两处：rr facts 误读 body.answer_note→正确 response_note；driverIdForPicker 类型。断言校准三处（幂等重放路径、动作实名 review_request.answered、reason 枚举真实值）——均为测试自身而非功能问题。
+
+## 第31轮（V27 发布 + 使用文档）
+
+- 门禁：HEAD 41813ee 构建=staging；主回归 121/121；AI env 刷新（会话级密钥）；发布 2026-10-24T09:31:50Z → Page app-5d12ecfd-4ed153f9 **V27 deployed**，公网 302 SSO 在位；含第30轮发送链模板/EV05-TR02 picker。
+- 交付 output/工作台使用文档.md（两层登录、20 页管理员端+司机端逐页操作、标准流程、权限模型、数据现状与限制、故障速查、A24 待办指引）；账号口令文档内列明并附轮换建议。GitHub 已同步至 30 轮（264a50a），V27 构建如后续要求可再同步。
+
+## 第32轮（AI 不可用诊断与 V28 修复）
+
+- 根因：V27 线上 env 的 QW_AI_API_KEY 是我第31轮注入的**沙箱会话级凭据**；会话压缩轮转后旧值失效（本地尾号 …Tw→…6VMo），线上 chat 报 provider 上游拒→面板显示不可用。网关/代码/出网均正常（当前凭据实测 200）。
+- 处置：刷新 env=新会话凭据（再续命，会再过期）→ 回归 121/121 → **V28 发布**（同一 Page/库）。key_fp 诊断注记尝试因锚点不符未入（放弃，非必须）。
+- 长效方案（已交属主指引）：阿里云百炼 DashScope 长期 API Key + QW_AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1 + QW_AI_MODEL=qwen-plus|qwen-max（服务端 OpenAI 兼容+tools 循环协议已兼容，零代码改动）；属主贴 key 我配置发布，或属主自行在平台密钥入口配置。
+
+## 第33轮（AI 抖动容错 + V32）
+
+- 审计取证：V28 后用户仍见"用不了"= MaaS 网关瞬时抖动（14:45 upstream_error；14:49/50 成功回答证明通道在）；根因是内部网关排队/超时且原两段重试在队列表现不佳。
+- 修复：aiUpstream 重写为三段容错（8s 探测 → 60s → 110s，1.2s 退避；401/403 类凭据错误不重试直接抛以暴露真因）；本地实测一次 38s 抖动自动恢复并答出 28.1 真值；task-summary 409 为业务状态（reviewed 拒生成）非故障；主回归 121/121；env 再次刷新 → **V32 deployed**。
+- 根治仍待属主：百炼 DashScope 长期 Key（指引已交付），配置后 BASE_URL/MODEL/KEY 三项替换即切官方通道。
