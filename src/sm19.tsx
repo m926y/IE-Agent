@@ -8,7 +8,7 @@ type AudRow = Record<string, string | null>;
 const STY: Record<string, [string, React.CSSProperties]> = {
   approved: ["已审核·可分配", { background: "#e6f4ea", color: "#1a6b2a", border: "1px solid #b7e0c0" }],
   pending_review: ["待审·不可分配", { background: "#fff7e6", color: "#ad6800", border: "1px solid #ffd591" }],
-  demo_draft_requires_team_review: ["演示草稿·待团队审核", { background: "#fff7e6", color: "#ad6800", border: "1px solid #ffd591" }],
+  demo_draft_requires_team_review: ["待审核", { background: "#fff7e6", color: "#ad6800", border: "1px solid #ffd591" }],
   draft: ["草稿·未生效", { background: "#f0f0f0", color: "#555", border: "1px solid #ccc" }],
   disabled: ["已停用", { background: "#fdecaa", color: "#8a2b0b", border: "1px solid #f5c0c0" }],
 };
@@ -85,7 +85,7 @@ export function CourseBoard() {
         <input className="btn" style={{ width: 200 }} placeholder="标题" value={nc.title} onChange={(e) => setNc({ ...nc, title: e.target.value })} aria-label="新课程标题" />
         <input className="btn" style={{ width: 130 }} placeholder="维度(可空)" value={nc.dimension} onChange={(e) => setNc({ ...nc, dimension: e.target.value })} />
       </div>
-      <textarea className="btn" style={{ width: "100%", minHeight: 44, textAlign: "left", fontFamily: "inherit", marginTop: 4 }} placeholder="课程正文（演示知识）" value={nc.content} onChange={(e) => setNc({ ...nc, content: e.target.value })} aria-label="新课程正文" />
+      <textarea className="btn" style={{ width: "100%", minHeight: 44, textAlign: "left", fontFamily: "inherit", marginTop: 4 }} placeholder="课程正文" value={nc.content} onChange={(e) => setNc({ ...nc, content: e.target.value })} aria-label="新课程正文" />
       <button className="btn primary" style={{ width: "auto", marginTop: 4 }} disabled={!nc.course_id || !nc.title || !nc.content} onClick={async () => { try { const r = await courseCreate(nc); setMsg(`已创建 ${r.course_id}（draft）· 审计 ${r.audit_id}`); setNc({ course_id: "", title: "", dimension: "", content: "" }); await reload(r.course_id); } catch (e) { setErr("创建被拒：" + String((e as { code?: string }).code || e)); } }}>创建草稿课程</button>
     </div>
   </div>;
@@ -121,7 +121,7 @@ export function AuditConsole() {
         <a className="btn" style={{ alignSelf: "center" }} href={`/api/admin/audit?format=csv&limit=500&${qs()}`}>导出当前结果(CSV)</a>
         <button className="btn" onClick={() => load(page)}>刷新</button>
       </div>
-      <div className="meta">{data ? `服务端命中 ${data.total} 条 · 第 ${page + 1}/${Math.max(pages, 1)} 页` : "查询中…"}</div>
+      <div className="meta">{data ? `共 ${data.total} 条 · 第 ${page + 1}/${Math.max(pages, 1)} 页` : "查询中…"}</div>
     </div>
     {err && <div className="alert warn">{err}</div>}
     <table className="tbl"><thead><tr><th>audit_id / 时间</th><th>角色·操作者</th><th>动作</th><th>对象</th><th>状态变化</th><th>request_id</th></tr></thead>
@@ -141,3 +141,4 @@ export function AuditConsole() {
     </div>}
   </div>;
 }
+

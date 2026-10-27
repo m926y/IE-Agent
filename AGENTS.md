@@ -27,7 +27,7 @@
     sm-config(SM03)、sm-audit(SM04)、sm-drafts(SM05)、sm-knowledge(SM06)。EV03 由 EV01 行点击进入。
   - 司机窄屏底部四 tab：我的安全(EV04)、今日风险(RM04)、培训任务(TR04)、我的资料。
   - AI 入口为禁用占位（运行时模型能力未证实）。
-- 视觉：浅色业务工作台，深蓝导航；风险红仅高危/逾期，琥珀仅低可信度/待核验；空态区分"无匹配/无权限/无覆盖/失败"。
+- 视觉：第34轮起整体换为交付包「行安」新UI（浅紫渐变、六主入口+顶部功能标签、司机端品牌头部）；空态仍须区分"无匹配/无权限/无覆盖/失败"（红线）。历史：浅色业务工作台设计（第1-33轮）。
 - 第1轮（当前）：可点击空页面 + 真实服务端鉴权 + 空表真查询。业务数字一律空态，无模板假数据；
   种子仅 2 个演示账号（safety_admin、driver_demo，driver 未绑定身份）。
 - 约束：单文件发布目录（server.mjs 不引额外模块）；数据库凭据不落日志/响应；
@@ -251,3 +251,50 @@
 - 审计取证：V28 后用户仍见"用不了"= MaaS 网关瞬时抖动（14:45 upstream_error；14:49/50 成功回答证明通道在）；根因是内部网关排队/超时且原两段重试在队列表现不佳。
 - 修复：aiUpstream 重写为三段容错（8s 探测 → 60s → 110s，1.2s 退避；401/403 类凭据错误不重试直接抛以暴露真因）；本地实测一次 38s 抖动自动恢复并答出 28.1 真值；task-summary 409 为业务状态（reviewed 拒生成）非故障；主回归 121/121；env 再次刷新 → **V32 deployed**。
 - 根治仍待属主：百炼 DashScope 长期 Key（指引已交付），配置后 BASE_URL/MODEL/KEY 三项替换即切官方通道。
+
+## 第34轮（UI 整体替换为 GitHub 交付包「行安 2026-10-24」+ 功能保全回归）；**已发布**
+
+- 视觉（第34轮起为「行安」新UI）：浅紫渐变界面、登录页品牌区+口令明文切换；管理端左栏六个一级入口（数据总览/车队管理/风险监控/培训管理/智能助手/系统管理），二级功能为顶部标签（module-tabs）；司机端窄屏头部品牌+身份水印、底部四 tab、"停车后操作"提示。空态必须区分"无匹配/无权限/无覆盖/失败"（EmptyState 四态文案 + "不补造/不等于零风险"注记为产品红线，任何改版不得删除）。
+
+- 来源：github.com/m926y/IE-competition ui-delivery/2026-10-24（zip xing-an-ui-2026-10-24，sha256 见其 README）。基线核对：交付包 src 与 HEAD 第30轮前端**同一代码**（差异仅行尾），本轮前端整体采用交付包设计 + **回填其删减的功能与合规披露**，后端保留。
+- 前端落地：新增 src/theme.css、src/dashboard.tsx（数据总览：真实 500 快照聚合/环形分布/六维均值/低分关注列表，点卡深链 #/ev-fleet?level=…）；App/admin/driver/ui/sm17-18-19/23/26/27、main、index.html（行安·驾驶安全管理）替换为交付版本后逐项回填：
+  ①AI：工具链自检按钮+探针行、固定指令 prompt_version 显示、长期会话摘要开关（含⌛恢复/一键清除/2h 过期，第15轮全功能回归）、requires_confirmation 与"AI 未写库"卡文案、越权拒答示例问题组、ai_provider_not_configured 显式缺口话术；登录页恢复只读算法边界+服务端校验两注记。
+  ②EV03：页首"演示身份（synthetic_demo_mapping 持续标注）"独立标注行（新 PageHead 不再渲染 code，故单列）；tab①恢复该对象历史快照 ResourceTable+top3 原因；tab②空快照话术恢复"未取得/不以观察分反推"；tab③恢复台账口径声明（分摊仅供核账、无台账≠有覆盖）+完整列标签；页尾恢复 record_id/来源版本/队列 queue_id 溯源行；六维面板恢复"合计=100−安全分"在线对账+行为分/保守下界。
+  ③RM01：QueueConfirm 建单卡恢复为"所有非 drop7 分组可用"（交付包曾缩到两组）+正面对象与幂等注记；EV02 两日对比恢复可比性限制注记；RM02 跳转下拉注记；RM03 预演 details 恢复"未写入任何数据"字样。
+  ④司机端：恢复未核实=设计约束非数据丢失、演示数据绑定水印 Banner、六维快照注记、EV05 会话取身份说明、TR04 仅本人未提交可改、SSO 退出注记；unbound 判定收紧为须 bindingVerified（与服务端 my.* 403 一致）。
+  ⑤SM：SM01 两类登录/口令不落页面/停用清会话注记、SM02 窗口规则+预览(不落库)+降级披露、SM03"为何不可编辑"冻结说明、SM04"不显示口令/完整问答"、SM05"无启用/生效按钮+草案永不作参数"、SM06"永不自动批准+同作者确认+版本精确匹配"、TR02 强制须人工/APPROVED-only 模板/不产生假任务注记、TR05/06 门禁与零写库注记、导入页预检零写入+凭证不落浏览器注记、EmptyState 四态区分恢复、低可信"先核验"与 D"高优先复核"标签、EV01 7天下降≥10 红标列+口径注记、AI04"操作预演，未写入"横幅恢复。
+- 后端（唯一改动=交付包 driver-chart-fields.patch）：my.score 增 6 个 *_contribution 列；my.score_history 增 6 贡献列+source_version。仅扩白名单，角色/cap/injectDriver 不变；本地真库验证合计对账 71.857424=100−28.142576 ✓，司机只见本人 ✓。
+- 验证：typecheck+build 绿；主回归 verify-local **非 AI 117/117**（4 项真实模型 chat 断言当前会话 MaaS 凭据双侧 404 无法注入，非本变更引入；线上 V29 env 未动）；scripts/r34-ui-battery.cjs（API 7 + Playwright UI 30）连真库全量跑 **37/37 PASS**：六分组入口/新登录/EV01 指标+筛选+车辆查询+深链/EV03 四标签+对账+水印/RM01 drop7(32)+QueueConfirm/AI04 未写横幅/RM03 深链/TR02 门禁文案/SM03-04-05-06(模板tab)/SM01 无口令/AI 面板自检+开关/司机端水印+六维+聚合+零运行时异常。截图 output/screenshots/ui34-01…08。
+- 未动：server.mjs 其余端点/能力矩阵/表与数据（alerts2、tasks9、templates 等原状态）；SsoUnboundView/导入/模板选择器/预演路由逻辑均保留。"Crazy Logi-AI 2.0"为项目代号，界面品牌按交付包改为「行安 · 驾驶安全管理」。
+- 发布：deployment 5f16b17b-…，Page 侧版本号 **V30 deployed**（2026-10-25，同页/同库/同 SSO 策略/未改 env）；公网首页资源=新构建（index-C3GCfhoV.js 含行安品牌与预演注记），/api/me 匿名 401 正常。附带：checkpoint 曾把历史跟踪的 .runtime-tmp 运行件（含会话级 env 文件）提交入库，已 `git rm --cached` 解除跟踪（59f25dd）；文件仍存于该托管仓历史，属主如需可在平台清理历史或轮换演示口令。GitHub IE-Agent 镜像本轮未同步。
+
+## 第35轮（agent1 设计移植：AI 引擎升级 + 千问3.7-Plus Token Plan 接入）；V31
+
+- 设计来源：github.com/Karlll330/IE-Agent 树 codex/agent1-backend-external-models（server/agent1：ModelGateway/AgentRuntime/ToolRunner/skills/contracts/EvidenceVerifier）。**只移植机制，不引入其 SQLite/快照数据层与其 Node24 依赖**；真实安全边界仍由 ROLE_CAPABILITIES/listResource/受控工具白名单承担，技能层只是引导与预算（代码内注明）。零新依赖、仍单文件 server.mjs。
+- ①模型网关加固（gateway.mjs 思想）：兼容 QWEN_API_KEY/QWEN_MODEL/QWEN_CHAT_ENDPOINT 别名；端点派生规则与设计一致（base 以 /v1 结尾则接 /chat/completions）；**强制外部 HTTPS+非本机（503 ai_policy_blocked）**；上游响应>200KB=ai_upstream_invalid_output；保留三段容错（8s/60s/110s，401/403 不重试）。
+- ②技能路由（skills/registry.routeSkill 思想）：5 技能=case-followup-review/personalized-training/risk-intervention/fleet-safety-triage/explain-safety-score，中文正则路由+司机页回退；命中技能把指令与建议工具清单注入 system（软引导），ai.chat 审计 detail 与响应 meta 记 skill。
+- ③工具契约（agent-contracts.json 思想）：15 个受控工具入参枚举/长度白名单+夹紧（枚举非法=降级缺省），每轮工具执行预算 8（超限回 tool_budget_exceeded 引导模型收口）。
+- ④幂等重放（AgentRuntime.#requests 思想）：POST /api/ai/chat 接受 client_request_id（8-64 \w-）；同键同问（内容哈希含 messages/page/model）→回放原响应+idempotent_replay:true；同键异问→409 ai_request_version_conflict；TTL 10min/LRU 500。前端 send() 生成 UUID。
+- ⑤验权回执（EvidenceVerifier 思想）：每张证据卡附 verification_id（5 分钟 TTL、属主绑定、LRU 1000）；新端点 **POST /api/agent1/evidence-check {verification_id}** 经 evidenceCheckCore（自 handleEvidenceCheck 重构出的公共核）按当前会话再授权；他人回执/未知回执=404 不泄漏；legacy GET ?ref= 通道不变。修坑：aiVerRegister 属主键须取 principal.user.user_id（首测落"?"致回执全 404，已修+电池覆盖）。
+- ⑥千问 3.7-Plus 接入（属主密钥，经平台 env 管道写入，不入库不回显）：实测属主密钥为**百炼 Token Plan 专属 sk-sp- 密钥**——DashScope/内置 MaaS 网关均 401/401 unauthorized，官方文档确认 sk-sp- 必须配套专属网关；QW_AI_BASE_URL=https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1，QW_AI_MODEL=qwen3.7-plus（models 列表 29 个含 qwen3.6/3.7/3.8 系；tools 探针 finish_reason=tool_calls 正常）；env 随 V31 生效。AI 面板副标题去硬编码模型名，显示 meta.model（聊天后更新）。
+- 验证：typecheck/build 绿；**主回归 verify-local 121/121**（4 项真实模型断言首次全过：引用真实分/元数据/司机拒答/草稿零写入；"chat元数据"断言由硬编码 qwen3.8-max 校准为 ^qwen + engine===agent1-inspired）；**scripts/r35-agent1-battery.cjs 15/15**（技能路由/幂等回放/409/回执重验+属主隔离/legacy 通道/司机拒答/meta 诊断/selftest engine+零写入）；**r34 UI 电池 37/37**（真实模型下全站冒烟）。selftest 输出 engine 块（skills×5、契约×15、预算 8、TTL、回执数）。
+- 未动/如实：写路径仍全部走既有门禁接口（AI 零写库红线不变）；评分/预测只读红线不变；Token Plan 为预付费套餐（Credits 抵扣），耗尽时 chat 将 503 ai_upstream_error 属预期；V30 线上的旧会话级 env 已被属主密钥替换。
+- 运行件迁移与历史披露：checkpoint 会强制收录工作树全部文件（连 .gitignore 也绕过），`.runtime-tmp`（含 db.env/app.env 会话凭据与调试件）曾两度被收进托管仓历史（665b62b、9bbeabe）。本轮已把该目录整体迁出仓库至会话 /tmp（电池脚本改读 /tmp/qwenwork/rt，d8cd87a），此后凭据不再入树；历史中的副本无法从托管仓抹除，建议属主适时轮换两个演示口令（app.env 内容与使用文档 §0 同值，泄露面未扩大）。
+
+## 第36轮（V32：公网 AI"请求失败"根因修复——思考模式超时）；属主报障驱动
+
+- 现象：V31 上线后属主浏览器 AI 面板报"请求失败"。诊断：env 三项确认已随 V31 捕获（pending_republish=false）；线上同字节构建本地复现 **chat 200 正常但单问 31–38s**——qwen3.7-plus 默认思考模式 + 多轮工具循环，公网网关在超时窗内掐断（本地无该网关层故此前全绿未暴露）。
+- 修复（server.mjs）：① chat 上游统一 `enable_thinking:false`（直连网关 A/B 实测：默认 30-40s → 关闭后 2.1s 返回 tool_call；若未来模型不认该参数，凭 AI_LAST_UPSTREAM_DETAIL 自动去参重试一次）；② 重试段位 8s/60s/110s → 60s/110s（首段 8s 对非流式必 abort 纯属浪费）；③ 关思考后模型连环取数会把预算 8 打满（出现"预算上限"收口），补**同轮工具结果去重缓存**（同工具+同参数复用，ToolRunner 幂等思想），预算实际可用度恢复；④ 前端错误文案：unauthenticated/幂等冲突/策略阻断分支化提示，其余仍显 code。
+- 实测：同构建两典型问 13.9s/25.9s 均 200 带真值结论；主回归 **121/121**；r35 电池 **15/15**。V32 发布（同页同库，env 未动）。
+
+## 第37轮（题面对齐四功能：司机资料 / 评分标准开放配置 / 根因分析 / 等级→强制映射）；**V33 已发布**（deployment 340914d4，2026-10-27，属主逐轮授权；同页/同库/同策略/env 未动；公网验证=新构建 index-CnM3uDPZ.js、/api/me/profile 与 /api/analysis/root-causes 匿名 401 在位）
+
+- 需求来源：属主上传比赛题面 §3.1 功能表截图，指令"按顺序开展，开放配置"。
+- **红线变更（属主明确授权）**：原"评分规则绝对无写语义（410 唯一出口）"调整为**受控开放**：结构化权重草案→批准（意见必填+同作者二次确认）→显式「生效」写为现行 evaluation_rules 新版本（source_version=ruleset_vN_日期；全链审计+window.confirm）。不变红线：旁路 PATCH/POST evaluation-rules 仍 410；生效不回算——score_snapshots/score_history/deduction_ledger/risk_snapshots 数值与行数任何情况不改写（断言 er/sc/led/hst=6/500/6267/4000 与 D0149=28.142576 原样）；未批准/未生效草案绝不被页面/AI 当现行参数；权重直存原精度（首测发现 toFixed(6) 截尾已修）。
+- 迁移（控制 API database/migrate 执行成功，schema 相对形式；007/008 注记入 scripts/contract/migrations/）：**006** 新建 driver_profiles(user_id PK, phone CHECK, intro, prefs, updated_by/at)；**007** erd.status 扩 approved/effectuated；发现第2期同名并行约束 ck_erd_status（三态）仍阻写→DROP（教训：改状态枚举必须先清点该表全部同名族 CHECK）。
+- ①司机资料：GET/POST /api/me/profile（仅 driver；非法电话/prefs→409；仅更新提交字段；审计 account.profile_update；表不入 RESOURCE_DEFS，防越权读他人——断言 404）。司机端"我的资料"新表单（电话/联系偏好/备注≤500；明示不改绑定与评分事实）。
+- ②SM05/SM03：sm17 双栏改造（权重输入→结构化草案、批准含同作者确认态、"生效为新口径"confirm 列变更、徽标 已批准·未生效/已生效）；SM03 tab0 文案改"现行生效口径+唯一变更通道+不回算"。
+- ③根因分析：GET /api/analysis/root-causes?cohort=cd|d（staff 限；纯只读：aiQ 池含 fleet scope + ledger 2000×分页直读 + 内存聚合）；输出=池统计/维度分摊占比/事件TOP/分摊TOP10对象(→EV03 深链)/限制声明（分摊≠因果、无台账≠零风险、低可信先核验）；新页 #/ev-root=EV06（安全评价组第5个二级 tab）。AI 第15受控工具 get_root_causes（复用同核；selftest seq 15；契约 cohort 枚举）。
+- ④等级→强制映射：operation_config 新键 training_mandate_policy（JSON ≤240、枚举校验 409 mandate_policy_invalid、首建 201 unit=json、沿用运营配置版本+审计域）；training-assign：缺省 mandatory→按现行映射×司机最新等级自动定值（mandatory_source=policy:vN:D=mandatory），显式值=manual 允许改判留痕；SM03 tab1 MandatePolicyCard；TR02 输司机按映射预填+说明（未动则省略键交服务端）。
+- 现网终态如实记录：fatigue_distraction 行经 S9 **等值生效**（权重未动、口径版本 snapshot→ruleset_vN，属预期推进）；映射配置写入 {D:mandatory,C/B/A:optional}（v2）；R37 验证产生 2 条真实培训任务（goal 带【R37…】，D0149 assigned，延续真实状态机对象不删除先例）；driver_profiles 测试行值已披露。
+- 验证：typecheck/build 绿；r37-four-feats-battery **35/35**；r37-ui-battery **9/9**；主回归 **121/121**（两断言按授权语义校准：SM03 版本枚举加 ruleset、自检 14→15）；r34 UI **37/37**（SM03/SM05 断言随文案校准）；r35 **15/15**。运维坑复记：sed 替换含 & 的文本会把 & 展开为原文——verify-local 校准一律 python 精确替换。

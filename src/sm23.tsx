@@ -9,7 +9,7 @@ export function BindingsConsole({ drivers }: { drivers: { driver_id: string; gps
   const [err, setErr] = useState<string | null>(null);
   const [edit, setEdit] = useState<Row | null>(null);
   const [st, setSt] = useState(""); const [en, setEn] = useState("");
-  const [nb, setNb] = useState({ user_id: "", driver_id: "DEMO_D0149", s: "", e: "", verified: true });
+  const [nb, setNb] = useState({ user_id: "", driver_id: "", s: "", e: "", verified: true });
   async function reload() { setRows((await api<{ rows: Row[] }>(`/api/admin/bindings${asOf ? "?as_of=" + asOf : ""}`)).rows); }
   useEffect(() => { reload().catch(() => setErr("绑定列表读取失败")); }, [asOf]);
   const today = new Date().toISOString().slice(0, 10);
@@ -60,7 +60,8 @@ export function BindingsConsole({ drivers }: { drivers: { driver_id: string; gps
         <button className="btn primary" style={{ width: "auto" }} disabled={!edit && !nb.user_id} onClick={save}>{edit ? "保存有效期" : "提交绑定"}</button>
         {edit && <button className="btn" onClick={() => { setEdit(null); setSt(""); setEn(""); }}>取消编辑</button>}
       </div>
-      <p className="meta">保存由服务端重校验（预览仅为辅助）；变更保留旧行与审计（操作者/时间/旧新区间）；不覆写 drivers 冻结映射、历史评分或预测快照。并发：单实例进程内互斥 + 写后回读自检自动回滚（外部多副本部署时此保护降级，需平台提供唯一约束/事务，属已声明限制）。</p>
+      <p className="meta">保存由服务端重校验（预览仅为辅助）；变更保留旧行与审计（操作者/时间/旧新区间）；不覆写 drivers 冻结映射、历史评分或预测快照。未核实绑定的司机端个人明细不下发（my.* 403）。</p>
     </div>
   </div>;
 }
+

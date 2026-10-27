@@ -19,7 +19,7 @@ export function EmptyState({ kind, hint, onRetry }: { kind: "loading" | "nomatch
   return (
     <div className="panel empty" role="status">
       <div className="big">{t.big}</div>
-      <div className="hint">{t.hint}</div>
+      {t.hint && <div className="hint">{t.hint}</div>}
       {kind === "error" && onRetry && <p><button className="btn" onClick={onRetry}>重试</button></p>}
     </div>
   );
@@ -38,13 +38,15 @@ export function fmtCell(v: unknown): string {
 type ResourceTableProps = {
   resource: string;
   labels?: Record<string, string>;
+  columns?: string[];
   pageSize?: number;
   params?: Record<string, string | number>;
   onRowClick?: (row: Record<string, unknown>) => void;
+  rowActionLabel?: string;
 };
 
 /** 受控只读列表：数据一律来自服务端 /api/data/<resource>（服务端验权+行级过滤），前端不伪造行 */
-export function ResourceTable({ resource, labels = {}, pageSize = 20, params = {}, onRowClick }: ResourceTableProps) {
+export function ResourceTable({ resource, labels = {}, columns, pageSize = 20, params = {}, onRowClick, rowActionLabel }: ResourceTableProps) {
   const [state, setState] = useState<{ kind: "loading" | "ok" | "error"; data: ListResult<Record<string, unknown>> | null; code?: string }>({ kind: "loading", data: null });
   const [offset, setOffset] = useState(0);
   const seq = useRef(0);
@@ -68,24 +70,25 @@ export function ResourceTable({ resource, labels = {}, pageSize = 20, params = {
   if (state.kind === "loading") return <EmptyState kind="loading" />;
   if (state.kind === "error") {
     if (state.code === "forbidden") return <EmptyState kind="noperm" />;
-    if (state.code === "binding_required") return <EmptyState kind="nocov" hint="当前账号尚未核实绑定司机身份。演示账号不展示个人明细；绑定经安全管理员核实后此区将显示本人数据。" />;
+    if (state.code === "binding_required") return <EmptyState kind="nocov" hint="当前账号尚未核实绑定司机身份。未核实时不展示个人明细属设计约束，不是数据丢失；绑定经安全管理员核实（SM01/SM02）后此区将显示本人数据。" />;
     return <EmptyState kind="error" onRetry={() => load(offset)} />;
   }
   const rows = state.data?.rows ?? [];
   if (rows.length === 0) {
-    return <EmptyState kind="nomatch" hint="当前筛选/该对象无记录。未导入的表显示此待导入空态；本页不补造趋势、告警或证据。" />;
+    return <EmptyState kind="nomatch" hint="当前筛选/该对象无记录。本页按事实显示空态，不补造趋势、告警或证据。" />;
   }
-  const cols = Object.keys(rows[0]);
+  const cols = columns || Object.keys(rows[0]);
   const total = state.data?.total ?? rows.length;
   return (
     <div>
       <div className="table-wrap">
         <table>
-          <thead><tr>{cols.map((c) => <th key={c}>{labels[c] || c}</th>)}</tr></thead>
+          <thead><tr>{cols.map((c) => <th key={c}>{labels[c] || c}</th>)}{rowActionLabel && <th>操作</th>}</tr></thead>
           <tbody>
             {rows.map((r, i) => (
               <tr key={String(r[cols[0]] ?? i)} style={onRowClick ? { cursor: "pointer" } : undefined} onClick={() => onRowClick?.(r)}>
                 {cols.map((c) => <td key={c} className={/id$|version|gpsno/.test(c) ? "mono" : undefined} title={fmtCell(r[c])}>{cellView(c, r[c])}</td>)}
+                {rowActionLabel && <td><button className="table-action" onClick={e => { e.stopPropagation(); onRowClick?.(r); }}>{rowActionLabel}</button></td>}
               </tr>
             ))}
           </tbody>
@@ -93,7 +96,7 @@ export function ResourceTable({ resource, labels = {}, pageSize = 20, params = {
       </div>
       <div className="pager">
         <button className="btn" disabled={offset === 0} onClick={() => setOffset(Math.max(offset - pageSize, 0))}>上一页</button>
-        <span>第 {Math.floor(offset / pageSize) + 1} 页 · 可见 {rows.length} 行{state.data?.total !== null && state.data?.total !== undefined ? ` / 共约 ${total} 行` : ""}</span>
+        <span>第 {Math.floor(offset / pageSize) + 1} 页{state.data?.total !== null && state.data?.total !== undefined ? ` · 共 ${total} 条` : ""}</span>
         <button className="btn" disabled={offset + pageSize >= total} onClick={() => setOffset(offset + pageSize)}>下一页</button>
       </div>
     </div>
@@ -102,9 +105,13 @@ export function ResourceTable({ resource, labels = {}, pageSize = 20, params = {
 
 /** 语义色标：低可信=琥珀并提示先核验；D=高危红、C=琥珀（等级为复核优先级非事故概率），颜色均配文字 */
 export function cellView(col: string, v: unknown) {
+  if (col === "primary_risk_dimension") return ({ history: "历史事故与未遂", fatigue_distraction: "疲劳与分心", driving_stability: "驾驶稳定性", road_rule: "道路规则", management: "管理配合度", imu_evidence: "IMU 风险佐证" }[String(v)] || fmtCell(v));
+  if (["risk_prob", "forecast_40d_risk_prob"].includes(col) && typeof v === "number") return (v * 100).toFixed(2) + "%";
+  if (col === "safety_score" && typeof v === "number") return <span className="score-cell">{v.toFixed(2)}</span>;
   if (col === "confidence_level") {
-    if (v === "low") return <Tag tone="amber">low · 建议先核验数据/设备</Tag>;
-    if (v === "high") return <Tag tone="green">high</Tag>;
+    if (v === "low") return <Tag tone="amber">低 · 建议先核验数据/设备</Tag>;
+    if (v === "high") return <Tag tone="green">高</Tag>;
+    if (v === "medium") return <Tag tone="gray">中</Tag>;
     if (v) return <Tag tone="gray">{String(v)}</Tag>;
   }
   if (col === "score_change_7d" && typeof v === "number" && v <= -10) return <Tag tone="red">{v} · 7天下降≥10</Tag>;
@@ -140,21 +147,22 @@ export function GlobalSearch() {
       } catch { setState("fail"); }
     }, 350);
   }
-  const LABEL: Record<string, string> = { drivers: "司机/车辆", alerts: "案卷与告警", training_tasks: "培训任务", knowledge_articles: "正式知识(approved)" };
-  return <div style={{ position: "relative", flex: 1, maxWidth: 420 }}>
-    <input aria-label="全局搜索" value={q} onChange={(e) => run(e.target.value)} onFocus={() => { if (data) setOpen(true); }} placeholder="搜索司机/车辆、案卷、任务、正式知识（按你的授权）" style={{ width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--line)", fontSize: 13 }} />
+  const LABEL: Record<string, string> = { drivers: "司机/车辆", score_snapshots: "车辆评分", alerts: "案卷与告警", training_tasks: "培训任务", knowledge_articles: "正式知识(approved)" };
+  return <div className="global-search">
+    <input aria-label="全局搜索" value={q} onChange={(e) => run(e.target.value)} onFocus={() => { if (data) setOpen(true); }} placeholder="搜索车辆、司机、案卷、任务" style={{ width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--line)", fontSize: 13 }} />
     {open && state !== "idle" && <div className="task-card" style={{ position: "absolute", top: 36, left: 0, right: 0, zIndex: 60, maxHeight: 420, overflowY: "auto", textAlign: "left" }}>
-      {state === "loading" && <div className="meta">检索中…（服务端按会话授权过滤，未授权类别连计数都不返回）</div>}
-      {state === "fail" && <div className="meta" style={{ color: "var(--warn)" }}>搜索失败：网络或服务异常，可稍后重试（不展示旧结果冒充）</div>}
+      {state === "loading" && <div className="meta">检索中…</div>}
+      {state === "fail" && <div className="meta" style={{ color: "var(--warn)" }}>搜索失败，请重试</div>}
       {state === "empty" && <div><div className="meta">未找到匹配对象。仅统计你有权查看的类别{data?.note ? "；" + data.note : ""}</div>
         {(data?.groups || []).map((g) => <div key={g.type} className="meta" style={{ fontSize: 11 }}>{LABEL[g.type] || g.type}：{g.total}</div>)}</div>}
       {(state === "ok") && (data?.groups || []).map((g) => <div key={g.type} style={{ marginBottom: 4 }}>
         <div className="t" style={{ fontSize: 12 }}>{LABEL[g.type] || g.type} · 命中 {g.total}</div>
         {g.items.map((it) => <div key={g.type + it.record_id} className="task-card" style={{ padding: 6, cursor: "pointer" }} onClick={() => { const h = it.route.replace(/^#/, ""); if (h && h !== "/") location.hash = h; setOpen(false); }}>
-          <div style={{ fontSize: 12.5 }}>{it.title} <span className="meta">↗</span></div><div className="meta" style={{ fontSize: 11 }}>{it.summary} · {it.record_id}</div>
+          <div style={{ fontSize: 12.5 }}>{it.title} <span className="meta">↗</span></div><div className="meta" style={{ fontSize: 11 }}>{it.summary}</div>
         </div>)}
       </div>)}
       {data?.note && state !== "empty" && <div className="meta" style={{ fontSize: 11 }}>{data.note}</div>}
     </div>}
   </div>;
 }
+

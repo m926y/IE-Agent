@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { MeUser, OverviewResult, ImportCheckReport, ImportCommitReport } from "./api";
-import {ApiError, alertConfirm, alertContact, alertHandoff, alertNote, alertStatus, caseView, courseReview, createUser, egressProbe, getData, getHistoryDates, getOverview, importCheck, importCommit, interventionDraft, interventionEdit, interventionSend, myNotes, noteRead, notesSummary, opsConfigUpdate, rrAdvance, rrView, setBinding, setUserStatus, taskReview, taskView, trainingAssign, taskSummary, TaskSummary, aiEvidenceCheck} from "./api";
+import type { MeUser, ImportCheckReport, ImportCommitReport } from "./api";
+import {ApiError, alertConfirm, alertContact, alertHandoff, alertNote, alertStatus, caseView, courseReview, createUser, egressProbe, getData, getHistoryDates, importCheck, importCommit, interventionDraft, interventionEdit, interventionSend, myNotes, noteRead, notesSummary, opsConfigUpdate, rrAdvance, rrView, setBinding, setUserStatus, taskReview, taskView, trainingAssign, taskSummary, TaskSummary, aiEvidenceCheck} from "./api";
 import type { RRView } from "./api";
 import type { CaseView as CaseViewT } from "./api";
 import { Banner, EmptyState, ResourceTable, Tag, GlobalSearch } from "./ui";
@@ -10,6 +10,8 @@ import { BindingsConsole } from "./sm23";
 import { AiPreplanPage } from "./sm26";
 import { TemplatesTab, TemplateScenePicker } from "./sm27";
 import { AuditConsole, CourseBoard } from "./sm19";
+import { Dashboard } from "./dashboard";
+import { RootCausesPage, MandatePolicyCard } from "./r37";
 
 const IMPORTABLE_TABLES = [
   "drivers", "risk_snapshots", "score_snapshots", "review_queue", "score_history", "deduction_ledger",
@@ -40,7 +42,7 @@ function ImportPanel({ onCommitted }: { onCommitted: () => void }) {
     if (!file) { setErr("先选择 CSV 文件"); return; }
     setBusy(true); setErr(null); setCommit(null);
     try { const r = await importCheck({ table, filename: file.name, csv: file.csv, source_version: sv || undefined }); setReport(r); }
-    catch (e) { setErr(e instanceof ApiError ? errText(e.code) : "网络异常，预检未完成（未写入任何数据）"); }
+    catch (e) { setErr(e instanceof ApiError ? errText(e.code) : "连接失败，请重试"); }
     setBusy(false);
   }
   async function doCommit() {
@@ -70,7 +72,7 @@ function ImportPanel({ onCommitted }: { onCommitted: () => void }) {
   }
   return <div className="panel">
     <h3>版本化 CSV 导入（仅安全管理员 · 预检 → 确认 → UPSERT）</h3>
-    <p className="page-desc">流程：选择业务表与 CSV 文件 → 服务端预检（不落业务数据）→ 管理员确认后按业务主键 UPSERT（重复执行不新增记录）。文本列（gpsno/driver_id/event_type/业务ID）原样保留；空值不转 0；数值按字符串写入保留原始小数位；日期时间保留原始字符串。浏览器不持有任何数据库凭证。</p>
+    <p className="page-desc">流程：选择业务表与 CSV 文件 → 服务端预检（不落业务数据）→ 管理员确认后按业务主键 UPSERT（重复执行不新增记录）。文本列原样保留；空值不转 0；数值按字符串写入保留原始小数位。浏览器不持有任何数据库凭证。</p>
     <div className="row">
       <select className="btn" value={table} onChange={(e) => { setTable(e.target.value); setReport(null); setCommit(null); }} aria-label="目标表">
         {IMPORTABLE_TABLES.map((x) => <option key={x} value={x}>{x}</option>)}
@@ -84,7 +86,7 @@ function ImportPanel({ onCommitted }: { onCommitted: () => void }) {
     </div>
     {err && <div className="alert danger">{err}</div>}
     {note && <div className="alert ok">{note}</div>}
-    {report && !report.ok && <div className="alert danger">预检被拒：{report.fatal}（run {report.run_id} 已记录，未写入业务表）</div>}
+    {report && !report.ok && <div className="alert danger">预检被拒：{report.fatal}</div>}
     {report?.ok && <div className="alert info">
       预检通过：目标 <b>{report.table}</b> · 文件 <b>{report.filename}</b> · 数据行 <b>{report.row_total}</b> ·
       预计写入 <b>{report.accepted_row_estimate}</b> · 拒绝行 <b>{report.rejected_count}</b> · 文件内重复主键 <b>{report.dup_pk_count}</b> ·
@@ -113,11 +115,13 @@ const NAV: { group: string; items: { key: string; label: string; code?: string }
     { key: "ev-week", label: "周度分析", code: "EV02" },
     { key: "ev-driver", label: "司机详情", code: "EV03" },
     { key: "ev-review", label: "评价复核/数据异议", code: "EV05" },
+    { key: "ev-root", label: "根因分析", code: "EV06" },
   ]},
   { group: "风险监控", items: [
     { key: "rm-queue", label: "风险工作台", code: "RM01" },
     { key: "rm-replay", label: "历史回放", code: "RM02" },
     { key: "rm-alerts", label: "告警与事件档案", code: "RM03/RM05" },
+    { key: "ai-preplan", label: "管理动作预演", code: "AI04" },
   ]},
   { group: "培训改善", items: [
     { key: "tr-ledger", label: "培训台账", code: "TR01" },
@@ -134,37 +138,20 @@ const NAV: { group: string; items: { key: string; label: string; code?: string }
   ]},
 ];
 
-const ALL_ITEMS = NAV.flatMap((g) => g.items);
-
-function PageHead({ code, title, desc }: { code?: string; title: string; desc: string }) {
-  return <>
-    <div className="page-head"><h2>{title}</h2>{code && <span className="code">{code}</span>}</div>
-    <p className="page-desc">{desc}</p>
-  </>;
+function NavIcon({ kind }: { kind: number }) {
+  const paths = [
+    <><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></>,
+    <><path d="M4 16V8l2-4h12l2 4v8M4 9h16M7 13h1m8 0h1M6 16v3m12-3v3M3 16h18" /></>,
+    <><path d="m12 3 9 16H3L12 3Z" /><path d="M12 9v4m0 3h.01" /></>,
+    <><path d="m2 8 10-5 10 5-10 5L2 8Zm4 2v7l6 3 6-3v-7M22 8v8" /></>,
+    <><rect x="4" y="7" width="16" height="13" rx="3" /><path d="M12 3v4M9 12v2m6-2v2M9 17h6M1 11v5m22-5v5" /></>,
+    <><path d="M4 6h16M4 12h16M4 18h16" /><circle cx="8" cy="6" r="2" /><circle cx="16" cy="12" r="2" /><circle cx="10" cy="18" r="2" /></>,
+  ];
+  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[kind]}</svg>;
 }
 
-function OverviewView() {
-  const [ov, setOv] = useState<OverviewResult | null>(null);
-  const [err, setErr] = useState(false);
-  useEffect(() => { getOverview().then(setOv).catch(() => setErr(true)); }, []);
-  if (err) return <EmptyState kind="error" onRetry={() => { setErr(false); getOverview().then(setOv).catch(() => setErr(true)); }} />;
-  if (!ov) return <EmptyState kind="loading" />;
-  return <div>
-    <PageHead title="工作台总览" desc="闭环：发现风险 → 核对证据 → 人工确认 → 沟通与培训 → 司机反馈 → 后续复评。数字来自服务端真实查询；算法值为只读事实。" />
-    <Banner tone="info">业务数据导入包（snapshot_ffbc02143fcb，截止 2026-07-31）尚未导入。当前全部计数来自空业务表，属计划内空态，非“零风险”。导入在第 2 轮（版本化导入流程）完成。</Banner>
-    <div className="cards">
-      {ov.metrics.filter((m) => ["alerts_pending", "interventions_unreplied", "low_confidence", "trainings_open", "review_requests_open", "drivers"].includes(m.key)).map((m) => (
-        <div className={`card ${m.key === "low_confidence" ? "warn" : m.key === "alerts_pending" ? "risk" : ""}`} key={m.key}>
-          <div className="k">{m.label}</div>
-          <div className={`v ${!m.count ? "zero" : ""}`}>{m.count === null ? "—" : m.count}</div>
-          <div className="s">{m.count === 0 ? "空态（待导入/未产生）" : m.key === "drivers" ? "500 条演示映射待导入" : String(m.key)}</div>
-        </div>
-      ))}
-    </div>
-    <div className="panel"><h3>优先队列（确定性规则）</h3>
-      <p className="page-desc" style={{ margin: 0 }}>队列分组：当日高危事件 / 7天下降≥运营阈值 / 双信号高优先（预测前20%且行为C/D）/ 单信号 / 低可信度。排序只决定先看谁，不产生新的风险评分。告警生成依赖已导入的事实表与运营配置（第2轮启用后此处可点击联动）。</p>
-    </div>
-  </div>;
+function PageHead({ title }: { code?: string; title: string; desc: string }) {
+  return <div className="page-head"><h2>{title}</h2></div>;
 }
 
 const RR_LABEL: Record<string, string> = { identity_association: "身份关联疑问", event_record: "事件记录疑问", device_or_data_missing: "设备或数据缺失", score_explanation: "评分解释疑问" };
@@ -189,7 +176,7 @@ function EvReview() {
         <div><h4 style={{ fontSize: 12.5 }}>司机原文（{RR_LABEL[String(v.request.reason_code)] || String(v.request.reason_code)}）</h4>
           <p style={{ whiteSpace: "pre-wrap", background: "var(--bg)", borderRadius: 8, padding: 8, fontSize: 13 }}>{String(v.request.description)}</p>
           <div className="kv"><span className="kk">针对记录</span><b className="mono">{String(v.request.score_id || v.request.evidence_id || "—")}</b><span className="kk">source_version</span><b className="mono">{String(v.request.source_version || "—")}</b></div></div>
-        <div><h4 style={{ fontSize: 12.5 }}>原评分快照（只读，不被本流程改写）</h4>
+        <div><h4 style={{ fontSize: 12.5 }}>原始评分</h4>
           {v.snapshot ? <div className="kv">
             <span className="kk">安全分/等级</span><b>{String(v.snapshot.safety_score)} / {String(v.snapshot.risk_level)}（rank {String(v.snapshot.rank)}）</b>
             <span className="kk">可信度</span><b>{String(v.snapshot.confidence_level)}（{String(v.snapshot.confidence_score)}）</b>
@@ -216,8 +203,9 @@ type ScoreRow = Record<string, unknown>;
 const PAGE = 200;
 
 function EvFleet() {
-  const [agg, setAgg] = useState<{ n: number; avg: number | null; dist: Record<string, number>; low: number } | null>(null);
-  const [filter, setFilter] = useState<string | null>(null);
+  const [agg, setAgg] = useState<{ n: number; avg: number | null; dist: Record<string, number>; low: number; date: string } | null>(null);
+  const [filter, setFilter] = useState<string | null>(() => { const level = new URLSearchParams(location.hash.split("?")[1]).get("level"); return level && ["A", "B", "C", "D", "conf"].includes(level) ? level : null; });
+  const [vehicleQuery, setVehicleQuery] = useState("");
   const [driver, setDriver] = useState<ScoreRow | null>(null);
   const parseQ = () => { const m = location.hash.match(/[?&](driver_id|gpsno)=([^&#]+)/); return m ? { key: m[1], val: decodeURIComponent(m[2]) } : null; };
   const [q, setQ] = useState<{ key: string; val: string } | null>(parseQ);
@@ -252,7 +240,7 @@ function EvFleet() {
         if (r.confidence_level === "low") low++;
         if (typeof r.safety_score === "number") { sum += r.safety_score; cnt++; }
       }
-      setAgg({ n: rows.length, avg: cnt ? sum / cnt : null, dist, low });
+      setAgg({ n: rows.length, avg: cnt ? sum / cnt : null, dist, low, date: String(rows[0]?.as_of_date || "—") });
     })().catch(() => {});
     return () => { alive = false; };
   }, []);
@@ -261,22 +249,24 @@ function EvFleet() {
   const setF = (v: string) => () => setFilter((cur) => (cur === v ? null : v));
   const filterParams: Record<string, string> = !filter ? {} : filter.startsWith("conf") ? { confidence_level: "low" } : { risk_level: filter };
   return <div>
-    <PageHead code="EV01 · 数据截止 2026-07-31 · 来源 snapshot_ffbc02143fcb" title="车队总览" desc="指标卡来自数据库真实计数/聚合；点击指标联动列表筛选；点击司机行进入 EV03。" />
-    <div className="cards">
-      <div className="card" style={{ cursor: "pointer" }} onClick={() => setFilter(null)}><div className="k">有效评分对象 {agg ? agg.n : "…"}</div><div className="s">近14天口径 · 点击=清除筛选</div></div>
-      <div className="card" style={{ cursor: "pointer" }} onClick={() => setFilter(null)}><div className="k">平均安全分 {agg?.avg != null ? agg.avg.toFixed(2) : "…"}</div><div className="s">列表算术平均（页面聚合，非算法值）</div></div>
-      <div className="card" style={{ cursor: "pointer" }} onClick={setF("D")}><div className="k">A {agg ? agg.dist.A ?? 0 : "…"} · B {agg ? agg.dist.B ?? 0 : "…"} · C {agg ? agg.dist.C ?? 0 : "…"} · D {agg ? agg.dist.D ?? 0 : "…"}</div><div className="s">等级=复核优先级；点按=筛选（当前点按D）</div></div>
-      <div className="card warn" style={{ cursor: "pointer" }} onClick={setF("conf")}><div className="k">低可信度 {agg ? agg.low : "…"}</div><div className="s">点按筛选 · 建议先核验设备/数据</div></div>
+    <div className="dashboard-heading fleet-heading"><h1>车队总览</h1><span className="date-label">数据截止 <b>{agg?.date || "—"}</b></span></div>
+    <div className="dashboard-metrics fleet-metrics">
+      {[
+        ["评分车辆", agg?.n ?? "—", null],
+        ["平均安全分", agg?.avg?.toFixed(2) ?? "—", null],
+        ["D 级车辆", agg?.dist.D ?? "—", "D"],
+        ["低可信度车辆", agg?.low ?? "—", "conf"],
+      ].map(([label, value, target], i) => <button key={String(label)} className={`dashboard-metric ${i === 1 ? "featured" : ""}`} onClick={() => setFilter(target === null ? null : String(target))}><span className="metric-label">{label}</span><strong>{value}</strong><span className="metric-note">{i === 1 ? "近 14 天" : "辆"}</span></button>)}
     </div>
-    {filter && <div className="row" style={{ marginBottom: 8 }}><Tag tone="amber">已筛选：{filter === "conf" ? "confidence_level=low" : `risk_level=${filter}`}</Tag><button className="btn" onClick={() => setFilter(null)}>清除</button></div>}
-    <div className="row" style={{ marginBottom: 8 }}><input className="btn" style={{ width: 260, textAlign: "left" }} placeholder="按 driver_id / gpsno 精确定位（深链 #/ev-fleet?driver_id=DEMO_D0177）" value={q ? `${q.key}=${q.val}` : ""} onChange={(e) => { const m = e.target.value.match(/^(driver_id|gpsno)=(.+)$/); setQ(m ? { key: m[1], val: m[2] } : null); }} />
-      {q && <button className="btn" onClick={() => setQ(null)}>清除定位</button>}</div>
-    <ResourceTable key={filter + JSON.stringify(q ?? {}) + "ev01"} resource="admin.score_snapshots" pageSize={50} params={{ ...filterParams, ...(q ? { [q.key]: q.val } : {}) }} labels={{
-      score_id: "score_id", gpsno: "车辆", driver_id: "司机ID", safety_score: "14天安全分", rank: "车队排名", risk_level: "等级",
-      score_change_7d: "7天变化", confidence_score: "可信度分", confidence_level: "可信度", as_of_date: "截止日", top_reason_1: "首要原因",
-      primary_risk_dimension: "主风险维度", forecast_40d_risk_prob: "40天预测概率", review_queue: "复核队列", source_version: "来源版本",
-    }} onRowClick={(r) => setDriver({ ...r })} />
-    <p className="login-note">排序=安全分升序（低分先复核）。六维合计=100−安全分的对账展示在 EV03 详情。</p>
+    <section className="panel fleet-list">
+      <div className="fleet-toolbar">
+        <div className="fleet-filters" aria-label="等级筛选"><button className={!filter ? "active" : ""} onClick={() => setFilter(null)}>全部</button>{["A", "B", "C", "D"].map(level => <button key={level} className={filter === level ? "active" : ""} onClick={setF(level)}>{level} 级 <span>{agg?.dist[level] ?? "—"}</span></button>)}</div>
+        <form className="fleet-search" onSubmit={e => { e.preventDefault(); if (vehicleQuery.trim()) { setFilter(null); setQ({ key: "gpsno", val: vehicleQuery.trim() }); } }}><input placeholder="输入车辆编号" aria-label="车辆编号" value={vehicleQuery} onChange={e => setVehicleQuery(e.target.value)} /><button className="btn" type="submit">查询</button></form>
+      </div>
+      {filter === "conf" && <div className="row filter-note"><Tag tone="amber">低可信度</Tag><button className="btn" onClick={() => setFilter(null)}>清除筛选</button></div>}
+      <ResourceTable key={filter + JSON.stringify(q ?? {}) + "ev01"} resource="admin.score_snapshots" rowActionLabel="查看" pageSize={15} params={{ order: "safety_score.asc", ...filterParams, ...(q ? { [q.key]: q.val } : {}) }} columns={["gpsno", "safety_score", "rank", "risk_level", "score_change_7d", "confidence_level", "primary_risk_dimension", "recommended_action"]} labels={{ gpsno: "车辆编号", safety_score: "安全分", rank: "排名", risk_level: "等级", score_change_7d: "7天变化", confidence_level: "可信度", primary_risk_dimension: "主要风险维度", recommended_action: "建议动作" }} onRowClick={r => setDriver({ ...r })} />
+    </section>
+    <p className="login-note">排序=安全分升序（低分先复核）；“平均安全分”为列表算术平均（页面聚合，非算法值）；等级=复核优先级非事故概率。深链支持 #/ev-fleet?driver_id=DEMO_D0177 或 ?gpsno=。</p>
   </div>;
 }
 
@@ -285,7 +275,7 @@ const DIM_ORDER: [string, string][] = [
   ["driving_stability_contribution", "驾驶稳定性"], ["road_rule_contribution", "道路规则"],
   ["management_contribution", "管理配合度"], ["imu_evidence_contribution", "IMU证据"],
 ];
-const DIM_COLORS = ["#2f6fed", "#7a5af8", "#0e9f8a", "#d97706", "#d6407f", "#64748b"];
+const DIM_COLORS = ["#a389c3", "#ad95ce", "#b8a1d7", "#c0abdf", "#cbbbe6", "#d5c8ed"];
 
 function SixBars({ row }: { row: ScoreRow }) {
   const vals = DIM_ORDER.map(([k]) => Number(row[k] ?? 0) || 0);
@@ -294,11 +284,11 @@ function SixBars({ row }: { row: ScoreRow }) {
   const target = 100 - Number(row.safety_score ?? 0);
   const diff = Math.abs(sixSum - target);
   const verdict = diff <= 1e-6 ? "一致（原始数值精度内）" : diff <= 1e-4 ? `极小差异 ${diff.toExponential(1)}（源文件数值舍入所致，页面不修改算法值）` : `差异 ${diff.toExponential(2)}，需数据组核对；页面不改写`;
-  return <div className="panel"><h3>六维扣分（只读算法事实 · 跨页固定配色）</h3>
+  return <div className="panel"><h3>六维扣分（只读算法事实 · 合计=100−安全分在线对账）</h3>
     {DIM_ORDER.map(([k, label], i) => <div key={k} className="row" style={{ marginBottom: 5 }}>
       <span style={{ width: 110, color: "var(--ink-2)", fontSize: 12.5 }}>{label}</span>
-      <span style={{ height: 14, width: `${(vals[i] / max) * 45}%`, minWidth: 2, background: DIM_COLORS[i], borderRadius: 3, display: "inline-block" }} />
-      <span className="mono">{String(row[k] ?? "—")}</span>
+      <span style={{ height: 14, width: `${(vals[i] / max) * 45}%`, minWidth: vals[i] > 0 ? 2 : 0, background: DIM_COLORS[i], borderRadius: 3, display: "inline-block" }} />
+      <span className="mono" title={String(row[k] ?? "")}>{row[k] == null ? "—" : Number(row[k]).toFixed(2)}</span>
     </div>)}
     <p className="login-note" style={{ marginTop: 6 }}>六维合计 {sixSum.toFixed(6)} vs 100 − 安全分 {target.toFixed(6)} → <b>{verdict}</b>。行为观察扣分 {String(row.behavior_safety_score ?? "—")} · 评分保守下界 {String(row.confidence_adjusted_floor ?? "—")}</p>
   </div>;
@@ -327,10 +317,10 @@ function EvWeek() {
   }
   if (err) return <EmptyState kind="error" />;
   if (!meta) return <EmptyState kind="loading" />;
-  if (!meta.dates.length) return <EmptyState kind="nomatch" hint="score_history 尚未导入；不显示任何虚构日期。" />;
+  if (!meta.dates.length) return <EmptyState kind="nomatch" hint="暂无评分历史" />;
   const DATES = meta.dates;
   return <div>
-    <PageHead code="EV02" title="周度分析" desc="日期选项与逐日数量直接查询自 score_history（distinct as_of_date + count），不写死、不补造；无记录日期不出现。" />
+    <PageHead code="EV02" title="评分趋势" desc="日期选项与逐日数量直接查询自 score_history（distinct as_of_date + count），不写死、不补造；无记录日期不出现。" />
     <div className="panel"><h3>已有日期（DB 实查）</h3>
       <div className="row">{DATES.map((d) => <Tag key={d} tone={d === b ? "blue" : "gray"}>{d} · {meta.counts[d] ?? "?"}</Tag>)}</div>
     </div>
@@ -354,7 +344,7 @@ function EvDriver({ row, onBack, sourceQueueId }: { row: Record<string, unknown>
   const [tab, setTab] = useState(() => { const m = /[?&]tab=([0-3])/.exec(location.hash); return m ? Number(m[1]) : 0; });
   const [facts, setFacts] = useState<{ risk: number; alerts: Record<string, unknown>[]; tasks: Record<string, unknown>[] } | null>(null);
   const tabs = ["已观察行为", "未来风险预测", "事件证据", "管理动作"];
-  const drvId = String(row.driver_id); const gps = String(row.gpsno); const low = String(row.confidence_level) === "low";
+  const drvId = row.driver_id ? String(row.driver_id ?? "—") : ""; const gps = String(row.gpsno); const low = String(row.confidence_level) === "low";
   useEffect(() => { setFacts(null); let alive = true;
     Promise.all([
       getData<Record<string, unknown>>("admin.risk_snapshots", { gpsno: gps, limit: 1 }).catch(() => ({ rows: [] as Record<string, unknown>[] })),
@@ -367,47 +357,44 @@ function EvDriver({ row, onBack, sourceQueueId }: { row: Record<string, unknown>
   return <div>
     <button className="btn" onClick={onBack}>← 返回车队总览</button>
     <div style={{ height: 10 }} />
-    <PageHead code={`EV03 · ${String(row.driver_id)} · 车辆 ${String(row.gpsno)}${facts && (facts as { ident?: string | null }).ident ? " · " + (String((facts as { ident?: string }).ident).includes("synthetic") ? "演示身份（synthetic_demo_mapping，持续标注）" : String((facts as { ident?: string }).ident)) : ""}`} title="司机评价详情" desc="页首分栏区分“近14天观察”与“未来40天预测”，两口径不可互相换算；全部值为只读事实。" />
+    <div className="meta" style={{ marginBottom: 4 }}>EV03 · {String(row.driver_id ?? "—")} · 车辆 {String(row.gpsno)}{facts && (facts as { ident?: string | null }).ident ? (String((facts as { ident?: string }).ident).includes("synthetic") ? <span className="tag amber" style={{ marginLeft: 6 }}>演示身份（synthetic_demo_mapping，持续标注，非真实身份核验）</span> : <> · 身份 {(facts as { ident?: string }).ident}</>) : null}</div>
+    <PageHead code={`EV03 · ${String(row.driver_id ?? "—")} · 车辆 ${String(row.gpsno)}`} title={`车辆 ${gps}`} desc="页首分栏区分“近14天观察”与“未来40天预测”，两口径不可互相换算；全部值为只读事实。" />
     <Banner tone={row.confidence_level === "low" ? "warn" : "info"}>
-      <span>近14天观察：安全分 <b>{String(row.safety_score)}</b> · 等级 <b>{String(row.risk_level)}</b> · 7天变化 {String(row.score_change_7d)} · 可信度 <b>{String(row.confidence_level)}（{String(row.confidence_score)}）</b> · 截止 {String(row.as_of_date)}（窗口起 {String(row.window_start)}）{row.confidence_level === "low" ? " → 低可信度：请先核验设备与数据覆盖，不自动奖惩" : ""}</span>
+      <span>近14天观察：安全分 <b>{row.safety_score == null ? "—" : Number(row.safety_score).toFixed(2)}</b> · 等级 <b>{String(row.risk_level)}</b> · 7天变化 {row.score_change_7d == null ? "—" : Number(row.score_change_7d).toFixed(2)} · 可信度 <b>{{ high: "高", medium: "中", low: "低" }[String(row.confidence_level)] || "—"}（{String(row.confidence_score)}）</b> · 截止 {String(row.as_of_date)}（窗口起 {String(row.window_start)}）{row.confidence_level === "low" ? " → 低可信度：请先核验设备与数据覆盖，不自动奖惩" : ""}</span>
     </Banner>
     <div className="grid2">
-      <div className="panel"><h3>未来40天预测（快照口径）</h3><div className="kv">
-        <span className="kk">risk_prob</span><b>{String(row.forecast_40d_risk_prob)}（预测≠已发生）</b>
+      <div className="panel"><h3>评分信息</h3><div className="kv">
+        <span className="kk">40天风险概率</span><b>{row.forecast_40d_risk_prob == null ? "—" : (Number(row.forecast_40d_risk_prob) * 100).toFixed(2) + "%"}</b>
         <span className="kk">车队排名</span><b>{String(row.rank)}</b>
-        <span className="kk">快照</span><b className="mono">as_of 2026-07-31 · horizon 40d · {String(row.source_version)}</b>
+        <span className="kk">数据截止</span><b className="mono">{String(row.as_of_date)}</b>
       </div></div>
-      <div className="panel"><h3>建议动作（冻结口径）</h3><div className="kv">
-        <span className="kk">主风险维度</span><b>{String(row.primary_risk_dimension)}</b>
+      <div className="panel"><h3>建议动作</h3><div className="kv">
+        <span className="kk">主风险维度</span><b>{({history:"历史事故与未遂", fatigue_distraction:"疲劳与分心", driving_stability:"驾驶稳定性", road_rule:"道路规则", management:"管理配合", imu_evidence:"IMU证据"}[String(row.primary_risk_dimension)] || String(row.primary_risk_dimension ?? "—"))}</b>
         <span className="kk">建议</span><b>{String(row.recommended_action)}</b>
-        <span className="kk">复核队列/周期</span><b>{String(row.review_queue)} · {String(row.review_cycle ?? "—")}</b>
+        <span className="kk">复核周期</span><b>{{ monthly: "每月", weekly: "每周", daily: "每日" }[String(row.review_cycle)] || String(row.review_cycle || "—")}</b>
       </div></div>
     </div>
     <SixBars row={row} />
     <div className="row">{tabs.map((tb, i) => <button key={tb} className="btn" style={i === tab ? { borderColor: "var(--navy)", color: "var(--navy)" } : undefined} onClick={() => setTab(i)}>{tb}</button>)}</div>
     <div style={{ height: 10 }} />
-    {tab === 0 && <ResourceTable resource="admin.score_snapshots" pageSize={5} params={{ driver_id: String(row.driver_id) }} />}
+    {tab === 0 && <section className="panel score-reasons"><h3>主要扣分原因（冻结快照值，只读）</h3>{[1, 2, 3].map(i => <div key={i}><span className="reason-number">0{i}</span><p>{String(row[`top_reason_${i}`] || "—")}</p>{row[`top_reason_${i}_penalty_points`] != null && <b>{Number(row[`top_reason_${i}_penalty_points`]).toFixed(2)} <small>分</small></b>}</div>)}<p className="login-note" style={{ marginTop: 0 }}>六维合计=100−安全分的对账见上方六维面板；下表为该对象已入库评分快照（只读）。</p><ResourceTable resource="admin.score_snapshots" pageSize={5} params={{ driver_id: String(row.driver_id) }} /></section>}
     {tab === 1 && <>{facts && facts.risk === 0 ? <div className="alert info">该时点无此车辆的 40 天预测快照 → 不可用（未取得）；系统不以观察分反推概率。</div> : <ResourceTable resource="admin.risk_snapshots" pageSize={10} params={{ gpsno: String(row.gpsno) }} />}</>}
-    {tab === 2 && <>
-      <p className="page-desc">事件台账（deduction_ledger）按维度解释扣分分摊，可展开每行 event_type/事件数/衰减严重度/分摊扣分/维度合计/as_of_date/ledger_id。<b>台账归因仅用于解释与对账，不宣称任何单条事件具有独立因果效应</b>；若此表无该车辆记录：可能是确无可记录事件，也可能是设备未覆盖——必须结合其可信度与 score_status 判断，不据此推断“有覆盖”或“风险为零”。</p>
-      <ResourceTable resource="admin.deduction_ledger" pageSize={20} params={{ gpsno: String(row.gpsno) }} labels={{ ledger_id: "台账ID", gpsno: "车辆", event_type: "事件类型", dimension: "维度", event_count: "事件数", decayed_severity: "衰减严重度", allocated_points: "分摊扣分", dimension_points: "维度扣分", as_of_date: "截止日" }} />
-    </>}
+    {tab === 2 && <section className="panel"><h3>扣分依据 · 事件台账</h3><p className="page-desc">事件台账（deduction_ledger）按维度解释扣分分摊，每行含 event_type/事件数/分摊扣分/维度截止日/ledger_id。<b>台账归因仅用于解释与对账，不宣称任何单条事件具有独立因果效应</b>；若此表无该车辆记录：可能是确无可记录事件，也可能是设备未覆盖——必须结合其可信度与 score_status 判断，不据此推断“有覆盖”或“风险为零”。</p>{row.top_reason_1_code ? <div className="table-wrap"><table><thead><tr><th>维度</th><th>事件数量</th><th>扣分</th><th>关联事件类型</th></tr></thead><tbody>{[1, 2, 3].map(i => <tr key={i}><td>{{ history: "历史事故与未遂", fatigue_distraction: "疲劳与分心", driving_stability: "驾驶稳定性", road_rule: "道路规则", management: "管理配合度", imu_evidence: "IMU 风险佐证" }[String(row[`top_reason_${i}_dimension`])] || "—"}</td><td>{row[`top_reason_${i}_event_count`] == null ? "—" : String(row[`top_reason_${i}_event_count`])}</td><td>{row[`top_reason_${i}_penalty_points`] == null ? "—" : Number(row[`top_reason_${i}_penalty_points`]).toFixed(2)}</td><td className="mono">{String(row[`top_reason_${i}_source_event_codes`] || "—")}</td></tr>)}</tbody></table></div> : <ResourceTable resource="admin.deduction_ledger" pageSize={20} params={{ gpsno: gps }} labels={{ ledger_id: "台账ID", gpsno: "车辆", event_type: "事件类型", dimension: "维度", event_count: "事件数", decayed_severity: "衰减严重度", allocated_points: "分摊扣分", dimension_points: "维度扣分", as_of_date: "截止日" }} />}</section>}
     {tab === 3 && <div className="panel">
-      <h3>管理动作（只读现状 + 草稿入口；进入草稿≠发送/分配，目标页重新验权）</h3>
+      <h3>管理动作</h3>
       {low && <div className="alert warn">低可信度对象：<b>先完成设备/数据覆盖核验</b>（RM03 核验向草稿 / SM02 绑定核对），再讨论处置；本页不自动安排惩罚性培训。</div>}
       {!facts ? <div className="meta">读取处置现状…</div> : <>
-        <div className="kv"><span className="kk">队列原因（冻结 review_queue 快照）</span><b>{String(row.review_queue)} · {String((row as { action_deadline?: string }).action_deadline || "—")}{sourceQueueId ? " · 队列记录 " + sourceQueueId : ""}</b></div>
+        <div className="kv"><span className="kk">队列原因（冻结 review_queue 快照）</span><b>{String(row.review_queue ?? "—")} · {String((row as { action_deadline?: string }).action_deadline || "—")}{sourceQueueId ? " · 队列记录 " + sourceQueueId : ""}</b></div>
         <div className="kv"><span className="kk">告警（alerts，按本车 gpsno）</span><b>{facts.alerts.length ? facts.alerts.map((a) => String(a.alert_id) + "（" + String(a.status) + "）").join("、") : "无记录"}</b></div>
         <div className="kv"><span className="kk">培训任务（training_tasks）</span><b>{facts.tasks.length ? facts.tasks.map((x) => String(x.task_id) + " " + String(x.status)).join("、") : "无记录"}</b></div>
         <div className="row" style={{ gap: 6, flexWrap: "wrap", marginTop: 8 }}>
           <button className="btn" onClick={() => { location.hash = "ev-review"; }}>EV05 复核处理（列表含 {drvId} 相关申请）→</button>
           {facts!.alerts.map((a) => <button key={String(a.alert_id)} className="btn" onClick={() => { location.hash = "rm-alerts?alert_id=" + encodeURIComponent(String(a.alert_id)); }}>RM03 干预草稿 · {String(a.alert_id)}（{String(a.status)}）→</button>)}
-          {!facts!.alerts.length && <button className="btn" disabled>RM03 干预草稿（无告警上下文）</button>}
-          <button className="btn" onClick={() => { try { sessionStorage.setItem("claw_fill", JSON.stringify({ form: "tr2", driver_id: drvId, alert_id: !facts ? null : facts.alerts[0] ? String(facts.alerts[0].alert_id) : null, goal: (low ? "【先核设备/数据，不建议惩罚性课程】" : "") + "围绕 " + String((row as { primary_risk_dimension?: string }).primary_risk_dimension || "主维度") + " 制定短路径（EV03 上下文携入，逐项可改，确认分配才写库）", note: "来自 EV03 管理动作入口" })); } catch { /* ignore */ } window.dispatchEvent(new CustomEvent("claw:fill")); location.hash = "tr-create"; }}>TR02 培训草稿（带对象上下文）→</button>
-          <button className="btn" onClick={() => { window.dispatchEvent(new CustomEvent("claw:ai-preset", { detail: { prompt: "对 " + drvId + "（车辆 " + gps + "）做 AI04 三种管理路径并排预演（沟通/培训/设备核验路径对比），只预演不写入" } })); }}>AI 动作预演（对话侧栏，预演不写入）→</button>
-          <button className="btn" onClick={() => { window.dispatchEvent(new CustomEvent("claw:ev-cache", { detail: null })); location.hash = "ai-preplan?" + (String(row.driver_id) === "—" ? "gpsno=" + encodeURIComponent(String(row.gpsno)) : "driver_id=" + encodeURIComponent(String(row.driver_id))); }}>打开并排预演页（AI04 独立页）→</button>
+          {!facts!.alerts.length && <button className="btn" disabled>创建干预（需关联告警）</button>}
+          <button className="btn" onClick={() => { try { sessionStorage.setItem("claw_fill", JSON.stringify({ form: "tr2", driver_id: drvId, alert_id: !facts ? null : facts.alerts[0] ? String(facts.alerts[0].alert_id) : null, goal: (low ? "【先核设备/数据，不建议惩罚性课程】" : "") + "围绕 " + String((row as { primary_risk_dimension?: string }).primary_risk_dimension || "主维度") + " 制定培训方案", note: "来自 EV03 管理动作入口" })); } catch { /* ignore */ } window.dispatchEvent(new CustomEvent("claw:fill")); location.hash = "tr-create"; }}>TR02 培训草稿（带对象上下文）→</button>
+          <button className="btn" onClick={() => { window.dispatchEvent(new CustomEvent("claw:ai-preset", { detail: { prompt: "对 " + drvId + "（车辆 " + gps + "）做 AI04 三种管理路径并排预演（沟通/培训/设备核验路径对比），只预演不写入" } })); }}>AI 方案建议 →</button>
+          <button className="btn" onClick={() => { window.dispatchEvent(new CustomEvent("claw:ev-cache", { detail: null })); location.hash = "ai-preplan?" + (String(row.driver_id ?? "—") === "—" ? "gpsno=" + encodeURIComponent(String(row.gpsno)) : "driver_id=" + encodeURIComponent(String(row.driver_id ?? "—"))); }}>比较处置方案 →</button>
         </div>
-        <div className="meta">完整并排预演页面下一轮实现；入口只携带当前对象与证据上下文，写入仍走目标页人工确认。</div>
       </>}
     </div>}
     <p className="login-note">record_id：评分 {String(row.score_id)} · 来源 {String(row.source_version)}{sourceQueueId ? <> · 队列来源 <span className="mono">{sourceQueueId}</span></> : null}</p>
@@ -415,6 +402,7 @@ function EvDriver({ row, onBack, sourceQueueId }: { row: Record<string, unknown>
 }
 
 function Drop7Panel({ data, openRow }: { data: Drop7ish; openRow: (gps: string) => void }) {
+  if (data.data_status !== "ok") return <EmptyState kind="nocov" hint="缺少可比较的评分历史" />;
   return <div>
     <div className="alert info" style={{ fontSize: 12 }}>{data.data_status === "ok" ? `比较对 ${data.date_pair?.[0]} → ${data.date_pair?.[1]}（相隔恰好 7 自然日，只读比较）· 阈值 ${data.threshold} 分（版本 ${data.threshold_version}）· 可比 ${data.comparable} · 命中 ${data.drop_count} · 无法比较 ${data.not_comparable_count}（缺日/版本不一致/状态不可比，均不记为未下滑） · ${data.scope_note || ""} · ${data.generated || ""}` : data.note || "无数据"}</div>
     {(data.rows || []).length === 0 && <EmptyState kind="nomatch" hint="按你的车队范围与阈值，无 7 天下降达到阈值的对象" />}
@@ -435,15 +423,17 @@ function Drop7Panel({ data, openRow }: { data: Drop7ish; openRow: (gps: string) 
 type Drop7ish = import("./api").Drop7;
 
 const QUEUE_GROUPS: [string, string, string][] = [
-  ["priority_review", "优先复核（priority_review）", "red"],
-  ["behavior_coaching", "行为辅导（behavior_coaching）", "amber"],
-  ["prediction_review", "预测核查（prediction_review）", "blue"],
-  ["data_quality_review", "低可信/数据质量（data_quality_review）", "amber"],
-  ["routine", "常规（routine）", "gray"],
+  ["priority_review", "优先复核", "red"],
+  ["behavior_coaching", "行为辅导", "amber"],
+  ["prediction_review", "预测核查", "blue"],
+  ["data_quality_review", "数据质量核验", "amber"],
+  ["routine", "常规观察", "gray"],
 
-  ["drop7", "7天下滑", "score_history 两真实日比较"], ];
+  ["drop7", "7天下滑", "gray"], ];
 
 function RmQueue() {
+  const [queueOverview, setQueueOverview] = useState<import("./api").OverviewResult | null>(null);
+  useEffect(() => { import("./api").then(m => m.getOverview().then(setQueueOverview).catch(() => {})); }, []);
   const [drop7Data, setDrop7] = useState<Drop7ish | null>(null);
   useEffect(() => { import("./api").then((m) => m.drop7().then(setDrop7).catch(() => setDrop7(null))); }, []);
   const [rows, setRows] = useState<ScoreRow[] | null>(null);
@@ -470,31 +460,32 @@ function RmQueue() {
   if (detail) return <EvDriver row={detail} onBack={() => setDetail(null)} sourceQueueId={detail.__queue_id as string | undefined} />;
   if (err) return <EmptyState kind="error" />;
   if (!rows) return <EmptyState kind="loading" />;
-  const counts = Object.fromEntries(QUEUE_GROUPS.map(([k]) => [k, k === "drop7" ? (drop7Data?.drop_count ?? 0) : rows.filter((r) => r.review_queue === k).length]));
+  const counts = Object.fromEntries(QUEUE_GROUPS.map(([k]) => [k, k === "drop7" ? (drop7Data?.data_status === "ok" ? drop7Data.drop_count : "—") : rows.filter((r) => r.review_queue === k).length]));
   return <div>
-    <PageHead code="RM01 · 队列来源 review_queue（as_of 2026-07-31）" title="风险工作台" desc="优先队列直接来自已入库 review_queue 算法输出（只读）；排序只决定先处理谁，不生成新风险分，也不会自动创建告警——当前告警表 0 条即为事实。点击队列行进入 EV03（回带 queue_id 来源）。" />
+    <PageHead code="RM01 · 队列来源 review_queue（as_of 2026-07-31）" title="风险监控" desc="队列来自算法快照；排序仅用于复核优先级，不自动创建告警。" />
     <div className="cards">
-      <div className="card"><div className="k">队列对象总数</div><div className="v">{rows.length}</div><div className="s">review_queue 实数</div></div>
-      <div className="card risk"><div className="k">priority_review</div><div className="v">{counts.priority_review}</div><div className="s">复核队列值（源自快照）</div></div>
-      <div className="card warn"><div className="k">behavior_coaching</div><div className="v">{counts.behavior_coaching}</div></div>
-      <div className="card warn"><div className="k">data_quality_review</div><div className="v">{counts.data_quality_review}</div><div className="s">先核验设备/数据</div></div>
-      <div className="card"><div className="k">待核查告警/未回复干预</div><div className="v zero">0 / 0</div><div className="s">alerts 表实数——导入队列不造告警</div></div>
+      <div className="card"><div className="k">监测车辆</div><div className="v">{new Set(rows.map(r => r.gpsno)).size}</div></div>
+      <div className="card risk"><div className="k">优先复核</div><div className="v">{counts.priority_review}</div></div>
+      <div className="card warn"><div className="k">行为辅导</div><div className="v">{counts.behavior_coaching}</div></div>
+      <div className="card warn"><div className="k">数据质量核验</div><div className="v">{counts.data_quality_review}</div><div className="s">先核验设备/数据</div></div>
+      <div className="card"><div className="k">待核查告警 / 待回复</div><div className="v">{queueOverview?.metrics.find(m => m.key === "alerts_pending")?.count ?? "—"} / {queueOverview?.metrics.find(m => m.key === "interventions_unreplied")?.count ?? "—"}</div></div>
     </div>
     <div className="row" style={{ marginBottom: 8 }}>
       {QUEUE_GROUPS.map(([k, label]) => <button key={k} className="btn" style={openG === k ? { borderColor: "var(--navy)", color: "var(--navy)" } : undefined} onClick={() => setOpenG(k)}>{label} {counts[k]}</button>)}
     </div>
     {openG === "drop7" ? <>{drop7Data ? <Drop7Panel data={drop7Data} openRow={(gps) => { location.hash = `ev-fleet?gpsno=${encodeURIComponent(gps)}`; }} /> : <EmptyState kind="loading" />}</> : null}
-    {openG !== "drop7" && <ResourceTable key={`q-${openG}`} resource="admin.review_queue" pageSize={25} params={{ review_queue: openG }}
-      onRowClick={openDriver} labels={{ queue_id: "queue_id(来源)", gpsno: "车辆", safety_score: "14天安全分", rank: "车队排名", risk_level: "等级", forecast_40d_risk_prob: "40天概率", action_deadline: "处置时限", confidence_level: "可信度", top_reason_1: "首要原因", as_of_date: "截止日", source_version: "来源版本" }} />}
+    
+    {openG !== "drop7" && <ResourceTable key={`q-${openG}`} resource="admin.review_queue" pageSize={15} columns={["gpsno", "safety_score", "risk_level", "confidence_level", "forecast_40d_risk_prob", "action_deadline", "top_reason_1"]} params={{ review_queue: openG }}
+      rowActionLabel="查看" onRowClick={openDriver} labels={{ primary_risk_dimension: "主要风险维度", recommended_action: "建议动作", queue_id: "queue_id(来源)", gpsno: "车辆", safety_score: "14天安全分", rank: "车队排名", risk_level: "等级", forecast_40d_risk_prob: "40天概率", action_deadline: "处置时限", confidence_level: "可信度", top_reason_1: "首要原因", as_of_date: "截止日", source_version: "来源版本" }} />}
+    
     {openG !== "drop7" && <QueueConfirm group={openG} />}
-    <p className="login-note">分组与阈值出自 review_queue 快照与运营口径（7天下降≥10分等规则第4-5轮接入产生 alerts 写入）；本页仅排序展示，未写入任何业务对象。</p>
   </div>;
 }
 
 const REPLAY_VEHICLES = ["95301325", "95301330", "95301567", "95302616"];
 
 function QueueConfirm({ group }: { group: string }) {
-  const [gpsno, setGpsno] = useState(group === "data_quality_review" ? "95302616" : "95301325");
+  const [gpsno, setGpsno] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const dual = group === "priority_review";
@@ -560,7 +551,7 @@ function RmReplay() {
           <option value="all">全部四辆</option>{REPLAY_VEHICLES.map((g) => byVeh[g] ? <option key={g} value={g}>{g}</option> : null)}
         </select>
       </div>
-      <p className="login-note">跳转下拉列出前 200 个事件时间；时钟未到的事件不提前出现。</p>
+      <p className="meta">跳转下拉列出前 200 个事件时间；时钟未到不显示。</p>
     </div>
     <div className="table-wrap" style={{ maxHeight: 380, overflow: "auto" }}>
       <table><thead><tr><th>事件时间</th><th>车辆</th><th>事件类型</th><th>名称</th><th>速度km/h</th><th>维度</th><th>event_id</th></tr></thead><tbody>
@@ -618,14 +609,14 @@ function RmAlerts({ initialAlertId }: { initialAlertId?: string | null }) {
     <ResourceTable key={`al${tick}`} resource="admin.alerts" onRowClick={(r) => setOpenId(String(r.alert_id))} labels={{ alert_id: "alert_id", gpsno: "车辆", driver_id: "司机", rule_code: "触发规则", evidence_id: "证据ID", occurred_at: "事实日期", status: "状态", owner_user_id: "责任人" }} />
     {cs && al && <div className="panel">
       <h3>事件档案 · {String(al.gpsno)} · {String(al.rule_code)} @ {String(al.rule_version)}</h3>
-      <Banner tone="info"><span>alert_id <span className="mono">{String(al.alert_id)}</span> · 证据 <span className="mono">{String(al.evidence_id)}</span> · 事实日期 {String(al.occurred_at)}（alert_id 下全部动作可回溯；数值只读）</span></Banner>
+      <Banner tone="info"><span>alert_id <span className="mono">{String(al.alert_id)}</span> · 证据 <span className="mono">{String(al.evidence_id)}</span> · 事实日期 {String(al.occurred_at)}</span></Banner>
       <div className="grid2">
         <div className="stack">
           <div className="kv">
             <span className="kk">状态</span><b>{st}</b>
             <span className="kk">责任人</span><b className="mono">{String(al.owner_user_id || "—")}</b>
             <span className="kk">司机绑定</span><b>{cs.demo_binding ? cs.demo_binding.note : "无有效绑定账号：待办保留、不显示“已送达”"}</b>
-            <span className="kk">下一步</span><b>{st === "pending_review" ? "人工复核三选一" : st === "confirmed" ? "建草稿并确认发送" : ["sent", "read"].includes(st) ? "等待司机" : st === "closed" ? "只读追溯" : "复核反馈"}</b>
+            <span className="kk">下一步</span><b>{st === "pending_review" ? "人工复核三选一" : st === "confirmed" ? "建草稿并确认发送" : ["sent", "read"].includes(st) ? "等待司机" : st === "closed" ? "查看记录" : "复核反馈"}</b>
           </div>
           {st === "pending_review" && <div className="row">
             <button className="btn primary" style={{ width: "auto" }} disabled={sending} onClick={() => act(() => alertStatus(String(al.alert_id), "confirmed"), "已确认：证据属实")}>■ 确认证据属实</button>
@@ -655,14 +646,14 @@ function RmAlerts({ initialAlertId }: { initialAlertId?: string | null }) {
           </div>}
           <div className="row">
             <select className="btn" style={{ background: "#fff" }} aria-label="关闭原因" value={closeReason} onChange={(e) => setCloseReason(e.target.value)}><option value="">关闭原因…</option>{["已完成干预", "证据不成立", "转设备核验", "重复记录"].map((x) => <option key={x}>{x}</option>)}</select>
-            <button className="btn" disabled={sending || !closeReason || st === "closed"} onClick={() => act(() => alertStatus(String(al.alert_id), "closed", closeReason), "案卷关闭（只读可回溯）")}>关闭案卷</button>
+            <button className="btn" disabled={sending || !closeReason || st === "closed"} onClick={() => act(() => alertStatus(String(al.alert_id), "closed", closeReason), "案卷已关闭")}>关闭案卷</button>
           </div>
-          {st !== "closed" && <details style={{ marginTop: 8 }}><summary style={{ cursor: "pointer", fontSize: 13 }}>动作预演（A21 · 未写入任何数据）</summary>
+          {st !== "closed" && <details style={{ marginTop: 8 }}><summary style={{ cursor: "pointer", fontSize: 13 }}>处置方案预演（未写入任何数据）</summary>
             <div className="grid2" style={{ fontSize: 13 }}>
               <div className="task-card"><div className="t">① 先设备/数据核验</div><div className="meta">将产生：data_verification 待办或核验备注；不判罚、不改分；适用：低可信/manual_review（本规则 {String(al.rule_code)}）</div></div>
               <div className="task-card"><div className="t">② 先沟通干预</div><div className="meta">将产生：干预草稿→确认发送后站内消息；前提：alert 已 confirmed、司机为有效绑定（当前 {cs.demo_binding ? "有账号" : "无绑定→不可标已送达"}）</div></div>
               <div className="task-card"><div className="t">③ 分配已审核课程</div><div className="meta">前提：课程 approved + 绑定核实；未满足必 409；效果=培训待办/任务，绝不改算法值（见 TR02/TR05）</div></div>
-              <div className="task-card"><div className="t">④ 关闭案卷</div><div className="meta">必须选原因；关闭后只读可回溯；再处置需另建案卷（本预演按钮不落库）</div></div>
+              <div className="task-card"><div className="t">④ 关闭案卷</div><div className="meta">选择关闭原因，保留处置记录</div></div>
             </div>
           </details>}
           {fillNote && <div className="alert info">{fillNote}</div>}
@@ -738,7 +729,7 @@ function ReviewBench() {
     {rows.length === 0 && <EmptyState kind="nomatch" hint="当前没有已提交待复核的任务（历史 reviewed 任务可经 TR01 台账查看，不生成假待办）" />}
     <ResourceTable resource="admin.trainings" pageSize={20} params={{}} onRowClick={(r) => { if (r.status === "submitted" || r.status === "returned") setSel(String(r.task_id)); }} labels={{ task_id: "task_id", driver_id: "司机", course_id: "课程", status: "状态", submitted_at: "提交时间", due_at: "截止" }} />
     {sel && detail && <div className="panel" style={{ marginTop: 10 }}>
-      <h3>复核详情：{String(detail.task.task_id)}（原文与摘要只读；仅下方人工操作会写库）</h3>
+      <h3>复核详情</h3>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 }}>
         <div className="task-card" style={{ padding: 8 }}>
           <div className="t">① 司机提交原文（永不改写/覆盖，AI 仅引用）</div>
@@ -761,7 +752,7 @@ function ReviewBench() {
           </> : <div className="alert info">未取得：该任务未关联 alert_id（系统不臆造证据）</div>}
         </div>
         <div className="task-card" style={{ padding: 8, borderColor: "#b9cbe8", background: "#f6f9ff" }}>
-          <div className="t">④ AI 辅助摘要（只读草稿，不判定通过/退回）</div>
+          <div className="t">④ AI 辅助摘要（只读草稿，不判定通过/退回；零写库）</div>
           <button className="btn" disabled={sum === "loading"} onClick={async () => { setSum("loading"); try { setSum(await taskSummary(sel!)); } catch { setSum({ available: false, note: "生成失败（服务端已留审计）" }); } }}>{sum === "loading" ? "生成中…" : sum && typeof sum === "object" && sum.available ? "重新生成摘要" : "生成 AI 辅助摘要（受控只读）"}</button>
           {sum === "loading" && <div className="meta">模型运行中（读取的是本页同源事实，生成不改任务状态/reviewer/时间戳）</div>}
           {sum && typeof sum === "object" && !sum.available && <div className="alert warn">AI 摘要暂不可用：{String(sum.reason || "")} —— {String(sum.note || "前三部分与人工审核照常可用")}</div>}
@@ -784,7 +775,7 @@ function ReviewBench() {
         <button className="btn primary" style={{ width: "auto" }} onClick={send} disabled={!reason.trim()}>人工确认（写入并留痕）</button>
         <button className="btn" onClick={() => setSel(null)}>收起</button>
       </div>
-      <p className="meta">AI 摘要与人工确认相互独立：摘要生成/刷新零写库；确认走原有状态机（校验角色、旧状态版本、幂等——旧已审任务重复点击仅回放原业务结果）。</p>
+      <p className="meta">AI 摘要与人工确认相互独立：摘要生成/刷新零写库；确认走原有状态机（校验角色、旧状态版本、幂等——旧已审任务重复点击仅回放原业务结果，人工原结论不被改写）。</p>
       {msg && <div className="alert info">{msg}</div>}
     </div>}
     {sel && !detail && <div className="meta">任务读取失败或无权访问</div>}
@@ -806,7 +797,7 @@ function TrLedger()  {
       {["assigned", "in_progress", "submitted", "reviewed", "returned", "overdue"].map((k) => <div key={k} className={`card ${k === "overdue" ? "risk" : ""}`}><div className="k">{({ assigned: "已分配", in_progress: "进行中", submitted: "待复核", reviewed: "已复核", returned: "退回补充", overdue: "逾期(展示)" } as Record<string, string>)[k]}</div><div className={`v ${!(counts[k] || 0) ? "zero" : ""}`}>{counts[k] || 0}</div></div>)}
     </div>
     {(!rows || rows.length === 0) ? <>
-      <EmptyState kind="nomatch" hint="当前 0 个培训任务（门禁：三门课仍为演示草稿待团队审核，正式分配一律 409）。此空态为真实业务状态，不放空模板数据。" />
+      <EmptyState kind="nomatch" hint="暂无分配中的培训任务：课程须经团队审核批准后由 TR02 正式分配才会出现（服务端门禁：未审核课程分配一律 409）。" />
       <ReviewBench />
     </> : <>
       <ResourceTable resource="admin.trainings" params={tid ? { task_id: tid } : {}} onRowClick={(r) => setSel(String(r.task_id))} labels={{ task_id: "task_id", driver_id: "司机", alert_id: "关联告警", course_id: "课程", mandatory: "强制", due_at: "截止", status: "状态", submitted_at: "提交", reviewed_at: "复核" }} />
@@ -829,7 +820,7 @@ function TemplateInsertRow(props: { gpsno: string; driverId: string; onInsert: (
   const [sel, setSel] = useState(""); const [note, setNote] = useState<string | null>(null);
   useEffect(() => { fetch("/api/admin/templates?review_status=approved&scene=rm3_draft", { credentials: "include" }).then((r) => r.json()).then((j) => setOpts(j)).catch(() => setOpts({ latest: [] })); }, []);
   const approved = (opts?.latest || []).filter((x) => x.review_status === "approved");
-  if (opts && opts.migration_pending) return <div className="meta">通知模板：迁移 005 未执行（待属主）——选择/预览不写 interventions / notification_events；模板可用后此处可选已审核模板生成<b>可编辑草稿</b>，发送仍须你点击原确认按钮。</div>;
+  if (opts && opts.migration_pending) return <div className="meta">通知模板暂不可用。<b>可编辑草稿</b>。</div>;
   return <div className="row" style={{ gap: 6, margin: "4px 0", flexWrap: "wrap" }}>
     <select className="btn" style={{ width: "auto", maxWidth: 260 }} value={sel} onChange={(e) => setSel(e.target.value)} aria-label="模板选择"><option value="">从已审核模板插入…（{approved.length ? approved.length + " 个可用" : "暂无 approved 模板——不会凭空插入"}）</option>{approved.map((a) => <option key={a.template_id} value={a.template_id}>{a.template_key}:v{a.version} · {a.title}</option>)}</select>
     <button className="btn" disabled={!sel} onClick={async () => { try { const r = await fetch(`/api/admin/template-preview?template_id=${encodeURIComponent(sel)}&driver_id=${encodeURIComponent(props.driverId)}`, { credentials: "include" }).then((x) => x.json()); if (r.ok && r.rendered) { props.onInsert(String(r.rendered)); setNote("预览已插入正文（可编辑；缺事实保留（待核：…））" + (r.missing_facts?.length ? " · 缺：" + r.missing_facts.join("、") : "") + (r.bound_account ? "" : " · 该司机无已核实绑定：发送后不会显示已送达") + "；发送仍需人工确认"); } else setNote(String(r.error || r.note || "预览不可用（未审核模板已拒绝）")); } catch { setNote("预览失败"); } }}>预览并插入草稿</button>
@@ -841,7 +832,7 @@ function SmAccounts() {
   return <div>
     <PageHead code="SM01" title="账号与角色管理" desc="列表按当前管理员 fleet_scope 过滤；角色/状态/车队筛选；创建（演示仅 safety_admin 与 driver 两类登录）、编辑抽屉（显示名/车队范围/司机绑定）、停用与恢复。服务端唯一性：登录名唯一、司机有效绑定唯一、未核实身份不可自动绑定演示司机；停用即时清会话。任何页面与日志均不出现口令明文。" />
     <AccountAdminPanel />
-    <p className="login-note">同一 safety_admin 兼具系统配置与安全处置两组能力（capability 矩阵见后端 ROLE_CAPABILITIES），不设第三种管理员登录。绑定核实入口保持在 SM02（BindPanel）。</p>
+    <p className="login-note">同一 safety_admin 兼具系统配置与安全处置两组能力（capability 矩阵见后端 ROLE_CAPABILITIES），不设第三种管理员登录。绑定核实入口保持在 SM02（BindPanel）。任何页面与日志均不出现口令明文。</p>
   </div>;
 }
 
@@ -850,7 +841,7 @@ function BindingsPanelLazy() { const [drv, setDrv] = useState<{ driver_id: strin
 
 function SmBindings() {
   return <div>
-    <PageHead code="SM02" title="司机档案与车辆绑定（当前/历史双区 + 时段冲突校验）" desc="绑定关系写 user_bindings（account/user 体系），展示 gpsno、driver_id、平台账号、identity_status、生效起止与演示身份标识；drivers 表冻结映射、历史评分与预测快照永不改写。日期语义：闭区间含首尾日；相邻(次日开始)允许；空结束=持续有效。结束早于开始、同车重叠跨账号、同账号同窗多司机均在服务端强制拒绝（编辑排除自身；并发经进程内互斥+写后回读自动回滚——多副本部署时该保护降级，需平台事务/唯一约束）。未核实的绑定不会下发个人明细（my.* 403）。as_of 可回看历史当日有效关系。" />
+    <PageHead code="SM02" title="司机档案与车辆绑定" desc="绑定关系写 user_bindings（account/user 体系），展示 gpsno、driver_id、平台账号、identity_status、生效起止与演示身份标识；drivers 表冻结映射、历史评分与预测快照永不改写。日期语义：闭区间含首尾日；相邻(次日开始)允许；空结束=持续有效。结束早于开始、同车重叠跨账号、同账号同窗多司机均在服务端强制拒绝（编辑排除自身；并发经进程内互斥+写后回读自动回滚——多副本部署时该保护降级，需平台事务/唯一约束）。未核实的绑定不会下发个人明细（my.* 403）。as_of 可回看历史当日有效关系。" />
     <BindingsPanelLazy />
   </div>;
 }
@@ -881,6 +872,7 @@ function OpConfigPanel() {
       </div>
       {msg && <div className="alert info">{msg}</div>}
     </div>
+    <MandatePolicyCard />
   </div>;
 }
 
@@ -889,12 +881,12 @@ function SmConfig() {
   return <div>
     <PageHead code="SM03 · 数据截止 2026-07-31" title="评价规则与运营配置" desc="" />
     <div className="row">
-      <button className="btn" style={tab === 0 ? { borderColor: "var(--navy)", color: "var(--navy)" } : undefined} onClick={() => setTab(0)}>冻结算法规则（只读 6 维）</button>
+      <button className="btn" style={tab === 0 ? { borderColor: "var(--navy)", color: "var(--navy)" } : undefined} onClick={() => setTab(0)}>评分规则</button>
       <button className="btn" style={tab === 1 ? { borderColor: "var(--navy)", color: "var(--navy)" } : undefined} onClick={() => setTab(1)}>运营参数（带版本）</button>
     </div>
     <div style={{ height: 10 }} />
     {tab === 0 && <>
-      <Banner tone="info">为何不可编辑：概率校准、14天评分、六维权重、事件归属与可信度计算属冻结算法输出（score_method=fixed_exposure_event_increment_v2，窗口 14 天）。服务端未提供规则写接口（调用一律 410 frozen_rules_not_writable）；启用新规则须算法验证→版本批准→重新出数。</Banner>
+      <Banner tone="info">本表为<b>现行生效口径</b>（各维度显示其生效 source_version：历史出数快照或 ruleset_vN）。评分标准的唯一变更通道=SM05 结构化草案→人工批准（同作者二次确认）→显式「生效」写为新版本 ruleset_vN（旁路直改一律 410 frozen_rules_not_writable）。生效不改写历史：score_snapshots/score_history/deduction_ledger/risk_snapshots 为各时点口径离线所算、不回算不重算；重新出数由算法侧执行。<a className="meta" href="#/sm-drafts" style={{ marginLeft: 6 }}>去 SM05 提案/批准/生效 ↗</a></Banner>
       <ResourceTable resource="admin.evaluation_rules" labels={{ dimension: "维度码", dimension_name: "维度名", weight: "权重(frozen)", window_days: "窗口(天)", score_method: "评分方法", editable: "可编辑", source_version: "来源版本" }} />
       <p className="login-note">六维权重合计以冻结文件为准；本页仅展示，不做归一化。</p>
     </>}
@@ -907,7 +899,7 @@ function SmAudit() {
   return <div key={tick}>
     <PageHead code="SM04" title="数据版本与审计" desc="快照版本、导入运行台账、校验（概率一致性/评分对账/主键检查）与按操作者/对象/日期的操作日志。" />
     <ImportPanel onCommitted={() => setTick((v) => v + 1)} />
-    <Banner tone="info">导入包 manifest 六项 checks 均为 passed（数据侧本地验证结果）。审计日志为真实记录：登录/登出/预检/提交均在此可查。</Banner>
+    
     <h3 style={{ fontSize: 14, margin: "6px 0" }}>导入运行台账（import_runs）</h3>
     <ResourceTable resource="admin.import_runs" labels={{ run_id: "run_id", filename: "文件", target_table: "目标表", source_version: "版本口径", check_status: "预检", row_total: "行数", accepted_count: "接受", rejected_count: "拒绝", dup_pk_count: "重复主键", type_error_count: "类型错误", unknown_columns: "未知列", actor_id: "操作者", created_at: "预检时间", committed_at: "写入时间", created_audit_id: "预检审计ID", commit_audit_id: "提交审计ID" }} />
     <h3 style={{ fontSize: 14, margin: "6px 0" }}>操作审计（服务端筛选/分页/CSV 导出；不显示口令、完整问答或越权目标详情）</h3>
@@ -918,12 +910,21 @@ function SmAudit() {
 function TrCreate() {
   const [courses, setCourses] = useState<Record<string, unknown>[]>([]);
   const [alerts, setAlerts] = useState<Record<string, unknown>[]>([]);
-  const [driver, setDriver] = useState("DEMO_D0149");
+  const [driver, setDriver] = useState("");
   const [course, setCourse] = useState("DEMO_C01");
   const [alertId, setAlertId] = useState<string>("");
   const [goal, setGoal] = useState("");
   const [due, setDue] = useState("2026-11-15");
   const [mand, setMand] = useState(false);
+  const [mandTouched, setMandTouched] = useState(false);
+  const [polInfo, setPolInfo] = useState<string | null>(null);
+  const policyRef = useRef<Record<string, string> | null>(null);
+  useEffect(() => { (async () => { try { const r = await getData<Record<string, unknown>>("admin.operation_config", { limit: 50 }); const row = r.rows.find((x) => String(x.config_id) === "training_mandate_policy"); if (row) { policyRef.current = JSON.parse(String(row.value)); } } catch {} })(); }, []);
+  useEffect(() => { (async () => { setPolInfo(null); const pol = policyRef.current; if (!pol || !driver.trim()) return;
+    try { const r = await getData<Record<string, unknown>>("admin.score_snapshots", { driver_id: driver.trim(), limit: 1 }); const lvl = String(r.rows[0]?.risk_level || ""); const want = lvl ? String(pol[lvl] || "") : "";
+      if (want === "mandatory" || want === "optional") { if (!mandTouched) setMand(want === "mandatory"); setPolInfo(`等级 ${lvl} 映射=${want === "mandatory" ? "强制" : "非强制"}，已按现行映射预填（可显式改判；不改则服务端按同一映射定值并留痕）`); }
+      else setPolInfo(lvl ? `等级 ${lvl} 未配置映射：缺省非强制` : null);
+    } catch {} })(); }, [driver, mandTouched]);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [tplRef, setTplRef] = useState<string | null>(null);
@@ -940,27 +941,29 @@ function TrCreate() {
   const approved = courses.filter((c) => c.content_status === "approved");
   async function submit() {
     setBusy(true); setMsg(null);
-    try { const r = await trainingAssign({ course_id: course, driver_id: driver, goal: goal || `结合 ${driver} 已核实证据完成 ${course} 复盘`, mandatory: mand, due_at: due, alert_id: alertId || undefined, template_ref: tplRef || undefined } as never); setMsg(`分配成功 task_id=${(r as { task_id?: string }).task_id}（分配通知已面向有效绑定账号生成）`); }
+    try { const r = await trainingAssign({ course_id: course, driver_id: driver, goal: goal || `结合 ${driver} 已核实证据完成 ${course} 复盘`, ...(mandTouched ? { mandatory: mand } : {}), due_at: due, alert_id: alertId || undefined, template_ref: tplRef || undefined } as never);
+      setMsg(`分配成功 task_id=${(r as { task_id?: string }).task_id} · 强制=${(r as { mandatory?: boolean }).mandatory ? "是" : "否"}（来源 ${(r as { mandatory_source?: string }).mandatory_source || "manual"}）${!mandTouched && (r as { mandatory_source?: string }).mandatory_source === "default_false" ? "——未配置等级映射故缺省非强制，可在 SM03 建立映射" : ""}（通知已面向有效绑定账号生成）`); }
     catch (e) { const c2 = e instanceof ApiError ? e.code : "network"; setMsg({ course_not_approved: "服务端拒绝：课程处于待审核演示草稿——安全管理员团队人工审核通过前不得正式分配（training_tasks 不新增）", driver_binding_unverified: "服务端拒绝：目标司机绑定未核实", evidence_driver_mismatch: "服务端拒绝：所选告警证据与该司机不匹配", evidence_alert_not_found: "服务端拒绝：告警不存在" }[c2] || `拒绝：${c2}`); }
     setBusy(false);
   }
   return <div>
     <PageHead code="TR02" title="创建培训（分配受审核门禁）" desc="表单强制顺序：已审核课程 → 关联真实证据（本车队告警）→ 目标/强制性/截止 → 安全员页面确认分配。低可信度且行为证据不足时应优先设备核验而非惩罚培训。" />
     <div className="panel stack">
-      <div className="field"><label>目标司机（已核实绑定对象；演示口径）</label><input value={driver} onChange={(e) => setDriver(e.target.value)} /></div>
+      <div className="field"><label>目标司机</label><input value={driver} onChange={(e) => setDriver(e.target.value)} /></div>
       <div className="field"><label>从告警关联证据（可选，须与司机匹配）</label>
         <select className="btn" style={{ background: "#fff", textAlign: "left" }} aria-label="关联告警" value={alertId} onChange={(e) => setAlertId(e.target.value)}><option value="">不关联</option>{alerts.map((a) => <option key={String(a.alert_id)} value={String(a.alert_id)}>{String(a.gpsno)} · {String(a.rule_code)} · {String(a.status)}</option>)}</select></div>
       <div className="field"><label>课程（approved 才允许正式分配）</label>
         <select className="btn" style={{ background: "#fff", textAlign: "left" }} value={course} onChange={(e) => setCourse(e.target.value)}>{(approved.length ? approved.map((c) => <option key={String(c.course_id)}>{String(c.course_id)}</option>) : courses.map((c) => <option key={String(c.course_id)}>{String(c.course_id)}（{String(c.content_status)}）</option>))}</select>
-        <span className="login-note">当前已审核课程：{approved.length} / {courses.length}——{approved.length === 0 ? "全部仍为演示草稿待团队审核（TR05 人工动作）" : ""}</span></div>
+        <span className="login-note">当前已审核课程：{approved.length} / {courses.length}——{approved.length === 0 ? "全部仍为演示草稿待团队审核（需 TR05 人工批准后才能在 TR02 选择）" : ""}</span></div>
       <div className="field"><label>学习目标</label><input value={goal} onChange={(e) => setGoal(e.target.value)} aria-label="学习目标" placeholder="结合已核实证据写可观察目标" /></div>
       <div className="field"><label>截止日（逾期将入展示分支）</label><input value={due} onChange={(e) => setDue(e.target.value)} aria-label="截止日期" type="date" /></div>
-      <label className="row" style={{ fontSize: 13 }}><input type="checkbox" checked={mand} onChange={(e) => setMand(e.target.checked)} /> 强制（仅授权安全员可指定，AI 不得自动设为强制）</label>
+      <label className="row" style={{ fontSize: 13 }}><input type="checkbox" checked={mand} onChange={(e) => { setMand(e.target.checked); setMandTouched(true); }} /> 强制培训（按 SM03「风险等级→强制性映射」自动预填；显式改动=人工改判将被记录。AI 不得自动设为强制）</label>
+      {polInfo && <div className="meta" style={{ color: "#8059a0" }}>{polInfo}</div>}
       {aiFill && <div className="alert info">{aiFill}</div>}
       <TemplateScenePicker scene="task_assigned" driverId={driver} onPick={(r) => setTplRef(r)} label="分配通知模板（可选，仅 approved；选择/预览不写库）" />
-      <div className="row"><span className="tag blue" style={{ fontSize: 12 }}>草稿状态，未分配</span><button className="btn primary" style={{ width: "auto" }} disabled={busy} onClick={submit}>安全员确认分配（正式写入需点击）</button></div>
+      <div className="row"><span className="tag blue" style={{ fontSize: 12 }}>草稿状态，未分配</span><button className="btn primary" style={{ width: "auto" }} disabled={busy} onClick={submit}>确认分配</button></div>
       {msg && <div className="alert warn">{msg}</div>}
-      <p className="login-note">司机提交/复核反馈仅在任务存在后于 TR04/TR06 发生；本页面自身不产生任何假任务。</p>
+      
     </div>
   </div>;
 }
@@ -968,7 +971,7 @@ function TrCreate() {
 // SM01：挂载完整账号管理面板（组件与 manage.accounts 门禁复用第2/13轮后端，未重建账号体系）
 function SmDrafts() { return <SmDraftsPage />; }
 function SmKnowledge() {
-  const [tab, setTab] = useState<"knowledge" | "templates">("knowledge");
+  const [tab, setTab] = useState<"knowledge" | "templates">(() => new URLSearchParams(location.hash.split("?")[1]).get("tab") === "templates" ? "templates" : "knowledge");
   return <div>
     <div className="row" style={{ gap: 6, margin: "4px 0 8px" }}>
       <button className="btn" style={tab === "knowledge" ? { borderColor: "var(--navy)", color: "var(--navy)" } : undefined} onClick={() => setTab("knowledge")}>知识条目（SM06）</button>
@@ -979,10 +982,11 @@ function SmKnowledge() {
   </div>;
 }
 
-export function AdminShell({ user }: { user: MeUser }) {
-  const [route, setRoute] = useState(() => (location.hash.replace(/^#\/?/, "") || "overview").split("?")[0]);
+export function AdminShell({ user, aiOpen, onAiToggle }: { user: MeUser; aiOpen: boolean; onAiToggle: () => void }) {
+  const [routeKey, setRouteKey] = useState(() => location.hash);
+  const route = (routeKey.replace(/^#\/?/, "") || "overview").split("?")[0];
   useEffect(() => {
-    const onHash = () => setRoute(location.hash.replace(/^#\/?/, "").split("?")[0] || "overview");
+    const onHash = () => setRouteKey(location.hash);
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -992,6 +996,7 @@ export function AdminShell({ user }: { user: MeUser }) {
       case "ev-week": return <EvWeek />;
       case "ev-driver": return <EvFleet />; // 详情需从列表行进入
       case "ev-review": return <EvReview />;
+      case "ev-root": return <RootCausesPage />;
       case "rm-queue": return <RmQueue />;
       case "rm-replay": return <RmReplay />;
       case "rm-alerts": { const m = location.hash.match(/[?&]alert_id=([^&#]+)/); return <RmAlerts initialAlertId={m ? decodeURIComponent(m[1]) : null} />; }
@@ -1005,27 +1010,29 @@ export function AdminShell({ user }: { user: MeUser }) {
       case "sm-audit": return <SmAudit />;
       case "sm-drafts": return <SmDrafts />;
       case "sm-knowledge": return <SmKnowledge />;
-      default: return <OverviewView />;
+      default: return <Dashboard />;
     }
-  }, [route]);
+  }, [routeKey]);
   return <div className="admin-shell">
     <header className="topbar">
+      <a className="app-brand" href="#/overview"><span className="brand-symbol" aria-hidden="true">行</span><span>行安<span className="brand-caption">驾驶安全管理</span></span></a>
       <GlobalSearch />
-      <span className="title">Crazy Logi-AI 2.0 · 驾驶安全管理</span>
-      <span className="chip">车队：全部授权（范围随绑定收敛）</span>
-      <span className="meta">数据截止 2026-07-31 · 来源 snapshot_ffbc02143fcb</span>
       <span className="spacer" />
       <NotesChips />
-      <span className="user"><b>{user.displayName || user.username}</b><span className="meta">{user.role === "safety_admin" ? "安全管理员（配置+处置同账号）" : user.role}</span><LogoutButton /></span>
+      <span className="user"><span className="user-avatar" aria-hidden="true">{(user.displayName || user.username || "管").slice(0, 1)}</span><span><b>{user.displayName || user.username}</b><span className="user-role">{user.role === "safety_admin" ? "安全管理员" : user.role}</span></span><LogoutButton /></span>
     </header>
-    <nav className="side">
-      {NAV.map((g) => (
-        <div key={g.group}><div className="group">{g.group}</div>
-          {g.items.map((it) => <a key={it.key} className={route === it.key ? "active" : ""} href={`#/${it.key}`}>{it.label}{it.code ? ` · ${it.code}` : ""}</a>)}
-        </div>
-      ))}
+    <nav className="side" aria-label="主导航">
+      {[{ index: 0, label: "数据总览", icon: 0 }, { index: 1, label: "车队管理", icon: 1 }, { index: 2, label: "风险监控", icon: 2 }, { index: 3, label: "培训管理", icon: 3 }].map(({ index, label, icon }) => {
+        const active = NAV[index].items.some(it => it.key === route) || (index === 0 && !NAV.some(g => g.items.some(it => it.key === route)));
+        return <a key={label} className={active ? "active" : ""} href={`#/${NAV[index].items[0].key}`} aria-current={active ? "page" : undefined}><NavIcon kind={icon} /><span>{label}</span></a>;
+      })}
+      <button className={aiOpen ? "active" : ""} onClick={onAiToggle} aria-pressed={aiOpen}><NavIcon kind={4} /><span>智能助手</span></button>
+      <a className={route.startsWith("sm-") ? "active" : ""} href="#/sm-accounts" aria-current={route.startsWith("sm-") ? "page" : undefined}><NavIcon kind={5} /><span>系统管理</span></a>
     </nav>
-    <main className="main">{view}</main>
+    <main className="main" key={routeKey}>
+      {NAV.filter(g => g.items.length > 1 && g.items.some(it => it.key === route)).map(g => <nav className="module-tabs" aria-label={g.group} key={g.group}>{g.items.filter(it => it.key !== "ev-driver").map(it => <a key={it.key} href={`#/${it.key}`} aria-current={route === it.key ? "page" : undefined} className={route === it.key ? "active" : ""}>{it.label.replace("/数据异议", "")}</a>)}</nav>)}
+      {view}
+    </main>
   </div>;
 }
 
@@ -1039,3 +1046,4 @@ export function onAppLogout() { try { const owner = sessionStorage.getItem("claw
 function LogoutButton() {
   return <button className="btn" style={{ background: "var(--navy-line)", color: "#fff", borderColor: "var(--navy-line)", padding: "4px 10px" }} onClick={async () => { await logout().catch(() => {}); onAppLogout(); location.reload(); }}>退出</button>;
 }
+

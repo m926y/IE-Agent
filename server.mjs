@@ -124,7 +124,9 @@ const SAFE_DATABASE_OPERATIONS = new Set([
   "get_rr_row", "patch_rr_row", "insert_rr_row", "get_own_score_row", "get_own_ledger_row",
   "ai_audit_insert", "ai_audit_get",
   "patch_alert_fields", "count_alerts", "count_notes", "count_tasks", "count_my_notes",
-  "get_course_row", "patch_course_status", "get_config_row", "patch_config_row", "count_ops_rows", "get_binding_target", "insert_task_row",
+  "get_course_row", "patch_course_status", "get_config_row", "patch_config_row", "count_ops_rows", "get_binding_target",
+  // R37 新增四功能的数据库操作标签（司机资料/根因聚合/规则生效链/等级映射）
+  "dp_get", "dp_patch", "dp_insert", "rc_led", "rc_er", "er_dims", "er_current2", "er_patch_effect", "erd_get2", "erd_get3", "ma_lvl", "get_binding_target", "insert_task_row",
   "get_alert_row", "patch_alert_status", "insert_alert_row", "get_alert_evidence", "count_risk_rows", "create_intervention", "patch_intervention", "get_intervention_row", "insert_notification", "get_notification_by_key", "read_own_intervention", "reply_own_intervention", "send_intervention",
   "list_import_by_key", "get_binding_user", "count_driver_conflict", "insert_binding_row", "close_binding_rows", "patch_binding_fields", "get_driver_profile",
 ]);
@@ -412,10 +414,10 @@ const RESOURCE_DEFS = {
     cols: "task_id,course_id,alert_id,goal,mandatory,due_at,status,started_at,submitted_at,learning_record,feedback,review_note,reviewed_at",
     roles: ["driver"], cap: "view.my_training", injectDriver: "driver_id" },
   "my.score": { table: "score_snapshots", order: "as_of_date.desc",
-    cols: "score_id,safety_score,rank,risk_level,score_change_7d,confidence_level,as_of_date,window_start,top_reason_1,top_reason_2,top_reason_3,primary_risk_dimension,recommended_action,behavior_safety_score,confidence_adjusted_floor,forecast_40d_risk_prob,source_version",
+    cols: "score_id,safety_score,rank,risk_level,score_change_7d,confidence_level,as_of_date,window_start,top_reason_1,top_reason_2,top_reason_3,primary_risk_dimension,recommended_action,behavior_safety_score,confidence_adjusted_floor,forecast_40d_risk_prob,source_version,history_contribution,fatigue_distraction_contribution,driving_stability_contribution,road_rule_contribution,management_contribution,imu_evidence_contribution",
     roles: ["driver"], cap: "view.my_score", injectDriver: "driver_id" },
   "my.score_history": { table: "score_history", order: "as_of_date.asc",
-    cols: "score_id,as_of_date,safety_score,risk_level,confidence_level",
+    cols: "score_id,as_of_date,safety_score,risk_level,confidence_level,history_contribution,fatigue_distraction_contribution,driving_stability_contribution,road_rule_contribution,management_contribution,imu_evidence_contribution,source_version",
     roles: ["driver"], cap: "view.my_score", injectDriver: "driver_id" },
   "my.review_requests": { table: "review_requests", order: "created_at.desc",
     cols: "request_id,score_id,evidence_id,reason_code,description,status,review_note,reviewer_id,created_at,updated_at",
@@ -1220,11 +1222,18 @@ async function handleOpsConfigUpdate(request, response, url, ctx) {
   requireUser(ctx.principal);
   const body = await readBody(request);
   const key = String(body.config_id || "").slice(0, 60);
-  const value = String(body.value ?? "").slice(0, 60);
+  const value = String(body.value ?? "").slice(0, key === "training_mandate_policy" ? 240 : 60);
   const effectiveAt = String(body.effective_at || nowIso()).slice(0, 40);
   if (!/^[a-z][a-z0-9_]{1,40}$/.test(key) || !value) throw new HttpError(400, "bad_request");
+  const policyIn = key === "training_mandate_policy" ? parseMandatePolicy(value) : null;
+  if (key === "training_mandate_policy" && !policyIn) throw new HttpError(409, "mandate_policy_invalid");
   const { data } = await dbRequest("get_config_row", "GET", "operation_config", { query: { config_id: `eq.${key}`, select: "config_id,value,unit,config_version" } });
   const row = data?.[0];
+  if (!row && key === "training_mandate_policy") {
+    await dbRequest("ops_insert", "POST", "operation_config", { body: [{ config_id: key, value: JSON.stringify(policyIn), unit: "json", config_version: "1", updated_at: nowIso() }], headers: { Prefer: "return=minimal" } });
+    const aid0 = await appendAudit(ctx.principal, "ops.config_create", "operation_config", key, null, value, ctx.requestId, [], { note: "风险等级→强制性培训映射（运营配置域；生效版本+审计）" });
+    return sendJson(response, 201, { ok: true, config_id: key, old_value: null, new_value: JSON.stringify(policyIn), old_version: 0, new_version: 1, audit_id: aid0 });
+  }
   if (!row && key === "ai_long_session" && ["on", "off"].includes(value)) {
     await dbRequest("ops_insert", "POST", "operation_config", { body: [{ config_id: key, value, unit: "flag", config_version: 1, updated_at: nowIso() }], headers: { Prefer: "return=minimal" } });
     const aid0 = await appendAudit(ctx.principal, "ops.config_create", "operation_config", key, null, value, ctx.requestId, [], { note: "AI 跨登录长期摘要开关（默认 off；仅存脱敏摘要于浏览器本地）" });
@@ -1282,10 +1291,19 @@ async function handleTrainingAssign(request, response, url, ctx) {
   const idem = String(body.idempotency_key || `assign:${courseId}:${driverId}:${alertIdIn || "none"}`).slice(0, 120);
   const dup = await dbRequest("count_ops_rows", "GET", "training_tasks", { query: { idempotency_key: `eq.${idem}`, select: "task_id,status,updated_at", limit: 1 } });
   if (dup.data?.length) return sendJson(response, 200, { ok: true, idempotent_replay: true, task_id: dup.data[0].task_id, status: dup.data[0].status, created_at: dup.data[0].updated_at });
+  // R37④：mandatory 缺省=按现行映射（等级→mandatory/optional）自动设定；表单显式值=人工改判（审计留 policy_expected）
+  let mand = Boolean(body.mandatory); let mandSrc = "manual";
+  const mp = await loadMandatePolicy();
+  const lvlNow = mp ? await driverLatestLevel(driverId) : null;
+  const wants = mp && lvlNow ? String(mp.policy[String(lvlNow)] || "") : "";
+  if (body.mandatory === undefined) {
+    if (wants === "mandatory" || wants === "optional") { mand = wants === "mandatory"; mandSrc = "policy:v" + mp.config_version + ":" + lvlNow + "=" + wants; }
+    else mandSrc = wants ? "manual" : "default_false";
+  }
   const at = nowIso();
   const taskId = newId("task");
   await dbRequest("insert_task_row", "POST", "training_tasks", {
-    body: [{ task_id: taskId, driver_id: driverId, alert_id: String(body.alert_id || ""), course_id: courseId, goal: String(body.goal || "").slice(0, 500), mandatory: Boolean(body.mandatory), due_at: String(body.due_at || at), status: "assigned", created_by: user.user_id, idempotency_key: idem, updated_at: at }],
+    body: [{ task_id: taskId, driver_id: driverId, alert_id: String(body.alert_id || ""), course_id: courseId, goal: String(body.goal || "").slice(0, 500), mandatory: mand, due_at: String(body.due_at || at), status: "assigned", created_by: user.user_id, idempotency_key: idem, updated_at: at }],
     headers: { Prefer: "return=minimal" },
   });
   let notif = null;
@@ -1298,8 +1316,8 @@ async function handleTrainingAssign(request, response, url, ctx) {
       catch (e) { if (String(e && e.message) === "template_not_usable") throw new HttpError(409, "template_not_approved_or_disabled"); throw e; }
     }
     if (acct0.data?.[0]) notif = await notify(acct0.data[0].user_id, "task_assigned", taskId, msg, `notif:taskas:${taskId}`); }
-  const auditId = await appendAudit(ctx.principal, "training.assign", "training_task", taskId, null, "assigned", ctx.requestId, null, { mandatory: Boolean(body.mandatory), template_ref: assignNoteUsed ? { template_id: assignNoteUsed.template_id, key: assignNoteUsed.template_key, version: assignNoteUsed.version } : null });
-  sendJson(response, 200, { ok: true, task_id: taskId, audit_id: auditId, assigned_notification: notif, note: "司机为演示绑定身份，通知≠外发送达" });
+  const auditId = await appendAudit(ctx.principal, "training.assign", "training_task", taskId, null, "assigned", ctx.requestId, null, { mandatory: mand, mandatory_source: mandSrc, policy_expected: wants || null, policy_level: lvlNow || null, template_ref: assignNoteUsed ? { template_id: assignNoteUsed.template_id, key: assignNoteUsed.template_key, version: assignNoteUsed.version } : null });
+  sendJson(response, 200, { ok: true, task_id: taskId, audit_id: auditId, mandatory: mand, mandatory_source: mandSrc, assigned_notification: notif, note: "司机为演示绑定身份，通知≠外发送达" });
 }
 
 
@@ -2178,9 +2196,16 @@ const AI_SYSTEM_PROMPT = [
 ].join("\n");
 const AI_PROMPT_SHA = sha256hex(AI_SYSTEM_PROMPT).slice(0, 12);
 const aiBase = () => (process.env.QW_AI_BASE_URL || "").replace(/\/+$/, "");
-const aiKey = () => process.env.QW_AI_API_KEY || "";
-const aiModel = () => process.env.QW_AI_MODEL || "qwen3.8-max";
-const aiAvailable = () => aiBase().startsWith("https://") && aiKey().length > 8;
+// 第35轮（agent1 设计移植）：网关层加固——兼容 QWEN_* 别名、显式端点、HTTPS-only 与非本机策略（MODEL_POLICY_BLOCKED）
+const aiKey = () => process.env.QW_AI_API_KEY || process.env.QWEN_API_KEY || "";
+const aiModel = () => process.env.QW_AI_MODEL || process.env.QWEN_MODEL || "qwen3.7-plus";
+const aiEndpoint = () => {
+  if (process.env.QWEN_CHAT_ENDPOINT) return String(process.env.QWEN_CHAT_ENDPOINT);
+  const b = aiBase(); if (!b) return "";
+  return b + (b.endsWith("/v1") ? "/chat/completions" : "/v1/chat/completions");
+};
+const aiPolicyOk = () => { try { const u = new URL(aiEndpoint()); return u.protocol === "https:" && !["localhost", "127.0.0.1", "[::1]"].includes(u.hostname); } catch { return false; } };
+const aiAvailable = () => aiPolicyOk() && aiKey().length > 8;
 
 async function aiQ(resource, params, principal) {
   const u = new URL("http://internal/?" + new URLSearchParams(params || {}));
@@ -2287,7 +2312,7 @@ const AI_TOOLS = {
     try {
       const rows = await listRows("er_current", "evaluation_rules", { select: "dimension,dimension_name,weight,window_days,score_method,editable,source_version", order: "dimension.asc" });
       const sv = rows[0]?.source_version || "";
-      return { status: "ok", data: { rules: rows.map((x) => ({ dimension: x.dimension, weight: x.weight, window_days: x.window_days, method: x.score_method, editable: x.editable, source_version: x.source_version })), drafts_excluded: "evaluation_rule_drafts 不进入本工具（草案永不作为现行参数）" }, fact_refs: ["rules@" + sv], data_limitations: "只读冻结口径（SM05 现行列与本页同源，不重算）；新算法版本须另行验证与重新出数" };
+      return { status: "ok", data: { rules: rows.map((x) => ({ dimension: x.dimension, weight: x.weight, window_days: x.window_days, method: x.score_method, editable: x.editable, source_version: x.source_version })), drafts_excluded: "evaluation_rule_drafts 仅在『批准→生效』后才进入现行表；未生效草案永不作为参数" }, fact_refs: ["rules@" + sv], data_limitations: "现行生效口径（SM05 同源；权重可经草案→批准→生效更新为新 ruleset 版本；历史快照为各时点口径离线所算，不回算不重算）" };
     } catch { return { status: "tool_unavailable", data: null, fact_refs: [], data_limitations: "暂时无法读取数据" }; }
   },
   async knowledge_search(a, p) {
@@ -2325,8 +2350,9 @@ const AI_TOOLS = {
     const approved = (cs.rows || []).filter(x => x.content_status === "approved");
     const low = String(s0.confidence_level || "") === "low";
     const alertId = String(a.alert_id || "").slice(0, 80);
+    const mp3 = await loadMandatePolicy(); const lvl3 = mp3 ? String(s0.risk_level || "") : ""; const mandSug = Boolean(mp3 && lvl3 && mp3.policy[lvl3] === "mandatory"); const mandNote = mp3 && lvl3 ? `现行映射v${mp3.config_version}: ${lvl3}=${mp3.policy[lvl3]}` : "无等级映射配置（缺省非强制）";
     const candidates = approved.map(c => ({ course_id: c.course_id, content_status: "approved", title: c.title }));
-    const draft_summary = { kind: "training", driver_id: drv, course_id: candidates[0]?.course_id || null, goal: s0.primary_risk_dimension ? `结合只读事实（score_id ${s0.score_id}：${s0.top_reason_1 || s0.primary_risk_dimension}）完成课程短路径：事实回顾→核心知识→情境问题→本人行动计划→反馈` : "结合已核实证据制定短路径（当前无该司机本人评分快照事实）", due_at: dueAt, mandatory: false, alert_id: alertId || null, facts: { score_id: s0.score_id || null, as_of_date: s0.as_of_date || null, source_version: s0.source_version || null }, fill_to: { form: "tr2", route: "#/tr-create", driver_id: drv, course_id: candidates[0]?.course_id || null, goal_candidates: candidates, due_at: dueAt, mandatory: false, alert_id: alertId || null, note: "填入 TR02：仅 approved 课程可提交；点击“确认分配”前不写 training_tasks" } };
+    const draft_summary = { mandatory_suggested: mandSug, mandate_policy: mandNote, kind: "training", driver_id: drv, course_id: candidates[0]?.course_id || null, goal: s0.primary_risk_dimension ? `结合只读事实（score_id ${s0.score_id}：${s0.top_reason_1 || s0.primary_risk_dimension}）完成课程短路径：事实回顾→核心知识→情境问题→本人行动计划→反馈` : "结合已核实证据制定短路径（当前无该司机本人评分快照事实）", due_at: dueAt, mandatory: false, alert_id: alertId || null, facts: { score_id: s0.score_id || null, as_of_date: s0.as_of_date || null, source_version: s0.source_version || null }, fill_to: { form: "tr2", route: "#/tr-create", driver_id: drv, course_id: candidates[0]?.course_id || null, goal_candidates: candidates, due_at: dueAt, mandatory: false, alert_id: alertId || null, note: "填入 TR02：仅 approved 课程可提交；点击“确认分配”前不写 training_tasks" } };
     return { status: "draft", requires_confirmation: true, draft_action: { ...draft_summary }, fact_refs: [...(cs.rows || []).map(x => "course:" + x.course_id + "@" + x.content_status), ...(s0.score_id ? ["score:" + s0.score_id] : [])], data_limitations: (low ? "低可信度缺行为证据：优先设备/数据核验，不建议惩罚性课程；" : "") + (candidates.length ? `可分配候选=${candidates.map(c=>c.course_id).join("、")}；未审核课程提交将被 409 course_not_approved；分配确认走 TR02 原按钮` : "当前无 approved 课程：不可正式分配，先由团队完成 TR05 人工审核") };
   },
   async action_preplan(a, p) {
@@ -2338,6 +2364,15 @@ const AI_TOOLS = {
       { path: "① 先设备/数据核验", applies_if: low ? "成立：可信度 low" : "低优先：可信度不低", creates: "data_verification 待办案卷（人工点击）", does_not_create: "惩罚/培训/新分值" },
       { path: "② 先沟通干预", applies_if: "alert 已confirmed 且司机有有效绑定", creates: "干预草稿→确认发送→sent+站内通知", does_not_create: "AI自动发送" },
       { path: "③ 分配已审核课程", applies_if: "存在 approved 课程+绑定核实", creates: "training_task assigned", does_not_create: "未审核课分配；低可信不转惩罚培训" }], gpsno: gps, queue_row: factPick(row, ["queue_id", "review_queue", "confidence_level", "risk_level"]) }, fact_refs: row.queue_id ? ["queue_id:" + row.queue_id] : [], data_limitations: "纯预演：未写入任何数据库记录；执行需页面确认" };
+  },
+  async get_root_causes(a, p) {
+    if (p.user.role === "driver") return DENY;
+    try {
+      const out = await computeRootCauses(p, String(a.cohort || "cd") === "d" ? "d" : "cd");
+      if (out.data_status !== "ok") return { status: "empty", data: out, fact_refs: [], data_limitations: out.note || "无数据" };
+      const refs = [...out.dimensions.slice(0, 3).map((x) => "ledger_dim:" + x.dimension), ...out.top_objects.slice(0, 3).map((x) => x.score_id ? "score:" + x.score_id : "queue:" + x.gpsno)];
+      return { status: "ok", as_of_date: out.as_of_date, source_version: out.source_version, data: { cohort: out.cohort, cohort_count: out.cohort_count, pool_avg: out.pool_avg, low_conf_in_pool: out.low_conf_in_pool, dimensions: out.dimensions.slice(0, 6), event_types: out.event_types.slice(0, 8), top_objects: out.top_objects.slice(0, 5), ruleset_source_version: out.ruleset_source_version }, fact_refs: refs.slice(0, 10), data_limitations: out.note };
+    } catch { return { status: "tool_unavailable", data: null, fact_refs: [], data_limitations: "暂时无法读取数据" }; }
   },
 };
 function hPick(l0) { return l0 ? { safety_score: l0.safety_score, rank: l0.rank, risk_level: l0.risk_level, confidence_level: l0.confidence_level, confidence_score: l0.confidence_score, score_change_7d: l0.score_change_7d, top_reason_1: l0.top_reason_1, forecast_40d_risk_prob: l0.forecast_40d_risk_prob, as_of_date: l0.as_of_date, window: (l0.window_start || "") + "→" + (l0.as_of_date || ""), source_version: l0.source_version, score_id: l0.score_id } : null; }
@@ -2357,14 +2392,99 @@ const AI_TOOL_SCHEMAS = [
   ["propose_intervention", "生成沟通草稿（requires_confirmation，零写库）", { alert_id: "string", tone: "string" }],
   ["propose_training", "生成培训草稿（校验课程审核态；零写库）", { driver_id: "string" }],
   ["action_preplan", "三种管理路径并排预演（未写入）", { gpsno: "string" }],
+  ["get_root_causes", "车队高风险对象根因聚合（台账分摊口径，结构性归因非因果；管理员）", { cohort: "string" }],
 ].map(([name, description, props]) => ({ type: "function", function: { name, description, parameters: { type: "object", properties: Object.fromEntries(Object.entries(props).map(([k, v]) => [k, { type: v }])) , required: [] } } }));
 
+// ===== 第35轮：agent1 式引擎升级（源自 IE-Agent codex/agent1-backend-external-models 的机制移植） =====
+// ①技能路由（skills/registry.routeSkill 思想）：按问题语义选择“技能指令”，引导工具组合与回答结构；
+//   技能是软引导与消费预算，不是安全边界——越权仍由 ROLE_CAPABILITIES/listResource/工具内白名单强制。
+// ②工具契约（contracts/agent-contracts.json 思想）：入参枚举/长度白名单+夹紧（clamp 而非硬拒，模型错参降级为缺省）。
+// ③幂等重放（AgentRuntime.#requests 思想）：client_request_id + 内容哈希；同键同问=回放原响应，同键异问=409。
+// ④验权回执（EvidenceVerifier 思想）：证据卡带 verification_id（5 分钟、属主绑定、LRU 1000），重验时按当前会话再授权。
+const AI_SKILLS = [
+  { id: "case-followup-review", title: "案卷跟进与复核进度", tools: ["get_alert", "get_interventions", "get_tasks", "get_review_request", "get_driver_evaluation"],
+    rx: /复核|进度|处理到哪|还差什么|跟进|跟到|回复|异议|申诉|闭环/,
+    instructions: "以 alert/review_request 为主线用只读工具串联真实时间轴；区分“等待司机/等待复核/已关闭”；下一步给页面入口，不替人工下结论，不宣称已完成处置；司机角色仅本人记录。" },
+  { id: "personalized-training", title: "培训与课程", tools: ["get_tasks", "get_driver_evaluation", "propose_training", "knowledge_search"],
+    rx: /培训|课程|学习|测验|练习|考试|分配.*课|考核|答题/,
+    instructions: "仅 approved 课程可进分配链（未审核分配服务端 409）；propose_training 产出 requires_confirmation 草稿并在 TR02 人工确认；不承诺提升多少分、不宣称已完成学习；司机问本人任务用 get_tasks。" },
+  { id: "risk-intervention", title: "沟通与干预草稿", tools: ["get_alert", "get_driver_evaluation", "get_interventions", "propose_intervention", "action_preplan"],
+    rx: /沟通|干预|提醒|催办|起草|拟.*(消息|话术|通知)|发.*消息|发.*提醒/,
+    instructions: "先 get_alert 核案卷状态与前提（confirmed 才可建草稿；closed 案卷按真实状态说明不可再处置），再 propose_intervention 产出草稿；绝不宣称已发送/已送达；低可信度先核验后沟通；发送由安全员在 RM03 独立确认。" },
+  { id: "fleet-safety-triage", title: "车队分析与待办", tools: ["get_fleet_summary", "get_review_queue", "get_driver_evaluation", "get_root_causes", "knowledge_search"],
+    rx: /车队|整体|大盘|先处理谁|先关注谁|优先.*(司机|对象|处理)|周报|总览|多少.*(人|车)|根因|原因.*(集中|分布)/,
+    instructions: "先 get_fleet_summary 取真实计数与分布；问'为什么高风险对象集中/根因'时用 get_root_causes（台账分摊的结构性归因，需同步引用其限制声明）；具体对象再 get_review_queue/get_driver_evaluation；排序只决定先看谁，不重排不造队列；待办=对象+原因+证据+下一步入口；司机角色只允许匿名聚合结论，不得输出任何他人明细。" },
+  { id: "explain-safety-score", title: "评分与预测解释", tools: ["get_my_evaluation", "get_driver_evaluation", "get_risk_snapshot", "get_evidence", "rules_read", "knowledge_search"],
+    rx: /评分|扣分|为什么.*(分|降|差|高)|六维|可信度|预测|概率|排名|等级|安全分/,
+    instructions: "先取本人/指定司机评分证据包（get_my_evaluation 或 get_driver_evaluation），按需补 get_risk_snapshot 与 get_evidence；14天评分=已观察行为，40天概率=复合预测，可信度=数据支持程度；台账/IMU 分摊不作单事件因果；无对比快照不插值；给管理者的核查步骤与给司机的改善建议分列。" },
+];
+function routeSkill(message, role, page) {
+  const s = String(message || "").slice(0, 400);
+  for (const k of AI_SKILLS) if (k.rx.test(s)) return k;
+  if (role === "driver" && /my-|driver-|ev04|rm04|tr04/.test(String(page || ""))) return AI_SKILLS.find((x) => x.id === "personalized-training");
+  return AI_SKILLS[AI_SKILLS.length - 1];
+}
+const AI_TOOL_CONTRACTS = {
+  get_my_evaluation: {},
+  get_driver_evaluation: { driver_id: { t: "s", max: 60 }, gpsno: { t: "s", max: 40 } },
+  get_fleet_summary: {},
+  get_risk_snapshot: { gpsno: { t: "s", max: 40, req: true } },
+  get_evidence: { gpsno: { t: "s", max: 40, req: true }, dimension: { t: "enum", vals: ["history", "fatigue_distraction", "driving_stability", "road_rule", "management", "imu_evidence"] } },
+  get_review_queue: { gpsno: { t: "s", max: 40 }, review_queue: { t: "enum", vals: ["priority_review", "behavior_coaching", "prediction_review", "data_quality_review", "routine"] } },
+  get_alert: { alert_id: { t: "s", max: 80, req: true } },
+  get_interventions: { alert_id: { t: "s", max: 80 } },
+  get_tasks: { status: { t: "enum", vals: ["assigned", "in_progress", "submitted", "reviewed", "returned", "observation", "interview", "completed"] } },
+  get_review_request: { request_id: { t: "s", max: 60 } },
+  knowledge_search: { keyword: { t: "s", max: 60 } },
+  rules_read: {},
+  propose_intervention: { alert_id: { t: "s", max: 80, req: true }, tone: { t: "enum", vals: ["standard", "gentle"] } },
+  propose_training: { driver_id: { t: "s", max: 60, req: true }, alert_id: { t: "s", max: 80 } },
+  action_preplan: { gpsno: { t: "s", max: 40 } },
+  get_root_causes: { cohort: { t: "enum", vals: ["cd", "d"] } },
+};
+function clampToolArgs(name, raw) {
+  const c = AI_TOOL_CONTRACTS[name];
+  if (!c) return {};
+  const out = {};
+  for (const [k, spec] of Object.entries(c)) {
+    const v = raw ? raw[k] : undefined;
+    if (v === undefined || v === null || v === "") continue;
+    if (spec.t === "s") out[k] = String(v).slice(0, spec.max || 60);
+    else if (spec.t === "enum") { const s0 = String(v); if ((spec.vals || []).includes(s0)) out[k] = s0; }
+  }
+  return out;
+}
+const AI_TOOL_BUDGET = 8; // 每轮工具执行预算（agent1 max_tool_calls_per_run 思想）
+const AI_CHAT_REPLAYS = new Map();
+const AI_CHAT_REPLAY_TTL = 600000;
+const AI_VERIFICATIONS = new Map();
+const AI_VERIFICATION_TTL = 300000;
+function aiReplayKey(user, rid) { return String(user?.user_id || "?") + ":" + String(rid || ""); }
+function aiSweepMaps() {
+  const now = Date.now();
+  for (const [k, v] of AI_CHAT_REPLAYS) if (now - v.at > AI_CHAT_REPLAY_TTL) AI_CHAT_REPLAYS.delete(k);
+  for (const [k, v] of AI_VERIFICATIONS) if (now - v.at > AI_VERIFICATION_TTL) AI_VERIFICATIONS.delete(k);
+  while (AI_VERIFICATIONS.size > 1000) AI_VERIFICATIONS.delete(AI_VERIFICATIONS.keys().next().value);
+  while (AI_CHAT_REPLAYS.size > 500) AI_CHAT_REPLAYS.delete(AI_CHAT_REPLAYS.keys().next().value);
+}
+function aiVerRegister(user, ref, page) {
+  aiSweepMaps();
+  const id = newId("ver");
+  // user 可信来源：兼容 principal 与 principal.user 两种入参（属主键=app_users.user_id）
+  AI_VERIFICATIONS.set(id, { owner: user?.user?.user_id || user?.user_id || "?", ref: String(ref).slice(0, 120), page: String(page || "").slice(0, 60), at: Date.now() });
+  return id;
+}
+
+let AI_LAST_UPSTREAM_DETAIL = "";
 async function aiUpstreamOnce(body, ms) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), ms || 100000);
   try {
-    const res = await fetch(aiBase() + (aiBase().endsWith("/v1") ? "/chat/completions" : "/v1/chat/completions"), { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + aiKey(), "accept": "application/json" }, body: JSON.stringify(body), signal: ac.signal });
+    if (!aiPolicyOk()) throw new HttpError(503, "ai_policy_blocked"); // 端点必须是外部 HTTPS（agent1 MODEL_POLICY_BLOCKED 同语义）
+    const res = await fetch(aiEndpoint(), { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + aiKey(), "accept": "application/json" }, body: JSON.stringify(body), signal: ac.signal });
     const txt = await res.text().catch(() => "");
+    AI_LAST_UPSTREAM_DETAIL = String(txt || "").slice(0, 300);
+    if (txt.length > 200000) throw new HttpError(502, "ai_upstream_invalid_output"); // agent1: 响应超限=无效输出
     let j = {}; try { j = JSON.parse(txt || "{}"); } catch {}
     if (!res.ok) { console.error("AI_UPSTREAM_DETAIL", res.status, txt.slice(0, 300)); throw new HttpError(502, "ai_upstream_error"); }
     return j;
@@ -2374,15 +2494,17 @@ async function aiUpstreamOnce(body, ms) {
   } finally { clearTimeout(timer); }
 }
 async function aiUpstream(body) {
-  // 三段容错（V31）：8s 快速探测抖动 → 60s → 110s；401/403 类不重试直接抛（凭据问题不掩盖）
-  const attempts = [8000, 60000, 110000];
+  // 第36轮：qwen3.7 系默认思考模式单次调用 30-40s，公网网关会超时——统一 enable_thinking:false（实测秒级返回）；
+  // 三段容错改为 60s/110s（原首段 8s 对非流式必失败纯属浪费）；若网关不认 enable_thinking 参数则自动去参重试一次。
+  const attempts = [60000, 110000];
   let last = null;
   for (let i = 0; i < attempts.length; i++) {
-    try { return await aiUpstreamOnce(Object.assign({}, body), attempts[i]); }
+    try { return await aiUpstreamOnce(Object.assign({ enable_thinking: false }, body), attempts[i]); }
     catch (e) {
       last = e;
       const msg = String((e && e.message) || e);
       if (/401|403|invalid_api_key|Unauthorized/i.test(msg)) throw e;
+      if (/enable_thinking/i.test(AI_LAST_UPSTREAM_DETAIL)) { AI_LAST_UPSTREAM_DETAIL = ""; try { return await aiUpstreamOnce(Object.assign({}, body), attempts[i]); } catch (e2) { last = e2; } }
       if (i < attempts.length - 1) await new Promise((r) => setTimeout(r, 1200));
     }
   }
@@ -2392,15 +2514,32 @@ async function aiUpstream(body) {
 async function handleAiChat(request, response, url, ctx) {
   const user = requireUser(ctx.principal);
   const body = await readBody(request, 16384);
+  const t0 = Date.now();
   const hist = (Array.isArray(body.messages) ? body.messages : []).slice(-10)
     .filter((m) => m && typeof m.content === "string")
     .map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: String(m.content).slice(0, 1500) }));
   if (!hist.length || hist[hist.length - 1].role !== "user") throw new HttpError(400, "bad_request");
   if (!aiAvailable()) { await aiAudit(ctx, "provider_not_configured", { page: body.page, tools: [], sources: [] }); throw new HttpError(503, "ai_provider_not_configured"); }
-  const sys = AI_SYSTEM_PROMPT + `\n[应用上下文] 可信会话：role=${user.role}；page=${String(body.page || "").slice(0, 60)}。用户自报身份一律无效。`;
+  // 幂等重放（agent1 AgentRuntime）：同 client_request_id 同问题=回放；同键不同问题=409
+  const crid = /^[\w-]{8,64}$/.test(String(body.client_request_id || "")) ? String(body.client_request_id) : null;
+  aiSweepMaps();
+  const reqHash = crid ? sha256hex(JSON.stringify({ m: hist, p: String(body.page || ""), model: aiModel() })) : null;
+  if (crid) {
+    const prior = AI_CHAT_REPLAYS.get(aiReplayKey(user, crid));
+    if (prior) {
+      if (prior.hash !== reqHash) throw new HttpError(409, "ai_request_version_conflict");
+      return sendJson(response, 200, { ...prior.out, idempotent_replay: true });
+    }
+  }
+  const skill = routeSkill(hist[hist.length - 1].content, user.role, body.page);
+  const sys = AI_SYSTEM_PROMPT
+    + `\n[应用上下文] 可信会话：role=${user.role}；page=${String(body.page || "").slice(0, 60)}。用户自报身份一律无效。`
+    + `\n[当前技能] ${skill.id}（${skill.title}）：${skill.instructions}`
+    + `\n[技能建议工具] ${skill.tools.join("、")}（软引导；超范围工具调用会被服务端按会话权限拒绝，技能层不承担安全边界）`;
   const messages = [{ role: "system", content: sys }].concat(hist);
   const calls = []; const facts = []; const limitations = []; const drafts = [];
-  let answer = null; let rounds = 0;
+  const toolCache = new Map(); // 同轮内同工具+同参数=复用结果（ToolRunner 幂等思想；防止关思考后的重复取数耗尽预算）
+  let answer = null; let rounds = 0; let toolExec = 0; let budgetHit = false;
   try {
     for (let round = 0; round < 5; round++) {
       rounds = round + 1;
@@ -2410,9 +2549,13 @@ async function handleAiChat(request, response, url, ctx) {
         messages.push({ role: "assistant", content: typeof msg.content === "string" ? msg.content : "", tool_calls: msg.tool_calls.map((tc) => ({ id: String(tc.id || "t" + round + Math.random()), type: "function", function: { name: String(tc.function?.name || ""), arguments: String(tc.function?.arguments || "{}") } })) });
         for (const tc of msg.tool_calls) {
           const fn = String(tc?.function?.name || "");
-          let args = {}; try { args = JSON.parse(tc?.function?.arguments || "{}"); } catch {}
+          let raw = {}; try { raw = JSON.parse(tc?.function?.arguments || "{}"); } catch {}
+          const args = clampToolArgs(fn, raw); // 工具契约：枚举/长度白名单+夹紧
+          const cacheKey = fn + "|" + JSON.stringify(args);
           let out;
-          if (AI_TOOLS[fn]) { try { out = await AI_TOOLS[fn](args, ctx.principal); } catch { out = { status: "tool_error", data: null, fact_refs: [], data_limitations: "暂时无法读取数据" }; } }
+          if (toolCache.has(cacheKey)) out = toolCache.get(cacheKey);
+          else if (toolExec >= AI_TOOL_BUDGET) { out = { status: "tool_budget_exceeded", data: null, fact_refs: [], data_limitations: "本轮工具调用已达预算上限：请基于已取得的事实回答" }; budgetHit = true; }
+          else if (AI_TOOLS[fn]) { toolExec++; try { out = await AI_TOOLS[fn](args, ctx.principal); } catch { out = { status: "tool_error", data: null, fact_refs: [], data_limitations: "暂时无法读取数据" }; } toolCache.set(cacheKey, out); }
           else out = { status: "unknown_tool", data: null, fact_refs: [], data_limitations: null };
           calls.push({ name: fn, toolId: tc.id, out });
           for (const f2 of out.fact_refs || []) facts.push(f2);
@@ -2426,24 +2569,26 @@ async function handleAiChat(request, response, url, ctx) {
     }
   } catch (e) {
     if (!(e instanceof HttpError)) console.error("AI_DEBUG", String(e && e.stack || e).slice(0, 500));
-    const state = e instanceof HttpError && e.code === "ai_upstream_error" ? "upstream_error" : "chat_internal_error";
-    await aiAudit(ctx, state, { page: body.page, tools: calls.map((c) => ({ name: c.name, status: c.out?.status, refs: (c.out?.fact_refs || []).length })), sources: [], rounds });
+    const state = e instanceof HttpError && e.code === "ai_upstream_error" ? "upstream_error" : e instanceof HttpError && e.code === "ai_policy_blocked" ? "policy_blocked" : "chat_internal_error";
+    await aiAudit(ctx, state, { page: body.page, tools: calls.map((c) => ({ name: c.name, status: c.out?.status, refs: (c.out?.fact_refs || []).length })), sources: [], rounds, skill: skill.id });
     if (e instanceof HttpError) throw e;
     throw new HttpError(500, "chat_internal_error");
   }
-  if (answer == null) answer = "本轮推理步数达到上限：请缩小问题；人工流程不受影响（未写入任何数据）。";
+  if (answer == null) answer = (budgetHit ? "本轮工具调用达到预算上限，请基于已取得证据继续或缩小问题。" : "本轮推理步数达到上限：请缩小问题；") + "人工流程不受影响（未写入任何数据）。";
   const refused = calls.filter((c) => c.out?.status === "refused_no_scope").length;
   const okFacts = calls.filter((c) => ["ok", "draft", "preplan_only", "preplan_only_not_written", "empty", "not_found_no_leak"].includes(c.out?.status === "empty" || c.out?.status === "not_found_no_leak" ? "empty" : c.out?.status)).length;
   const deniedOnly = refused > 0 && new Set(facts).size === 0;
   const partialDeny = refused > 0 && new Set(facts).size > 0;
   const state = calls.length === 0 ? "answered_no_tools" : deniedOnly ? "refused_no_scope" : partialDeny ? "answered_partial_refused" : drafts.length ? "draft_returned" : new Set(facts).size ? "answered_with_facts" : "answered_no_facts";
-  const cards = collectCardsSafe(calls);
-  const aiCallId = await aiAudit(ctx, state, { page: body.page, tools: calls.map((c) => ({ name: c.name, status: c.out?.status, refs: (c.out?.fact_refs || []).length })), sources: [...new Set(facts)].slice(0, 16), has_draft: drafts.length > 0, rounds });
-  sendJson(response, 200, { ok: true, ai_call_id: aiCallId, result_state: state,
+  const cards = collectCardsSafe(calls).map((c) => ({ ...c, verification_id: aiVerRegister(ctx.principal, c.ref, body.page) })); // 验权回执：5分钟内可凭 id 重验（EvidenceVerifier 思想）
+  const aiCallId = await aiAudit(ctx, state, { page: body.page, tools: calls.map((c) => ({ name: c.name, status: c.out?.status, refs: (c.out?.fact_refs || []).length })), sources: [...new Set(facts)].slice(0, 16), has_draft: drafts.length > 0, rounds, skill: skill.id });
+  const out = { ok: true, ai_call_id: aiCallId, result_state: state,
     answer: answer + (drafts.length ? "\n\n【含待确认草稿：任何“发送/分配/关闭/改配置”必须由有权限人员在页面确认后走业务接口写入，AI 不写库】" : ""),
     evidence_cards: cards, citations: [...new Set(facts)].slice(0, 40), data_limitations: [...new Set(limitations)],
     draft_preview: drafts.length ? drafts : null, requires_confirmation: drafts.length > 0,
-    meta: { prompt_version: AI_PROMPT_SHA, model: aiModel(), auth: "server_session", write: "none_from_ai", audit: aiCallId ? "audit_logs#ai.chat" : "audit_write_failed" } });
+    meta: { prompt_version: AI_PROMPT_SHA, model: aiModel(), engine: "agent1-inspired", skill: skill.id, skill_title: skill.title, tool_calls: calls.length, rounds, duration_ms: Date.now() - t0, auth: "server_session", write: "none_from_ai", audit: aiCallId ? "audit_logs#ai.chat" : "audit_write_failed" } };
+  if (crid && reqHash) AI_CHAT_REPLAYS.set(aiReplayKey(user, crid), { hash: reqHash, at: Date.now(), out });
+  sendJson(response, 200, out);
 }
 function collectCardsSafe(calls) {
   const seen = new Set(); const cards = [];
@@ -2618,41 +2763,183 @@ async function handleCourseDraft(request, response, url, ctx) {
   const auditId = await appendAudit(ctx.principal, "course.edit", "training_course", courseId, c.content_status, c.content_status, ctx.requestId, [], { version_no: (Number(c.version_no) || 0) + 1 });
   sendJson(response, 200, { ok: true, course_id: courseId, version_no: (Number(c.version_no) || 0) + 1, audit_id: auditId });
 }
+// ===== R37①司机个人资料维护（driver_profiles=迁移006；仅本人行；不改绑定/评分事实） =====
+async function handleOwnProfile(request, response, url, ctx) {
+  const user = requireUser(ctx.principal);
+  if (user.role !== "driver") throw new HttpError(403, "profile_driver_only");
+  if (request.method === "GET") {
+    const r = await dbRequest("dp_get", "GET", "driver_profiles", { query: { user_id: `eq.${user.user_id}`, select: "user_id,phone,intro,prefs,updated_by,updated_at", limit: 1 } });
+    return sendJson(response, 200, { ok: true, profile: r.data?.[0] || null, note: "司机自维护信息；不影响绑定身份、评分与预测事实" });
+  }
+  if (request.method !== "POST") throw new HttpError(405, "method_not_allowed");
+  const body = await readBody(request, 4096);
+  const provided = ["phone", "intro", "prefs"].filter((k) => body[k] !== undefined);
+  if (!provided.length) throw new HttpError(400, "nothing_to_update");
+  const phone = body.phone === undefined ? null : String(body.phone).trim().slice(0, 24);
+  const intro = body.intro === undefined ? null : String(body.intro).trim().slice(0, 500);
+  const prefs = body.prefs === undefined ? null : String(body.prefs).trim().slice(0, 800);
+  if (phone && !/^[\d+() -]{5,24}$/.test(phone)) throw new HttpError(409, "invalid_phone_format");
+  if (prefs) { let pj = null; try { pj = JSON.parse(prefs); } catch {} if (!pj || typeof pj !== "object" || Array.isArray(pj)) throw new HttpError(409, "invalid_prefs_json"); }
+  const at = nowIso();
+  const patchBody = { updated_by: user.user_id, updated_at: at };
+  if (body.phone !== undefined) patchBody.phone = phone || null;
+  if (body.intro !== undefined) patchBody.intro = intro || null;
+  if (body.prefs !== undefined) patchBody.prefs = prefs || null;
+  const cur = await dbRequest("dp_get", "GET", "driver_profiles", { query: { user_id: `eq.${user.user_id}`, select: "user_id", limit: 1 } });
+  if (cur.data?.length) {
+    await dbRequest("dp_patch", "PATCH", "driver_profiles", { query: { user_id: `eq.${user.user_id}` }, body: patchBody, headers: { Prefer: "return=minimal" } });
+  } else {
+    await dbRequest("dp_insert", "POST", "driver_profiles", { body: [{ user_id: user.user_id, phone: patchBody.phone ?? null, intro: patchBody.intro ?? null, prefs: patchBody.prefs ?? null, updated_by: user.user_id, updated_at: at }], headers: { Prefer: "return=minimal" } });
+  }
+  const auditId = await appendAudit(ctx.principal, "account.profile_update", "driver_profile", user.user_id, null, "updated", ctx.requestId, [], { fields: provided });
+  sendJson(response, 200, { ok: true, audit_id: auditId, saved: provided, note: "已保存（仅本次提交的字段）；页面与审计均不回显口令，管理员可在操作审计看到 profile_update 事件" });
+}
+
+// ===== R37③根因分析（只读聚合：台账分摊口径，结构性归因非因果；历史快照不回算） =====
+const DIM_NAME_CN = { history: "历史事故与未遂", fatigue_distraction: "疲劳与分心", driving_stability: "驾驶稳定性", road_rule: "道路规则", management: "管理配合度", imu_evidence: "IMU 风险佐证" };
+async function computeRootCauses(principal, cohort) {
+  const user = requireUser(principal);
+  if (user.role === "driver") throw new HttpError(403, "forbidden");
+  const snaps = [];
+  for (let off = 0; ; off += 200) { const r = await aiQ("admin.score_snapshots", { limit: 200, offset: off }, principal); snaps.push(...r.rows); if (r.rows.length < 200) break; }
+  if (!snaps.length) return { ok: true, data_status: "no_data", note: "评分快照未导入：不输出任何聚合结论（不补造）" };
+  const pool = snaps.filter((x) => x.safety_score != null && (cohort === "d" ? String(x.risk_level) === "D" : ["C", "D"].includes(String(x.risk_level))));
+  const inPool = new Set(pool.map((x) => String(x.gpsno)));
+  const led = [];
+  for (let off = 0; off < 60000; off += 2000) {
+    const r = await dbRequest("rc_led", "GET", "deduction_ledger", { query: { select: "ledger_id,gpsno,dimension,event_type,event_count,allocated_points,as_of_date", order: "ledger_id.asc", limit: 2000, offset: off } });
+    const rows = r.data || []; led.push(...rows); if (rows.length < 2000) break;
+  }
+  const dimPts = {}, dimEv = {}, evPts = {}, drvPts = {}; let sumAp = 0, coveredGps = new Set();
+  for (const l of led) {
+    if (!inPool.has(String(l.gpsno))) continue;
+    const ap = Number(l.allocated_points) || 0; sumAp += ap;
+    dimPts[l.dimension] = (dimPts[l.dimension] || 0) + ap;
+    dimEv[l.dimension] = (dimEv[l.dimension] || 0) + (Number(l.event_count) || 0);
+    evPts[l.dimension + "|" + l.event_type] = (evPts[l.dimension + "|" + l.event_type] || 0) + ap;
+    drvPts[l.gpsno] = (drvPts[l.gpsno] || 0) + ap; coveredGps.add(String(l.gpsno));
+  }
+  const dims = Object.entries(dimPts).sort((a, b) => b[1] - a[1]).map(([d, v]) => ({ dimension: d, dimension_name: DIM_NAME_CN[d] || d, allocated_points: +v.toFixed(4), share_pct: sumAp ? +(v / sumAp * 100).toFixed(1) : null, events: dimEv[d] || 0 }));
+  const events = Object.entries(evPts).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, v]) => { const [d, e] = k.split("|"); return { dimension: d, dimension_name: DIM_NAME_CN[d] || d, event_type: e, allocated_points: +v.toFixed(4) }; });
+  const drivers = Object.entries(drvPts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([gps, pts]) => { const s = snaps.find((x) => String(x.gpsno) === gps) || {}; return { gpsno: gps, driver_id: s.driver_id || null, allocated_points: +pts.toFixed(4), safety_score: s.safety_score ?? null, risk_level: s.risk_level || null, confidence_level: s.confidence_level || null, score_id: s.score_id || null }; });
+  const sumW = await listRows("rc_er", "evaluation_rules", { select: "dimension,weight,source_version", order: "dimension.asc" }).catch(() => []);
+  return { ok: true, data_status: "ok", as_of_date: snaps[0].as_of_date || null, source_version: snaps[0].source_version || null,
+    ruleset_source_version: [...new Set(sumW.map((x) => String(x.source_version)))].join("、") || null,
+    cohort: cohort === "d" ? "risk_level=D" : "risk_level∈{C,D}", cohort_count: pool.length,
+    low_conf_in_pool: pool.filter((x) => x.confidence_level === "low").length,
+    pool_avg: pool.length ? +(pool.reduce((a, x) => a + Number(x.safety_score), 0) / pool.length).toFixed(2) : null,
+    ledger_total_allocated_in_pool: +sumAp.toFixed(4), ledger_rows_in_pool: led.filter((l) => inPool.has(String(l.gpsno))).length,
+    gps_covered_in_pool: coveredGps.size, gps_without_ledger_in_pool: pool.length - coveredGps.size,
+    dimensions: dims, event_types: events, top_objects: drivers,
+    note: "按 deduction_ledger 分摊(allocated_points)聚合的结构性归因：不构成任何单事件的独立因果效应；无台账行的池内对象可能是覆盖不足，须结合可信度判断（不当作零风险）；低可信度对象先设备/数据核验再定因；本分析只读，不创建告警/任务，历史快照与分值不因分析而改写" };
+}
+async function handleRootCauses(request, response, url, ctx) {
+  const cohort = String(url.searchParams.get("cohort") || "cd") === "d" ? "d" : "cd";
+  const out = await computeRootCauses(ctx.principal, cohort);
+  sendJson(response, 200, out);
+}
+// ===== R37④风险等级→强制性培训映射（运营配置域内；生效版本+审计；分配时缺省自动套用，人工可显式改判并留痕） =====
+function parseMandatePolicy(raw) {
+  let j = null; try { j = JSON.parse(String(raw)); } catch { return null; }
+  if (!j || typeof j !== "object" || Array.isArray(j)) return null;
+  const ks = Object.keys(j); if (!ks.length || ks.some((k) => !["A", "B", "C", "D"].includes(k))) return null;
+  if (ks.some((k) => !["mandatory", "optional"].includes(String(j[k])))) return null;
+  return Object.fromEntries(ks.map((k) => [k, String(j[k])]));
+}
+async function loadMandatePolicy() {
+  try { const r = await dbRequest("get_config_row", "GET", "operation_config", { query: { config_id: "eq.training_mandate_policy", select: "value,config_version" } }); const row = r.data?.[0]; if (!row) return null; const p = parseMandatePolicy(row.value); return p ? { policy: p, config_version: Number(row.config_version) || 0 } : null; } catch { return null; }
+}
+async function driverLatestLevel(driverId) {
+  try { const r = await dbRequest("ma_lvl", "GET", "score_snapshots", { query: { driver_id: `eq.${String(driverId).slice(0, 60)}`, select: "risk_level", order: "as_of_date.desc", limit: 1 } }); return r.data?.[0]?.risk_level || null; } catch { return null; }
+}
+
 async function handleRuleDrafts(request, response, url, ctx, draftId) {
   const user = requireUser(ctx.principal, "manage.rule_drafts");
   if (request.method === "GET") {
     const drafts = await listRows("erd_list", "evaluation_rule_drafts", { select: "draft_id,base_version,dimension,proposal,status,approval_note,review_note,created_by,created_at,updated_at,reviewed_by,reviewed_at", order: "updated_at.desc", limit: 60 });
     const current = await listRows("er_current", "evaluation_rules", { select: "dimension,dimension_name,weight,window_days,score_method,editable,source_version", order: "dimension.asc" });
-    return sendJson(response, 200, { ok: true, current, drafts, note: "current=冻结只读快照（与评分出数 source_version 一致）；草案永不参与当期计算，无生效写回路径" });
+    return sendJson(response, 200, { ok: true, current, drafts, note: "current=现行生效口径（历史行原值 source_version=出数快照；经『草案→人工批准→确认生效』更新的维度显示 ruleset_vN）；草案在批准并显式生效前永不作为现行参数被页面/AI 使用；生效不改写任何历史快照/台账/预测" });
   }
   const body = await readBody(request);
   const action = String(body.action || "");
   if (request.method === "POST" && !draftId) {
     const dimension = String(body.dimension || "");
-    const DIMS = ["history", "driving_stability", "fatigue_distraction", "management", "imu_evidence", "gps_coverage"];
+    const cur0 = await listRows("er_dims", "evaluation_rules", { select: "dimension", order: "dimension.asc" }).catch(() => []);
+    const DIMS = cur0.map((x) => String(x.dimension));
     if (!DIMS.includes(dimension)) throw new HttpError(409, "unknown_dimension");
-    const proposal = String(body.proposal || "").slice(0, 6000);
+    const proposal0 = String(body.proposal || "").slice(0, 6000);
+    const hasWeights = body.weights && typeof body.weights === "object" && !Array.isArray(body.weights) && Object.keys(body.weights).length;
+    let proposal = proposal0;
+    if (hasWeights) {
+      const wj = {}; for (const [k, v] of Object.entries(body.weights)) { if (!DIMS.includes(k)) throw new HttpError(409, "unknown_dimension"); const n = Number(v); if (!Number.isFinite(n) || n < 0 || n > 1) throw new HttpError(409, "weight_out_of_range"); wj[k] = n; }
+      if (!Object.values(wj).some((v) => v > 0)) throw new HttpError(409, "proposal_no_weights");
+      proposal = JSON.stringify({ kind: "weight_proposal", note: proposal0.slice(0, 2000), window_days: Number.isFinite(Number(body.window_days)) ? Math.min(Math.max(Number(body.window_days), 1), 90) : null, weights: wj });
+    }
     if (!proposal.trim()) throw new HttpError(400, "proposal_required");
     const cur = await listRows("er_current", "evaluation_rules", { query: { dimension: `eq.${dimension}`, select: "source_version" } }).catch(() => []);
     const at = nowIso(); const id = newId("erd");
     await dbRequest("erd_insert", "POST", "evaluation_rule_drafts", {
       body: [{ draft_id: id, base_version: String(body.base_version || (cur[0]?.source_version || "")), dimension, proposal, status: "draft", approval_note: null, review_note: null, created_by: user.user_id, created_at: at, updated_at: at, reviewed_by: null, reviewed_at: null }],
       headers: { Prefer: "return=minimal" } });
-    const auditId = await appendAudit(ctx.principal, "rule_draft.create", "evaluation_rule_draft", id, null, "draft", ctx.requestId, [], { dimension });
-    return sendJson(response, 201, { ok: true, draft_id: id, status: "draft", audit_id: auditId, note: "草案=提案文本，未生效；不可用于任何评分/展示口径" });
+    const auditId = await appendAudit(ctx.principal, "rule_draft.create", "evaluation_rule_draft", id, null, "draft", ctx.requestId, [], { dimension, structured: Boolean(hasWeights) });
+    return sendJson(response, 201, { ok: true, draft_id: id, status: "draft", structured: Boolean(hasWeights), audit_id: auditId, note: hasWeights ? "结构化草案（含权重表）：批准后可走『生效为新口径』；未生效前任何页面/AI 不把它当现行参数" : "文本草案：不可生效，仅供评审批注；生效需结构化提案" });
   }
   if (!draftId) throw new HttpError(404, "not_found");
   const row0 = await listRows("erd_get", "evaluation_rule_drafts", { query: { draft_id: `eq.${draftId}`, select: "draft_id,status,created_by,review_note" } });
   const row = row0[0]; if (!row) throw new HttpError(404, "not_found");
-  const at = nowIso(); let patch = null, audit = null;
+  const at = nowIso(); let patch = null, audit = null, extraAudit = null;
   if (action === "submit" && row.status === "draft") patch = { status: "pending_review" }, audit = ["draft", "pending_review", "rule_draft.submit"];
   else if (action === "withdraw" && row.status === "pending_review") patch = { status: "draft" }, audit = ["pending_review", "draft", "rule_draft.withdraw"];
   else if (action === "note") { const rn = String(body.review_note || "").slice(0, 800); if (!rn.trim()) throw new HttpError(400, "review_note_required"); patch = { review_note: rn, reviewed_by: user.user_id, reviewed_at: at }; audit = [row.status, row.status, "rule_draft.note"]; }
-  else if (action === "archive" && row.status !== "archived") patch = { status: "archived" }, audit = [row.status, "archived", "rule_draft.archive"];
+  else if (action === "archive" && row.status !== "archived" && row.status !== "effectuated") patch = { status: "archived" }, audit = [row.status, "archived", "rule_draft.archive"];
+  // R37②：批准（评审意见必填；同作者强制二次确认留痕——沿用知识门禁同一策略）
+  else if (action === "approve" && row.status === "pending_review") {
+    const rn = String(body.review_note || "").slice(0, 800); if (!rn.trim()) throw new HttpError(409, "approve_requires_review_note");
+    const full0 = await listRows("erd_get2", "evaluation_rule_drafts", { query: { draft_id: `eq.${draftId}`, select: "created_by" } });
+    const sameActor = full0[0]?.created_by === user.user_id;
+    if (sameActor && body.confirm_same_actor !== true) throw new HttpError(409, "self_review_requires_explicit_confirm");
+    patch = { status: "approved", reviewed_by: user.user_id, reviewed_at: at, approval_note: rn };
+    audit = ["pending_review", "approved", "rule_draft.approve"];
+    if (sameActor) extraAudit = { self_review_confirmed: true, note: "审阅者与起草人同为该管理员，已显式二次确认留痕" };
+  }
+  // R37②：生效——把已批准的结构化权重提案写为现行 evaluation_rules 新版本（属主 2026-10-27 授权开放配置；
+  // 历史快照/台账/预测不因此改写；显式确认 + 权重和守卫 + 行数不变断言在测试里）
+  else if (action === "effectuate" && row.status === "approved") {
+    if (body.confirm_effectuate !== true) throw new HttpError(409, "effectuate_requires_explicit_confirm");
+    const full = await listRows("erd_get3", "evaluation_rule_drafts", { query: { draft_id: `eq.${draftId}`, select: "dimension,proposal,base_version" } });
+    const d = full[0]; let pj = null; try { pj = JSON.parse(String(d.proposal)); } catch {}
+    if (!pj || pj.kind !== "weight_proposal" || !pj.weights || typeof pj.weights !== "object") throw new HttpError(409, "proposal_not_structured_for_effectuate");
+    const curRows = await listRows("er_current2", "evaluation_rules", { select: "dimension,dimension_name,weight,window_days,source_version", order: "dimension.asc" });
+    const dimSet = new Set(curRows.map((r0) => String(r0.dimension)));
+    const updates = [];
+    for (const [dim, w] of Object.entries(pj.weights)) {
+      if (!dimSet.has(dim)) throw new HttpError(409, "unknown_dimension");
+      const wn = Number(w); if (!Number.isFinite(wn) || wn < 0 || wn > 1) throw new HttpError(409, "weight_out_of_range");
+      updates.push({ dimension: dim, weight: wn });
+    }
+    if (!updates.length) throw new HttpError(409, "proposal_no_weights");
+    const merged = {}; for (const r0 of curRows) merged[String(r0.dimension)] = Number(r0.weight);
+    for (const u of updates) merged[u.dimension] = u.weight;
+    const sum = Object.values(merged).reduce((a, b) => a + (Number(b) || 0), 0);
+    if (Math.abs(sum - 1) > 0.02 && body.allow_unnormalized !== true) throw new HttpError(409, "weights_sum_far_from_1");
+    let vMax = 0; for (const r0 of curRows) { const m2 = /^ruleset_v(\d+)/.exec(String(r0.source_version || "")); if (m2) vMax = Math.max(vMax, Number(m2[1])); }
+    const newSv = "ruleset_v" + (vMax + 1) + "_" + at.slice(0, 10).replace(/-/g, "");
+    const changes = [];
+    for (const u of updates) {
+      const old = curRows.find((r0) => String(r0.dimension) === u.dimension);
+      const b2 = { weight: u.weight, source_version: newSv };
+      if (Number.isFinite(Number(pj.window_days))) b2.window_days = Math.min(Math.max(Number(pj.window_days), 1), 90);
+      await dbRequest("er_patch_effect", "PATCH", "evaluation_rules", { query: { dimension: `eq.${u.dimension}` }, body: b2, headers: { Prefer: "return=minimal" } });
+      changes.push({ dimension: u.dimension, old_weight: old?.weight ?? null, new_weight: u.weight, old_source_version: old?.source_version ?? null });
+    }
+    patch = { status: "effectuated", updated_at: at };
+    audit = ["approved", "effectuated", "rule_draft.effectuate"];
+    extraAudit = { new_source_version: newSv, changes, weights_sum: +sum.toFixed(6), allow_unnormalized: body.allow_unnormalized === true || undefined, note: String(body.note || "").slice(0, 500) || (pj.note ? String(pj.note).slice(0, 400) : null), invariant: "仅更新 evaluation_rules 既存 6 行的权重/窗口与口径版本；score_snapshots/score_history/deduction_ledger/risk_snapshots 行数与数值零改写；历史分值为旧口径离线所算，不回算" };
+  }
   if (!patch) throw new HttpError(409, `rule_draft_action_${action || "none"}_invalid_from_${row.status}`);
   await dbRequest("erd_patch", "PATCH", "evaluation_rule_drafts", { query: { draft_id: `eq.${draftId}`, status: `eq.${row.status}` }, body: { ...patch, updated_at: at }, headers: { Prefer: "return=minimal" } });
-  const auditId = await appendAudit(ctx.principal, audit[2], "evaluation_rule_draft", draftId, audit[0], audit[1], ctx.requestId);
-  sendJson(response, 200, { ok: true, draft_id: draftId, old_status: audit[0], new_status: audit[1], audit_id: auditId });
+  const auditId = await appendAudit(ctx.principal, audit[2], "evaluation_rule_draft", draftId, audit[0], audit[1], ctx.requestId, null, extraAudit);
+  sendJson(response, 200, { ok: true, draft_id: draftId, old_status: audit[0], new_status: audit[1], audit_id: auditId, new_source_version: extraAudit?.new_source_version || undefined, self_review_confirmed: extraAudit?.self_review_confirmed || undefined, note: audit[2] === "rule_draft.effectuate" ? "已生效为新口径（现行列/AI 同源显示新版本）；历史快照不回算，重新出数由算法侧执行" : undefined });
 }
 async function handleKnowledgeAdmin(request, response, url, ctx, articleId) {
   const user = requireUser(ctx.principal, "manage.knowledge");
@@ -2718,7 +3005,7 @@ async function handleAiSelftest(request, response, url, ctx) {
   if (u.role !== "safety_admin") throw new HttpError(403, "forbidden");
   const count = async (table, sel) => { const r = await dbRequest("count_resource", "GET", table, { query: { select: sel, limit: 1 }, headers: { Prefer: "count=exact,return=minimal" } }); return parseCount(r.rangeHeader); };
   const pre = { alerts: await count("alerts", "alert_id"), iv: await count("interventions", "intervention_id"), tt: await count("training_tasks", "task_id"), nf: await count("notification_events", "notification_id") };
-  const seq = [["get_fleet_summary", {}], ["get_review_queue", { review_queue: "priority_review" }], ["get_driver_evaluation", { driver_id: "DEMO_D0149" }], ["get_risk_snapshot", { gpsno: "95301325" }], ["get_evidence", { gpsno: "95301325" }], ["get_alert", { alert_id: "alert-1e7ec09935dd735b" }], ["get_interventions", {}], ["get_tasks", {}], ["get_review_request", {}], ["knowledge_search", {}], ["propose_intervention", { alert_id: "alert-1e7ec09935dd735b" }], ["propose_training", { driver_id: "DEMO_D0149" }], ["action_preplan", { gpsno: "95302616" }], ["get_risk_snapshot", { gpsno: "95302616" }]];
+  const seq = [["get_fleet_summary", {}], ["get_review_queue", { review_queue: "priority_review" }], ["get_driver_evaluation", { driver_id: "DEMO_D0149" }], ["get_risk_snapshot", { gpsno: "95301325" }], ["get_evidence", { gpsno: "95301325" }], ["get_alert", { alert_id: "alert-1e7ec09935dd735b" }], ["get_interventions", {}], ["get_tasks", {}], ["get_review_request", {}], ["knowledge_search", {}], ["propose_intervention", { alert_id: "alert-1e7ec09935dd735b" }], ["propose_training", { driver_id: "DEMO_D0149" }], ["action_preplan", { gpsno: "95302616" }], ["get_risk_snapshot", { gpsno: "95302616" }], ["get_root_causes", { cohort: "cd" }]];
   const tools = [];
   for (const [n, a] of seq) {
     try { const r = await AI_TOOLS[n](a, ctx.principal); tools.push({ tool: n, status: r.status, refs: (r.fact_refs || []).length, requires_confirmation: r.requires_confirmation === true }); }
@@ -2733,7 +3020,9 @@ async function handleAiSelftest(request, response, url, ctx) {
   try { const rt = await AI_TOOLS.propose_training({ driver_id: "DEMO_D0149" }, ctx.principal); if (rt?.draft_action?.fill_to) preplan.training = rt.draft_action; } catch {}
   const post = { alerts: await count("alerts", "alert_id"), iv: await count("interventions", "intervention_id"), tt: await count("training_tasks", "task_id"), nf: await count("notification_events", "notification_id") };
   const same = JSON.stringify(pre) === JSON.stringify(post);
-  sendJson(response, 200, { ok: true, preplan, prompt_version: AI_PROMPT_SHA, provider: aiAvailable() ? aiModel() : "provider_not_configured (chat 将 503；本自检不依赖模型)", tools, counts_before: pre, counts_after: post, writes: same ? "zero_confirmed" : "COUNTS_CHANGED", note: "工具层契约自检=真实执行受控工具链路（非对话模拟、非静态聊天）" });
+  aiSweepMaps();
+  sendJson(response, 200, { ok: true, preplan, prompt_version: AI_PROMPT_SHA, provider: aiAvailable() ? aiModel() : "provider_not_configured (chat 将 503；本自检不依赖模型)", tools, counts_before: pre, counts_after: post, writes: same ? "zero_confirmed" : "COUNTS_CHANGED",
+    engine: { name: "agent1-inspired", skills: AI_SKILLS.map((x) => x.id), tool_contracts: Object.keys(AI_TOOL_CONTRACTS).length, tool_budget: AI_TOOL_BUDGET, replay_ttl_ms: AI_CHAT_REPLAY_TTL, verification_ttl_ms: AI_VERIFICATION_TTL, verifications_active: AI_VERIFICATIONS.size }, note: "工具层契约自检=真实执行受控工具链路（非对话模拟、非静态聊天）" });
 }
 
 // ---------- Section: AI call audit (§8.8) + evidence cards (AI02) ----------
@@ -2747,7 +3036,8 @@ async function aiAudit(ctx, state, info) {
   const auditId = newId("aud");
   const detail = {
     kind: "ai_chat", result_state: String(state).slice(0, 40), model: aiAvailable() ? aiModel() : "provider_not_configured",
-    prompt_version: AI_PROMPT_SHA, page: String(info.page || "").slice(0, 60),
+    prompt_version: AI_PROMPT_SHA, page: String(info.page || "").slice(0, 60), skill: String(info.skill || "").slice(0, 40),
+    duration_ms: Math.min(Number(info.duration_ms) || 0, 600000),
     tools: (info.tools || []).slice(0, 16).map((x) => ({ n: String(x.name).slice(0, 42), s: String(x.status).slice(0, 30), r: Math.min(Number(x.refs) || 0, 99) })),
     sources: (info.sources || []).slice(0, 16).map((s2) => String(s2).slice(0, 90)),
     requires_confirmation: Boolean(info.has_draft), rounds: Math.min(Number(info.rounds) || 0, 9),
@@ -2791,47 +3081,68 @@ function cardsFromTool(name, out) {
   return rows.slice(0, 5).map((x) => rowToCard(x && String(x.score_id || "").length === 20 ? "score_history" : kind, x)).filter(Boolean);
 }
 
-async function handleEvidenceCheck(request, response, url, ctx) {
+// 证据核验核心：HTTP ?ref= 通道与 /api/agent1/evidence-check（verification_id 回执）共用同一套当前会话再授权逻辑
+async function evidenceCheckCore(ref, ctx) {
   const user = requireUser(ctx.principal);
-  const ref = String(url.searchParams.get("ref") || "").slice(0, 120);
   const cix = ref.indexOf(":");
   const kind = ref.slice(0, cix); const id = ref.slice(cix + 1);
   const NOLEAK = { error: "not_found_or_stale", hint: "记录不存在、已失效或超出授权——不透露受限记录的存在性；请重新向 AI 查询（卡片数据不缓存）" };
   const sanitize = (s2) => String(s2).slice(0, 42).replace(/[^\w:.\-]/g, "_");
   const TABLE_KEY = { score: ["score_snapshots", "score_id"], score_history: ["score_history", "score_id"], risk: ["risk_snapshots", "snapshot_id"], ledger: ["deduction_ledger", "ledger_id"], queue: ["review_queue", "queue_id"], alert: ["alerts", "alert_id"], knowledge: ["knowledge_articles", "article_id"], course: ["training_courses", "course_id"] };
   const def = TABLE_KEY[kind];
-  if (!def || !/^[\w:.,-]{1,100}$/.test(id)) { try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", sanitize(kind) + ":rejected_ref", null, "bad_ref", ctx.requestId); } catch {} return sendJson(response, 404, NOLEAK); }
+  if (!def || !/^[\w:.,-]{1,100}$/.test(id)) { try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", sanitize(kind) + ":rejected_ref", null, "bad_ref", ctx.requestId); } catch {} return { code: 404, payload: NOLEAK }; }
   try {
     if (kind === "knowledge") {
       const [aid, vtag] = String(id).split(".");
       const { latest } = await knowledgeLatestMap();
       const kr = latest.get(aid);
-      if (!kr || kr.review_status !== "approved" || (user.role === "driver" && !["all", "driver"].includes(String(kr.applicable_role || "all")))) { try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", "knowledge:non_official", null, "refused_scope", ctx.requestId); } catch {} return sendJson(response, 404, NOLEAK); }
-      if (vtag && vtag !== String(kr.version_no)) return sendJson(response, 400, { ok: false, ref, error: "stale_version", hint: `引用版本已更新：当前 approved 为 v${kr.version_no}` });
-      return sendJson(response, 200, { ok: true, ref, route: `#/sm-knowledge?article_id=${encodeURIComponent(aid)}`, fresh: { article_id: aid, version_no: kr.version_no, review_status: "approved", title: kr.title } });
+      if (!kr || kr.review_status !== "approved" || (user.role === "driver" && !["all", "driver"].includes(String(kr.applicable_role || "all")))) { try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", "knowledge:non_official", null, "refused_scope", ctx.requestId); } catch {} return { code: 404, payload: NOLEAK }; }
+      if (vtag && vtag !== String(kr.version_no)) return { code: 400, payload: { ok: false, ref, error: "stale_version", hint: `引用版本已更新：当前 approved 为 v${kr.version_no}` } };
+      return { code: 200, payload: { ok: true, ref, route: `#/sm-knowledge?article_id=${encodeURIComponent(aid)}`, fresh: { article_id: aid, version_no: kr.version_no, review_status: "approved", title: kr.title } } };
     }
     const q = { select: "*", [def[1]]: `eq.${id}`, limit: 1 };
     if (user.role === "driver") {
       if (kind === "score") { delete q.select; q.select = "score_id,driver_id"; q.driver_id = `eq.${user.driver_id || "__none__"}`; }
-      else if (kind === "ledger") { const gps = await ownGpsOf(ctx.principal); if (!gps) return sendJson(response, 404, NOLEAK); q.gpsno = `eq.${gps}`; }
-      else if (kind === "risk") { const gps = await ownGpsOf(ctx.principal); if (!gps) return sendJson(response, 404, NOLEAK); q.gpsno = `eq.${gps}`; }
+      else if (kind === "ledger") { const gps = await ownGpsOf(ctx.principal); if (!gps) return { code: 404, payload: NOLEAK }; q.gpsno = `eq.${gps}`; }
+      else if (kind === "risk") { const gps = await ownGpsOf(ctx.principal); if (!gps) return { code: 404, payload: NOLEAK }; q.gpsno = `eq.${gps}`; }
       else if (kind === "course") { q.content_status = "eq.approved"; }
-      else if (["queue", "alert", "score_history", "knowledge"].includes(kind)) { try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", kind + ":scope", null, "refused_scope", ctx.requestId); } catch {} return sendJson(response, 404, NOLEAK); }
+      else if (["queue", "alert", "score_history", "knowledge"].includes(kind)) { try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", kind + ":scope", null, "refused_scope", ctx.requestId); } catch {} return { code: 404, payload: NOLEAK }; }
     }
     const r = await dbRequest("get_rr_row", "GET", def[0], { query: q });
     const hit = r.data?.[0] || null;
     if (hit && ["safety_admin", "team_leader"].includes(user.role) && String(user.fleet_scope || "*") !== "*") {
       const s = await fleetScopeSets(String(user.fleet_scope));
       const viol = hit.gpsno ? !s.gps.includes(String(hit.gpsno)) : (hit.driver_id ? !s.drv.includes(String(hit.driver_id)) : true);
-      if (viol) { try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", kind + ":out_of_fleet_scope", null, "refused_scope", ctx.requestId); } catch {} return sendJson(response, 404, NOLEAK); }
+      if (viol) { try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", kind + ":out_of_fleet_scope", null, "refused_scope", ctx.requestId); } catch {} return { code: 404, payload: NOLEAK }; }
     }
     if (user.role === "driver") { try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", kind + (hit ? ":ok" : ":miss"), null, hit ? "ok" : "not_found_or_stale", ctx.requestId); } catch {} }
-    if (!hit) return sendJson(response, 404, NOLEAK);
+    if (!hit) return { code: 404, payload: NOLEAK };
     let route = null;
     if (user.role === "driver") route = kind === "score" || kind === "course" ? null : kind === "ledger" || kind === "risk" ? null : null;
     else route = (AI_CARD_ROUTES_ADMIN[kind] || (() => null))(hit);
-    sendJson(response, 200, { ok: true, ref, route, reauthorized: "server_session", fresh: { as_of_date: hit.as_of_date || hit.occurred_at || null, source_version: hit.source_version || null, status: hit.status || hit.content_status || hit.review_status || null } });
-  } catch { sendJson(response, 404, NOLEAK); }
+    return { code: 200, payload: { ok: true, ref, route, reauthorized: "server_session", fresh: { as_of_date: hit.as_of_date || hit.occurred_at || null, source_version: hit.source_version || null, status: hit.status || hit.content_status || hit.review_status || null } } };
+  } catch { return { code: 404, payload: NOLEAK }; }
+}
+
+async function handleEvidenceCheck(request, response, url, ctx) {
+  const ref = String(url.searchParams.get("ref") || "").slice(0, 120);
+  const r = await evidenceCheckCore(ref, ctx);
+  return sendJson(response, r.code, r.payload);
+}
+// 第35轮：agent1 EvidenceVerifier 移植——verification_id 回执重验（5 分钟、属主绑定；重验走当前会话再授权）
+async function handleAgentEvidenceCheck(request, response, url, ctx) {
+  const user = requireUser(ctx.principal);
+  const body = await readBody(request, 1024);
+  const vid = String(body?.verification_id || "").slice(0, 60);
+  aiSweepMaps();
+  const rec = AI_VERIFICATIONS.get(vid);
+  if (!rec || rec.owner !== user.user_id) {
+    try { await appendAudit(ctx.principal, "ai.evidence_check", "ai_check", "verification:" + (rec ? "owner_mismatch" : "unknown_id"), null, "refused_scope", ctx.requestId); } catch {}
+    return sendJson(response, 404, { error: "not_found_or_stale", hint: "回执不存在、已过期（5分钟）或不属于当前会话——不透露任何记录存在性；请重新向 AI 查询" });
+  }
+  const r = await evidenceCheckCore(rec.ref, ctx);
+  if (r.code === 200) return sendJson(response, 200, { ok: true, verification_id: vid, evidence_ref: rec.ref, route: r.payload.route || null, fresh: r.payload.fresh || null, verified_at: nowIso() });
+  return sendJson(response, r.code, { ...r.payload, verification_id: vid });
 }
 
 async function handleAiConfirm(request, response, url, ctx) {
@@ -2872,6 +3183,9 @@ const API_ROUTES = [
   { method: "POST", path: "/api/auth/login", needAuth: false, handler: handleLogin },
   { method: "POST", path: "/api/auth/logout", needAuth: true, handler: handleLogout },
   { method: "GET", path: "/api/me", needAuth: false, handler: handleMe },
+  { method: "GET", path: "/api/me/profile", needAuth: true, handler: handleOwnProfile },
+  { method: "POST", path: "/api/me/profile", needAuth: true, handler: handleOwnProfile },
+  { method: "GET", path: "/api/analysis/root-causes", needAuth: true, handler: handleRootCauses },
   { method: "GET", path: "/api/driver/fleet-summary", needAuth: true, handler: handleDriverFleetSummary },
   { method: "GET", path: "/api/rm/drop7", needAuth: true, handler: handleDrop7 },
   { method: "GET", path: "/api/overview", needAuth: true, handler: handleOverview },
@@ -2882,6 +3196,7 @@ const API_ROUTES = [
   { method: "GET", path: "/api/ai/preplan", needAuth: true, handler: handleAiPreplan },
   { method: "POST", path: "/api/ai/confirm", needAuth: true, handler: handleAiConfirm },
   { method: "GET", path: "/api/ai/evidence-check", needAuth: true, handler: handleEvidenceCheck },
+  { method: "POST", path: "/api/agent1/evidence-check", needAuth: true, handler: handleAgentEvidenceCheck },
   { method: "GET", path: "/api/ai/calls", needAuth: true, handler: async (request, response, url, ctx) => {
     const user = requireUser(ctx.principal);
     const ids = String(url.searchParams.get("ids") || "").split(",").map((x) => x.trim()).filter((x) => /^aud-[\w-]+$/.test(x)).slice(0, 12);

@@ -21,13 +21,13 @@ export function TemplatesTab() {
     try { const r = await api<{ audit_id: string | null; new_status?: string }>(`/api/admin/templates/${encodeURIComponent(t.template_key + ":" + t.version)}`, { method: "PATCH", body: JSON.stringify({ action, ...extra }) }); setMsg(`${t.template_key}:${t.version} → ${r.new_status ?? action} · 审计 ${r.audit_id}`); await reload(); }
     catch (e) { const m = String((e as Error).message); if (m.includes("self_review_requires_explicit_confirm")) { try { const r = await api<{ audit_id: string | null }>(`/api/admin/templates/${encodeURIComponent(t.template_key + ":" + t.version)}`, { method: "PATCH", body: JSON.stringify({ action, confirm_same_actor: true }) }); setMsg(`${t.template_key}:${t.version} 同作者二次确认已批准并留痕 · 审计 ${r.audit_id}`); await reload(); } catch (e2) { setErr("批准被拒：" + String((e2 as Error).message)); } } else setErr("操作被拒：" + m); }
   }
-  if (rows === "pending") return <div className="alert info" style={{ padding: 10 }}>通知模板表（notification_templates，迁移 005）<b>尚未执行——待属主</b>在平台数据库入口运行 <span className="mono">scripts/contract/migrations/005_notification_templates.up.sql</span>（方案见 output/通知模板实施方案.md）。页面端点与本页组件已就绪：迁移执行后无需再改代码即可开始人工起草；在此之前本页零读写、RM03 不发模板通知。</div>;
+  if (rows === "pending") return <div className="alert info">通知模板暂不可用，请联系管理员。</div>;
   if (!rows) return <div className="meta">{rows === null ? "读取中…" : ""}</div>;
   return <div>
     {err && <div className="alert warn">{err}</div>}
     {msg && <div className="alert info">{msg}</div>}
     <div className="task-card" style={{ padding: 8, marginBottom: 8 }}>
-      <div className="t">新建模板（初始 draft，永不自动批准；占位符白名单：event_date / evidence_type / review_note / driver_id / alert_id）</div>
+      <div className="t">新建通知模板（初始 draft，永不自动批准；占位符白名单：event_date / evidence_type / review_note / driver_id / alert_id）</div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         <input className="btn" style={{ width: 190 }} placeholder="template_key(小写)" aria-label="模板键" value={nc.template_key} onChange={(e) => setNc({ ...nc, template_key: e.target.value.toLowerCase() })} />
         <input className="btn" style={{ width: 210 }} placeholder="标题" value={nc.title} onChange={(e) => setNc({ ...nc, title: e.target.value })} />
@@ -69,3 +69,4 @@ export function TemplateScenePicker(props: { scene: string; driverId: string; on
     {pv && <span className="meta" style={{ width: "100%" }}>预览：{pv}</span>}
   </div>;
 }
+

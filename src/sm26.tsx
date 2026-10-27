@@ -20,7 +20,7 @@ export function AiPreplanPage() {
   useEffect(() => { setCrit(parse()); load(parse()); }, [crit.gpsno, crit.driver_id, crit.as_of_date]);
   const goDraft = (c: Card) => {
     const d = c.draft_entry; if (!d) return;
-    if (d.kind === "tr2") { try { sessionStorage.setItem("claw_fill", JSON.stringify({ form: "tr2", driver_id: data && typeof data === "object" && data.subject ? data.subject.driver_id : "", alert_id: null, goal: "【AI04 预演携入】" + c.plan + "（逐项可改；确认分配才写库）", note: "来自 AI04 并排预演页" })); } catch { /* ignore */ } window.dispatchEvent(new CustomEvent("claw:fill")); }
+    if (d.kind === "tr2") { try { sessionStorage.setItem("claw_fill", JSON.stringify({ form: "tr2", driver_id: data && typeof data === "object" && data.subject ? data.subject.driver_id : "", alert_id: null, goal: "【AI04 预演携入·逐项可改，确认分配才写库】" + c.plan, note: "来自 AI04 并排预演页" })); } catch { /* ignore */ } window.dispatchEvent(new CustomEvent("claw:fill")); }
     location.hash = d.hash;
   };
   const backToEv03 = () => { const sub = data && typeof data === "object" && data.subject ? data.subject : null; if (sub) location.hash = "ev-fleet?driver_id=" + encodeURIComponent(String(sub.driver_id || sub.gpsno)) + "&tab=3"; else location.hash = "ev-fleet"; };
@@ -41,7 +41,7 @@ export function AiPreplanPage() {
       <div className="meta" style={{ marginBottom: 6 }}>对象：{String(data.subject?.driver_id)} · 车辆 {String(data.subject?.gpsno)} · as_of {String(data.subject?.as_of_date)} · {String(data.subject?.source_version)} · {String(data.facts_status)}</div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, alignItems: "start" }}>
         {data.cards.map((c) => <div key={c.key} className="task-card" style={{ padding: 10, borderColor: c.highlight ? "#d48806" : c.actionable ? "#2f5496" : "#ddd", background: c.highlight ? "#fffbe6" : c.actionable ? undefined : "#fafafa" }}>
-          <div className="t">{c.title}{c.highlight ? <span className="tag amber" style={{ marginLeft: 6 }}>优先</span> : null} <span className="meta" style={{ fontWeight: 400 }}>操作预演，未写入</span></div>
+          <div className="t">{c.title}{c.highlight ? <span className="tag amber" style={{ marginLeft: 6 }}>优先</span> : null} <span className="meta" style={{ fontWeight: 400 }}>方案预演 · 未写入</span></div>
           <div className="meta" style={{ margin: "4px 0" }}>{c.plan}</div>
           <div className="t" style={{ fontSize: 12 }}>建议依据（真实 record_id，点击回源重验权）</div>
           {c.basis.map((bb) => <div key={bb.table + bb.record_id} className="meta" style={{ fontSize: 11.5, margin: "2px 0" }}>· {bb.label}：<b>{bb.record_id}</b>
@@ -65,3 +65,4 @@ export function AiPreplanPage() {
     </>}
   </div>;
 }
+

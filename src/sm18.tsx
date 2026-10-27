@@ -11,7 +11,7 @@ export function AccountAdminPanel({ onChanged }: { onChanged?: () => void }) {
   const [fRole, setFRole] = useState(""); const [fStatus, setFStatus] = useState(""); const [fFleet, setFFleet] = useState("");
   const [editing, setEditing] = useState<Acct | null>(null);
   const [eDn, setEDn] = useState(""); const [eScope, setEScope] = useState(""); const [eDriver, setEDriver] = useState(""); const [eClear, setEClear] = useState(false);
-  const [username, setUsername] = useState("temp_qa"); const [role, setRole] = useState("driver"); const [dn, setDn] = useState("");
+  const [username, setUsername] = useState(""); const [role, setRole] = useState("driver"); const [dn, setDn] = useState("");
   async function reload() { try { setRows((await getData<Acct>("admin.accounts", { limit: 50 })).rows); onChanged?.(); } catch { setErr("账号列表读取失败"); } }
   useEffect(() => { reload(); }, []);
   const filtered = (rows || []).filter((r) => (!fRole || r.role === fRole) && (!fStatus || r.account_status === fStatus) && (!fFleet || String(r.fleet_scope || "").toLowerCase().includes(fFleet.toLowerCase())));
@@ -66,23 +66,24 @@ export function AccountAdminPanel({ onChanged }: { onChanged?: () => void }) {
           </select>
           <label className="meta" style={{ alignSelf: "center" }}><input type="checkbox" checked={eClear} onChange={(e) => setEClear(e.target.checked)} /> 清除绑定</label>
         </div>
-        <div className="meta">{editing.binding_verified ? "身份已核实：可绑定/换绑（服务端强制该司机有效绑定唯一）" : "未核实身份：不可自动绑定演示司机（需先在 SM02 完成绑定核实）"}</div></label>
+        <div className="meta">{editing.binding_verified ? "身份已核实" : "请先核实身份绑定"}</div></label>
       </div>
       <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
         <button className="btn primary" style={{ width: "auto" }} onClick={saveEdit}>保存编辑</button>
         <button className="btn" onClick={() => setEditing(null)}>取消</button>
       </div>
-      <p className="login-note">编辑不落任何口令字段；被编辑者若为停用目标会即时清除会话（旧 Cookie 立即失效）。</p>
+      <p className="login-note">编辑不落任何口令字段；被停用账号即时清除会话（旧 Cookie 立即 401）。</p>
     </div>}
     <div className="task-card" style={{ marginTop: 10, padding: 8 }}>
-      <div className="t">创建账号（演示仅两类登录身份：safety_admin / driver）</div>
+      <div className="t">创建账号</div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         <input className="btn" style={{ width: 170 }} value={username} onChange={(e) => setUsername(e.target.value.replace(/[^a-z0-9_.-]/g, ""))} placeholder="登录名(小写)" aria-label="新账号登录名" />
         <input className="btn" style={{ width: 150 }} value={dn} onChange={(e) => setDn(e.target.value)} placeholder="显示名" />
         <select className="btn" style={{ width: "auto" }} value={role} onChange={(e) => setRole(e.target.value)} aria-label="新账号角色"><option value="driver">driver</option><option value="safety_admin">safety_admin</option></select>
         <button className="btn primary" style={{ width: "auto" }} onClick={async () => { try { const r = await createUser({ username, display_name: dn || "临时账号", role }); setMsg(`已创建 ${r.user_id}（${r.username}/${r.role}）· 审计 ${r.audit_id} · 初始口令不显示、不记录于页面（仅 API 一次性返回）`); setUsername(`temp_${Date.now() % 100000}`); await reload(); } catch (e) { setErr("创建被拒：" + (e instanceof Error ? e.message : "?")); } }}>创建</button>
       </div>
-      <p className="login-note">username 唯一（重复 409 username_exists）；不新增"第三种管理员登录"——系统配置与安全处置能力同属 safety_admin。</p>
+      <p className="login-note">仅两类登录身份（safety_admin / driver），不设第三种管理员登录；username 唯一（重复 409）。未核实身份不可自动绑定演示司机；有效绑定唯一。</p>
     </div>
   </div>;
 }
+

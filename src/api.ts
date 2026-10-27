@@ -141,14 +141,15 @@ export const setUserStatus = (id: string, account_status: string) => api<{ ok: t
 export const egressProbe = () => api<{ ok: boolean; status?: number; error?: string; note?: string; ms?: number }>("/api/meta/egress-probe");
 
 export type AiCitation = string;
-export type ChatResult = { ok: true; answer: string; citations: AiCitation[]; data_limitations: string[]; draft_preview: Record<string, unknown>[] | null; requires_confirmation: boolean; meta: { prompt_version: string; model: string } };
+export type ChatResult = { ok: true; answer: string; citations: AiCitation[]; data_limitations: string[]; draft_preview: Record<string, unknown>[] | null; requires_confirmation: boolean; idempotent_replay?: boolean; meta: { prompt_version: string; model: string; engine?: string; skill?: string; skill_title?: string; tool_calls?: number; rounds?: number; duration_ms?: number } };
 export type Selftest = { ok: true; prompt_version: string; provider: string; tools: { tool: string; status: string; refs?: number; requires_confirmation?: boolean }[]; writes: string; counts_before: Record<string, number|null>; counts_after: Record<string, number|null>; note: string };
-export const aiChat = (messages: { role: string; content: string }[], page?: string) => api<ChatResult>("/api/ai/chat", { method: "POST", body: JSON.stringify({ messages, page }) });
+export const aiChat = (messages: { role: string; content: string }[], page?: string, clientRequestId?: string) => api<ChatResult>("/api/ai/chat", { method: "POST", body: JSON.stringify({ messages, page, ...(clientRequestId ? { client_request_id: clientRequestId } : {}) }) });
 export const aiSelftest = () => api<Selftest>("/api/ai/selftest");
 
-export type EvidenceCard = { ref: string; table: string; field: string; value: string | number | null; window: string | null; as_of_date: string | null; source_version: string | null; confidence: string | null; limitations: string | null };
+export type EvidenceCard = { ref: string; table: string; field: string; value: string | number | null; window: string | null; as_of_date: string | null; source_version: string | null; confidence: string | null; limitations: string | null; verification_id?: string | null };
 export type CheckResult = { ok?: true; ref: string; route: string | null; fresh?: Record<string, unknown>; error?: string; hint?: string };
 export const aiEvidenceCheck = (ref: string) => api<CheckResult>(`/api/ai/evidence-check?ref=${encodeURIComponent(ref)}`);
+export const aiEvidenceCheckVer = (verificationId: string) => api<{ ok: true; verification_id: string; evidence_ref: string; route: string | null; verified_at: string } | { error: string; hint?: string }>("/api/agent1/evidence-check", { method: "POST", body: JSON.stringify({ verification_id: verificationId }) });
 export const aiConfirm = (p2: { ai_call_id: string; decision: string; business_entity?: string; business_id?: string; business_audit_id?: string }) => api<{ ok: true; confirm_audit_id: string | null; status: string; idempotent_replay?: boolean; confirmed?: string }>("/api/ai/confirm", { method: "POST", body: JSON.stringify(p2) });
 export const aiCallsStatus = (ids: string[]) => api<{ confirms: Record<string, { decision: string; at: string; business: string | null }> }>(`/api/ai/calls?ids=${ids.join(",")}`);
 
@@ -157,8 +158,8 @@ export type SearchItem = { record_id: string; title: string; summary: string; ro
 export type SearchGroup = { type: string; total: number; items: SearchItem[] };
 export const search = (q: string) => api<{ ok: true; q: string; groups: SearchGroup[]; visible_types: string[]; note?: string }>("/api/search?q=" + encodeURIComponent(q));
 export const rulesBoard = () => api<{ ok: true; current: Record<string, unknown>[]; drafts: Record<string, unknown>[]; note: string }>("/api/admin/rule-drafts");
-export const ruleDraftCreate = (b: Record<string, unknown>) => api<{ ok: true; draft_id: string; audit_id: string }>("/api/admin/rule-drafts", { method: "POST", body: JSON.stringify(b) });
-export const ruleDraftAction = (id: string, b: Record<string, unknown>) => api<{ ok: true; new_status: string; audit_id: string }>(`/api/admin/rule-drafts/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(b) });
+export const ruleDraftCreate = (b: Record<string, unknown>) => api<{ ok: true; draft_id: string; audit_id: string; structured?: boolean }>("/api/admin/rule-drafts", { method: "POST", body: JSON.stringify(b) });
+export const ruleDraftAction = (id: string, b: Record<string, unknown>) => api<{ ok: true; new_status: string; audit_id: string; new_source_version?: string; self_review_confirmed?: boolean }>(`/api/admin/rule-drafts/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(b) });
 export const knowledgeList = () => api<{ ok: true; rows: Record<string, unknown>[]; note: string }>("/api/admin/knowledge");
 export const knowledgeCreate = (b: Record<string, unknown>) => api<{ ok: true; article_id: string; version_no: number; audit_id: string }>("/api/admin/knowledge", { method: "POST", body: JSON.stringify(b) });
 export const knowledgeAction = (id: string, b: Record<string, unknown>) => api<{ ok: true; new_status?: string; version_no?: number; audit_id: string; self_review_confirmed?: boolean }>(`/api/admin/knowledge/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(b) });
@@ -180,3 +181,13 @@ export const drop7 = () => api<Drop7>("/api/rm/drop7");
 
 export type TaskSummary = { available: boolean; reason?: string; note?: string; task_id?: string; status?: string; course?: { course_id: string; title: string; version_no: number; current_status: string; note: string | null } | null; facts?: { ref: string; label: string; missing: boolean }[]; items?: { judgment: string; state: string; fact: string; ref: string; ref_ok: boolean }[]; limitations?: string[]; model?: string; cached?: boolean; audit_note?: string };
 export const taskSummary = (task_id: string) => api<TaskSummary>("/api/ai/task-summary", { method: "POST", body: JSON.stringify({ task_id }) });
+
+// ===== R37 新增：司机资料 / 根因分析 =====
+export type DriverProfile = { user_id: string; phone: string | null; intro: string | null; prefs: string | null; updated_by: string | null; updated_at: string | null };
+export const getOwnProfile = () => api<{ ok: true; profile: DriverProfile | null; note: string }>("/api/me/profile");
+export const updateOwnProfile = (b: Record<string, unknown>) => api<{ ok: true; audit_id: string; saved: string[]; note: string }>("/api/me/profile", { method: "POST", body: JSON.stringify(b) });
+export type RootCauseDim = { dimension: string; dimension_name: string; allocated_points: number; share_pct: number | null; events: number };
+export type RootCauseEvent = { dimension: string; dimension_name: string; event_type: string; allocated_points: number };
+export type RootCauseObj = { gpsno: string; driver_id: string | null; allocated_points: number; safety_score: number | string | null; risk_level: string | null; confidence_level: string | null; score_id: string | null };
+export type RootCausesResult = { ok: true; data_status: string; note: string; as_of_date?: string | null; source_version?: string | null; ruleset_source_version?: string | null; cohort?: string; cohort_count?: number; low_conf_in_pool?: number; pool_avg?: number | null; ledger_total_allocated_in_pool?: number; ledger_rows_in_pool?: number; gps_covered_in_pool?: number; gps_without_ledger_in_pool?: number; dimensions?: RootCauseDim[]; event_types?: RootCauseEvent[]; top_objects?: RootCauseObj[] };
+export const rootCauses = (cohort = "cd") => api<RootCausesResult>(`/api/analysis/root-causes?cohort=${encodeURIComponent(cohort)}`);

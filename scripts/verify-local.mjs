@@ -239,7 +239,7 @@ try {
     const tc = await req("/api/data/admin.training_courses", { cookie: C });
     check("TR05 课程实查：三门主课原状态保持（C01=approved、C02/C03=演示草稿待团队审核；验收专用课程允许存在不视为破坏）", ["DEMO_C01", "DEMO_C02", "DEMO_C03"].every(id => { const r = (tc.json?.rows || []).find(x => x.course_id === id) || {}; return id === "DEMO_C01" ? r.content_status === "approved" : r.content_status === "demo_draft_requires_team_review"; }), JSON.stringify((tc.json?.rows || []).map(x => [x.course_id, x.content_status]).slice(0, 6)));
     const er = await req("/api/data/admin.evaluation_rules", { cookie: C });
-    check("SM03 冻结规则6条(权重/14天窗/method/版本可看)", er.json?.rows?.length === 6 && er.json.rows[0].window_days === 14 && er.json.rows.every((r) => String(r.source_version).startsWith("snapshot_")), JSON.stringify((er.json?.rows || []).map((r) => r.dimension)));
+    check("SM03 规则6条(权重/窗口可看；版本=snapshot_ 或生效链 ruleset_vN)", er.json?.rows?.length === 6 && er.json.rows[0].window_days === 14 && er.json.rows.every((r) => /^(snapshot_|ruleset_v\d)/.test(String(r.source_version))), JSON.stringify((er.json?.rows || []).map((r) => [r.dimension, String(r.source_version).slice(0,14)])));
     const oc = await req("/api/data/admin.operation_config", { cookie: C });
     const ocMap = Object.fromEntries((oc.json?.rows || []).map((r) => [String(r.config_id), r]));
     check("运营配置3项=10/24/7@ops_v1", String(ocMap.drop_threshold?.value) === "10" && String(ocMap.priority_review_hours?.value) === "24" && String(ocMap.training_start_days?.value) === "7" && ocMap.drop_threshold?.config_version === "ops_v1", JSON.stringify(ocMap.drop_threshold));
@@ -319,7 +319,7 @@ try {
   {
     const st0 = await req("/api/ai/selftest", { cookie: C });
     const T = st0.json?.tools || [];
-    check("AI自检14工具全执行且业务表零写入", st0.status === 200 && T.length === 14 && st0.json?.writes === "zero_confirmed", `tools=${T.length} writes=${st0.json?.writes}`);
+    check("AI自检15工具全执行且业务表零写入", st0.status === 200 && T.length === 15 && st0.json?.writes === "zero_confirmed", `tools=${T.length} writes=${st0.json?.writes}`);
     check("自检含propose草稿需确认", T.some((x) => x.requires_confirmation && String(x.tool).startsWith("propose_")));
     const ksn = T.find((x) => x.tool === "knowledge_search");
     check("knowledge_search正式引用门禁:非approved→状态no_official且refs=0（有approved则refs>0）", Boolean(ksn) && (["no_official_knowledge", "ok", "empty"].includes(ksn.status)) && (ksn.status === "no_official_knowledge" || ksn.status === "empty" ? ksn.refs === 0 : ksn.refs > 0), JSON.stringify(ksn));
@@ -333,7 +333,7 @@ try {
     }
     const cites1 = JSON.stringify(c1.json?.citations || []) + JSON.stringify(c1r.json?.citations || []) + JSON.stringify((c1.json?.evidence_cards || []).concat(c1r.json?.evidence_cards || []).map(x => x.record_id || ""));
     check("真实模型chat(admin):引用queue/score标识（上游抖动重试≤3）", /queue_id:|score:/.test(cites1) && String(c1.json?.answer || c1r.json?.answer || "").length > 20, `cites=${cites1.slice(0, 110)}`);
-    check("chat元数据prompt_version+model", Boolean(c1.json?.meta?.prompt_version) && c1.json?.meta?.model === "qwen3.8-max");
+    check("chat元数据prompt_version+model+engine（模型随属主env）", Boolean(c1.json?.meta?.prompt_version) && /^qwen/.test(String(c1.json?.meta?.model || "")) && c1.json?.meta?.engine === "agent1-inspired" && Boolean(c1.json?.meta?.skill));
     const c2 = await chat(DC, "DEMO_D0289 的安全分和扣分证据是多少？", "my-safety");
     const an2 = String(c2.json?.answer || "");
     const lim2 = JSON.stringify(c2.json?.data_limitations || []);

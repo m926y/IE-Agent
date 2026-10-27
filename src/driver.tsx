@@ -1,19 +1,19 @@
 import { useEffect, useState } from "react";
 import type { FleetSummary } from "./api";import type { MeUser } from "./api";
-import { ApiError, fleetSummary, getData, interventionRead, interventionReply, logout, myNotes, noteRead, rrCreate, taskSaveDraft, taskStart, taskSubmit } from "./api";
+import { ApiError, fleetSummary, getOwnProfile, updateOwnProfile, getData, interventionRead, interventionReply, logout, myNotes, noteRead, rrCreate, taskSaveDraft, taskStart, taskSubmit } from "./api";
 import { Banner, EmptyState, ResourceTable, Tag, GlobalSearch} from "./ui";
 
 function FleetStatsPanel() {
   const [fs, setFs] = useState<FleetSummary | "loading" | "error" | null>(null);
   useEffect(() => { fleetSummary().then((r) => setFs(r)).catch(() => setFs("error")); }, []);
-  return <div className="panel" style={{ borderColor: "#b9cbe8", background: "#f4f8ff" }} aria-label="anonymous fleet statistics panel">
-    <h3>匿名车队统计（与“我的安全”分区：仅聚合值，无姓名/司机ID/车辆ID/个人分/排名/事件）</h3>
+  return <div className="panel" style={{ borderColor: "var(--line)", background: "#fcf9ff" }} aria-label="anonymous fleet statistics panel">
+    <h3>匿名车队统计</h3>
     {fs === "loading" && <EmptyState kind="loading" />}
     {fs === "error" && <div className="alert warn">无法获取车队统计：本账号未绑定/未核实或查询失败（服务端拒绝时不返回任何个人与车队数据）</div>}
     {typeof fs === "object" && fs && fs.data_status !== "ok" && (
       <div className={"alert " + (fs.data_status === "query_failed" ? "warn" : "info")}>
         {fs.data_status === "insufficient_sample" ? "样本不足：该车队有效评分人数少于 10，均值与分布已隐藏（隐私保护，不以 0 或空壳冒充）"
-          : fs.data_status === "no_data" ? "无数据：" + fs.note : "统计查询失败：请稍后重试（未以空值冒充 0）"}
+          : fs.data_status === "no_data" ? fs.note : "统计查询失败：请稍后重试（未以空值冒充 0）"}
         {fs.as_of_date ? " · 数据截止 " + fs.as_of_date : ""}
       </div>)}
     {typeof fs === "object" && fs && fs.data_status === "ok" && <>
@@ -29,7 +29,7 @@ function FleetStatsPanel() {
           <div style={{ height: 4, background: "#dfe8f6", borderRadius: 2 }}><div style={{ height: 4, width: Math.round((v / (fs.valid_count || 1)) * 100) + "%", background: k === "D" ? "#b3261e" : k === "C" ? "#ad6800" : k === "B" ? "#1a56c4" : "#1a6b2a", borderRadius: 2 }} /></div>
         </div>; })}
       </div> : <div className="alert info" style={{ marginTop: 6 }}>{fs.note || "等级类别过细可能反推个人：本次不展示分布（人数与均值保留）"}</div>}
-      <p className="login-note">{fs.note} · 统计随每日快照版本更新，不代表处罚口径。</p>
+      <p className="login-note">{fs.note}</p>
     </>}
   </div>;
 }
@@ -42,23 +42,23 @@ function TabBtn({ active, ico, label, onClick }: { active: boolean; ico: string;
 
 function MyHistory() {
   const [rows, setRows] = useState<Record<string, unknown>[] | null | "error">(null);
-  useEffect(() => { getData<Record<string, unknown>>("my.score_history", { limit: 20 }).then((r) => setRows(r.rows)).catch(() => setRows("error")); }, []);
+  useEffect(() => { getData<Record<string, unknown>>("my.score_history", { limit: 20, order: "as_of_date.desc" }).then((r) => setRows([...r.rows].sort((a, b) => String(a.as_of_date).localeCompare(String(b.as_of_date))))).catch(() => setRows("error")); }, []);
   const DIMS = [["history_contribution", "历史"], ["fatigue_distraction_contribution", "疲劳分心"], ["driving_stability_contribution", "驾驶稳定性"], ["road_rule_contribution", "道路规则"], ["management_contribution", "管理配合"], ["imu_evidence_contribution", "IMU证据"]];
-  const COLORS = ["#2f6fed", "#7a5af8", "#0e9f8a", "#d97706", "#d6407f", "#64748b"];
+  const COLORS = ["#a480c4", "#b298d2", "#9b80bc", "#cab6dd", "#b68dbd", "#c4aed4"];
   if (rows === "error") return <div className="panel"><EmptyState kind="error" /></div>;
   if (!rows) return <div className="panel"><EmptyState kind="loading" /></div>;
   const last = rows[rows.length - 1] || {};
   const maxd = Math.max(...DIMS.map(([k]) => Number(last[k] ?? 0) || 0), 1e-9);
-  return <div className="panel"><h3>我的评分历史与六维（{rows.length} 个已有日期 · 只读事实）</h3>
+  return <div className="panel"><h3>评分历史与六维</h3>
     <div className="table-wrap" style={{ marginBottom: 10 }}><table><thead><tr><th>截止日</th><th>安全分</th><th>等级</th><th>可信度</th></tr></thead><tbody>
-      {rows.map((r) => <tr key={String(r.score_id)}><td>{String(r.as_of_date)}</td><td>{String(r.safety_score)}</td><td>{String(r.risk_level)}</td><td>{String(r.confidence_level)}</td></tr>)}
+      {rows.map((r) => <tr key={String(r.score_id)}><td>{String(r.as_of_date)}</td><td>{Number(r.safety_score).toFixed(2)}</td><td>{String(r.risk_level)}</td><td>{String(r.confidence_level)}</td></tr>)}
     </tbody></table></div>
     {DIMS.map(([k, label], i) => <div key={k} className="row" style={{ marginBottom: 4 }}>
       <span style={{ width: 90, fontSize: 12.5, color: "var(--ink-2)" }}>{label}</span>
       <span style={{ height: 12, width: `${(Number(last[k] ?? 0) / maxd) * 40}%`, minWidth: 2, background: COLORS[i], borderRadius: 3, display: "inline-block" }} />
-      <span className="mono">{String(last[k] ?? "—")}</span>
+      <span className="mono">{last[k] == null ? "—" : Number(last[k]).toFixed(2)}</span>
     </div>)}
-    <p className="login-note">六维为最后一日（{String(last.as_of_date ?? "—")}）快照值；台账/事件证据（deduction_ledger）仍显示待导入空态，不补造。</p>
+    <p className="login-note">六维为最后一日（{String(last.as_of_date ?? "—")}）快照值，只读事实；“无事件”不等于“无覆盖”，本页不补造数据。</p>
   </div>;
 }
 
@@ -81,8 +81,8 @@ function RRRequestPanel({ unbound }: { unbound: boolean }) {
   }
   if (unbound) return <><h3>对评分有疑问？</h3><p className="page-desc">当前无核实绑定：不展示对象明细，也无法针对本人评分提交复核。</p></>;
   return <>
-    <h3>对评分有疑问？（复核申请 EV05）</h3>
-    <p className="page-desc">仅可针对<b>本人真实存在</b>的评分/证据记录提交（系统按登录会话取 driver_id，不信任页面参数）。司机端不能修改任何评分；如源数据确有问题，由安全员转数据负责人走正式版本化流程。</p>
+    <h3>评分复核申请</h3>
+    <p className="page-desc">填写原因及说明，提交后由安全员核查。仅可针对<b>本人真实存在</b>的评分/证据记录提交（系统按登录会话取 driver_id，不信任页面参数）；司机端不能修改任何评分，如源数据确有问题，由安全员转数据负责人走正式版本化流程。</p>
     <div className="field"><label>针对的评分记录</label><input value={scoreId || "（未取到本人快照）"} readOnly aria-label="针对评分记录" style={{ background: "var(--bg)" }} /></div>
     <div className="field"><label>原因</label>
       <select className="btn" style={{ background: "#fff", textAlign: "left" }} value={reason} onChange={(e) => setReason(e.target.value)} aria-label="复核原因">{RR_REASONS.map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></div>
@@ -105,21 +105,21 @@ function OwnScoreDetail() {
   useEffect(() => { getData<Record<string, unknown>>("my.score", { limit: 1 }).then((r) => setRow(r.rows[0] || null)).catch(() => setRow("error")); }, []);
   if (row === "loading") return <EmptyState kind="loading" />;
   if (row === "error") return <EmptyState kind="error" />;
-  if (!row) return <EmptyState kind="nocov" hint="绑定身份有效，但该对象暂无近14天评分记录（等待数据导入，不补造）。" />;
+  if (!row) return <><div className="panel score-hero"><div className="l">近 14 天安全评分</div><div className="n">—</div><div className="l">暂无评分记录</div></div><FleetStatsPanel /></>;
   const low = row.confidence_level === "low";
   return <div className="stack">
     <div className="panel score-hero">
-      <div className="n" style={{ color: "var(--ink)" }}>{String(row.safety_score)}</div>
+      <div className="n" style={{ color: "var(--ink)" }}>{Number(row.safety_score).toFixed(2)}</div>
       <div className="l">近14天安全评分 · {String(row.as_of_date)} · <Tag tone={low ? "amber" : "green"}>{String(row.confidence_level)}{low ? " · 建议先核验设备/数据" : ""}</Tag></div>
-      <div className="l">等级 {String(row.risk_level)}（车队内复核优先级）· 7天变化 {String(row.score_change_7d)}</div>
+      <div className="l">等级 {String(row.risk_level)}· 7 天变化 {row.score_change_7d == null ? "—" : Number(row.score_change_7d).toFixed(2)}</div>
     </div>
     {low && <Banner tone="warn">可信度低：说明数据覆盖或设备状态待核实，先做数据/设备核验，不会被当作“安全”或自动奖惩。</Banner>}
     <FleetStatsPanel />
-    <div className="panel"><h3>下一步建议（只读口径）</h3><div className="kv">
-      <span className="kk">主风险维度</span><b>{String(row.primary_risk_dimension ?? "—")}</b>
+    <div className="panel"><h3>关注事项</h3><div className="kv">
+      <span className="kk">主风险维度</span><b>{{history:"历史事故与未遂", fatigue_distraction:"疲劳与分心", driving_stability:"驾驶稳定性", road_rule:"道路规则", management:"管理配合", imu_evidence:"IMU证据"}[String(row.primary_risk_dimension)] || String(row.primary_risk_dimension || "—")}</b>
       <span className="kk">建议动作</span><b>{String(row.recommended_action ?? "—")}</b>
       <span className="kk">首要扣分原因</span><b>{String(row.top_reason_1 ?? "—")}</b>
-      <span className="kk">未来40天预测</span><b>{String(row.forecast_40d_risk_prob ?? "—")}（概率≠事故已发生）</b>
+      <span className="kk">未来40天预测</span><b>{row.forecast_40d_risk_prob == null ? "—" : (Number(row.forecast_40d_risk_prob) * 100).toFixed(2) + "%"}<small className="forecast-note">预测概率</small></b>
     </div></div>
     <MyHistory />
   </div>;
@@ -133,7 +133,7 @@ function NotesInbox() {
   useEffect(() => { load(); }, []);
   function read(id: string) { noteRead(id).then((r: { idempotent_replay?: boolean }) => { setMsg(r.idempotent_replay ? "此前已读（幂等）" : "已标记已读"); load(); }).catch((e: unknown) => setMsg(`拒绝：${e instanceof ApiError ? e.code : "net"}`)); }
   if (!rows) return <EmptyState kind="loading" />;
-  return <div className="panel"><h3>我的站内消息（演示通知 ≠ 外部渠道送达）</h3>
+  return <div className="panel"><h3>站内消息</h3>
     {rows.length === 0 && <p className="login-note">暂无消息。</p>}
     {rows.map((r) => <div key={String(r.notification_id)} className="task-card"><div className="t">{String(r.title || r.type)} · <span className="mono">{String(r.source_entity_id)}</span></div>
       <div className="meta">{String(r.content).slice(0, 120)} · {String(r.created_at)} · {r.read_at ? <>已读 {String(r.read_at)}</> : <button className="btn" style={{ padding: "3px 10px" }} onClick={() => read(String(r.notification_id))}>标记已读</button>}</div></div>)}
@@ -141,29 +141,39 @@ function NotesInbox() {
   </div>;
 }
 
+
+function ProfileEdit() {
+  const [prof, setProf] = useState<{ phone: string; intro: string; contact_pref: string } | null>(null);
+  const [loadErr, setLoadErr] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { getOwnProfile().then((r) => { const p = r.profile; let cp = "站内消息"; try { const pj = p?.prefs ? JSON.parse(String(p.prefs)) : null; if (pj?.contact_pref) cp = String(pj.contact_pref); } catch { /* defaults */ }
+    setProf({ phone: String(p?.phone || ""), intro: String(p?.intro || ""), contact_pref: cp }); }).catch(() => setLoadErr(true)); }, []);
+  if (loadErr) return <div className="panel"><EmptyState kind="error" /></div>;
+  if (!prof) return <div className="panel"><EmptyState kind="loading" /></div>;
+  async function save() { if (!prof) return; setBusy(true); setMsg(null);
+    try { const r = await updateOwnProfile({ phone: prof.phone, intro: prof.intro, prefs: JSON.stringify({ contact_pref: prof.contact_pref }) }); setMsg(`已保存 · 审计 ${r.audit_id}（仅更新提交字段；不影响绑定与评分事实）`); }
+    catch (e) { const c = e instanceof ApiError ? e.code : "network"; setMsg({ invalid_phone_format: "电话格式不正确（仅数字与 +() -，5-24 位）", profile_driver_only: "仅司机账号可维护", invalid_prefs_json: "偏好数据异常，请刷新页面" }[c] || `保存被拒：${c}`); }
+    setBusy(false); }
+  return <div className="panel stack">
+    <h3>联系方式与备注（本人维护）</h3>
+    <div className="field"><label>联系电话（安全员干预沟通用；5-24 位，可清空）</label><input value={prof.phone} onChange={(e) => setProf({ ...prof, phone: e.target.value })} inputMode="tel" placeholder="例如 138-0000-0000" /></div>
+    <label className="field" style={{ fontSize: 13 }}>联系偏好
+      <select value={prof.contact_pref} onChange={(e) => setProf({ ...prof, contact_pref: e.target.value })}>{["站内消息", "电话联系", "仅紧急事件联系"].map((o) => <option key={o}>{o}</option>)}</select></label>
+    <div className="field"><label>个人备注（如常驻线路、班次说明；≤500 字，不对其他司机展示）</label><textarea style={{ width: "100%", minHeight: 56, borderRadius: 8, border: "1px solid var(--line)", padding: 8, font: "inherit" }} value={prof.intro} onChange={(e) => setProf({ ...prof, intro: e.target.value.slice(0, 500) })} /></div>
+    <button className="btn primary" style={{ width: "auto" }} disabled={busy} onClick={save}>{busy ? "保存中…" : "保存资料"}</button>
+    {msg && <div className="alert info">{msg}</div>}
+  </div>;
+}
+
 function MySafety({ user }: { user: MeUser }) {
-  const unbound = !user.driverId;
+  const unbound = !user.driverId || !user.bindingVerified;
   return <div className="stack">
     {unbound
-      ? <Banner tone="warn">当前账号未完成“已核实司机绑定”。按事实口径，未核实时不展示个人明细——这是设计约束，不是数据丢失。安全管理员在 SM01/SM02 核实绑定后刷新即可见。</Banner>
+      ? <Banner tone="warn">当前账号未完成“已核实司机绑定”。未核实时不展示个人明细——这是设计约束，不是数据丢失。安全管理员在 SM01/SM02 核实绑定后刷新即可见。</Banner>
       : <Banner tone="warn"><span>演示数据绑定：{user.driverId}（{user.bindingNote || "synthetic_demo_mapping"}）。非真实司机身份核验，仅用于工作台演示。</span></Banner>}
     {!unbound ? <OwnScoreDetail /> : <div className="panel score-hero"><div className="n">—</div><div className="l">近14天安全评分（绑定核实后显示 · 只读算法事实）</div></div>}
-    <div className="panel">
-      <h3>我的六维主要扣分</h3>
-      <EmptyState kind="nomatch" hint={unbound ? "绑定核实后显示本人六维（历史/疲劳分心/驾驶稳定性/路规/管理/IMU证据）。" : "扣分数据待第2轮导入；六维合计与总分对账后展示。"} />
-    </div>
-    <div className="panel">
-      <h3>车队匿名汇总（不可反查个人）</h3>
-      <div className="row"><Tag tone="gray">均分 —</Tag><Tag tone="gray">样本数 —</Tag><Tag tone="gray">A/B/C/D —</Tag></div>
-      <p className="page-desc" style={{ margin: "6px 0 0" }}>仅匿名聚合；不含他人姓名、车号、排名明细或事件。</p>
-    </div>
-    <div className="panel">
-      <h3>对评分有疑问？</h3>
-      <p className="page-desc" style={{ margin: 0 }}>可提交“申请复核”（EV05）：身份关联有误 / 事件记录疑问 / 设备或数据缺失 / 评分解释不清。司机端不能自行改分；源数据错误由版本化重建处理。</p>
-      <div style={{ height: 8 }} />
-      <button className="btn lg" disabled={unbound}>提交复核申请（第3轮启用表单）</button>
-    </div>
-    <p className="login-note">分数如何产生：观察窗口=近14天日终快照；等级为车队内复核优先级；“无事件”与“无覆盖”会分开标示。</p>
+    <details className="panel driver-review"><summary>评分复核申请（EV05）</summary><RRRequestPanel unbound={unbound} /></details>
   </div>;
 }
 
@@ -183,8 +193,7 @@ function MyRisk({ user }: { user: MeUser }) {
   const mine = rows.filter((r) => ["sent", "read", "replied"].includes(String(r.status)));
   return <div className="stack">
     <h3 style={{ fontSize: 15 }}>今日风险与人工沟通</h3>
-    <Banner tone="warn"><span>演示绑定账号（非真实司机身份核验）；站内消息 ≠ 外部渠道送达。“数据待核验”类别后续导入。</span></Banner>
-    {rows.length === 0 && <EmptyState kind="nomatch" hint="暂无与安全管理员沟通的记录。列表由服务端注入本人 driver_id，不读取他人数据。" />}
+    {rows.length === 0 && <EmptyState kind="nomatch" hint="暂无沟通记录" />}
     {rows.length > 0 && mine.length === 0 && <EmptyState kind="nomatch" hint="有记录但均未发送给你（当前均处草稿/内部状态）。" />}
     {mine.map((r) => <div className="task-card" key={String(r.intervention_id)}>
       <div className="t">{String(r.sent_text || "")}</div>
@@ -203,18 +212,19 @@ function MyRisk({ user }: { user: MeUser }) {
 }
 
 function MyTraining() {
-  const [rows, setRows] = useState<Record<string, unknown>[] | null | "blocked">(null);
+  const [rows, setRows] = useState<Record<string, unknown>[] | null | "blocked" | "error">(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [fbs, setFbs] = useState<Record<string, string>>({});
-  const load = () => { getData<Record<string, unknown>>("my.trainings", { limit: 50 }).then((r) => setRows(r.rows)).catch(() => setRows([])); };
+  const load = () => { getData<Record<string, unknown>>("my.trainings", { limit: 50 }).then((r) => setRows(r.rows)).catch(() => setRows("error")); };
   useEffect(() => { load(); }, []);
   if (rows === "blocked" || rows === null && false) return <EmptyState kind="nocov" hint="无有效绑定" />;
+  if (rows === "error") return <EmptyState kind="error" onRetry={load} />;
   if (rows === null) return <EmptyState kind="loading" />;
   function busy(fn: () => Promise<{ idempotent_replay?: boolean; status?: string; new_status?: string }>, ok: string) { setMsg(null); fn().then((r) => { setMsg(r.idempotent_replay ? `幂等：返回既有状态（${r.status || r.new_status}），未重复写入` : ok); load(); }).catch((e) => setMsg(`拒绝：${e instanceof ApiError ? e.code : "network"}`)); }
   return <div className="stack">
     <h3 style={{ fontSize: 15 }}>培训任务</h3>
-    {rows.length === 0 && <EmptyState kind="nomatch" hint="暂无分配给你的培训任务：课程须经团队审核后由安全员正式分配才会出现（不显示演示假任务）。" />}
+    {rows.length === 0 && <EmptyState kind="nomatch" hint="暂无培训任务" />}
     {rows.map((r) => { const editable = ["assigned", "in_progress", "returned"].includes(String(r.status)); const done = ["submitted", "reviewed", "observation", "interview"].includes(String(r.status)); const overdue = editable && r.due_at && new Date(String(r.due_at)) < new Date();
       return <div key={String(r.task_id)} className="task-card">
         <div className="t">{String(r.goal || r.task_id)}{r.mandatory ? <Tag tone="red"> 强制</Tag> : null} {overdue ? <Tag tone="red">逾期</Tag> : null}</div>
@@ -243,18 +253,15 @@ function MyProfile({ user }: { user: MeUser }) {
       <span className="kk">登录账号</span><b>{user.username || user.userId}</b>
       <span className="kk">显示名</span><b>{user.displayName || "—"}</b>
       <span className="kk">角色</span><b>司机</b>
-      <span className="kk">司机绑定</span><b>{user.driverId ? (user.bindingVerified ? "绑定生效（演示映射）" : "待核实") : "未绑定"}</b>
+      <span className="kk">司机绑定</span><b>{user.driverId ? (user.bindingVerified ? "已绑定" : "待核实") : "未绑定"}</b>
       <span className="kk">driver_id</span><b className="mono">{user.driverId || "未绑定"}</b>
       <span className="kk">绑定口径</span><b>{user.bindingNote || "—"}</b>
-      <span className="kk">登录方式</span><b>{user.authKind === "sso" ? "千问办公平台账号（SSO）" : "工作台账号（服务端会话）"}</b>
-      <span className="kk">数据截止</span><b>待导入（快照 as_of 2026-07-31）</b>
-    </div></div>
-    <div className="panel">
-      <h3>可维护范围</h3>
-      <p className="page-desc" style={{ margin: 0 }}>司机仅可编辑允许的本人联系方式/个人资料字段；角色、绑定与任何评分均不可自行修改。</p>
-      <div style={{ height: 8 }} />
-      <button className="btn lg" disabled>编辑资料（第3轮启用）</button>
+      <span className="kk">登录方式</span><b>{user.authKind === "sso" ? "千问办公平台账号（SSO）" : "账号登录"}</b>
+      <span className="kk">数据截止</span><b>以本人评分快照为准</b>
     </div>
+    <div className="meta" style={{ marginTop: 6 }}>绑定身份、角色与任何评分/预测由管理员与算法系统维护，本页不可改；以下联系方式与备注由本人维护。</div>
+    </div>
+    <ProfileEdit />
     <NotesInbox />
     <button className="btn" onClick={async () => { await logout().catch(() => {}); try { const o = sessionStorage.getItem("claw_ai_owner"); if (o) sessionStorage.removeItem("claw_ai_msgs_" + o); sessionStorage.removeItem("claw_ai_owner"); sessionStorage.removeItem("claw_fill"); sessionStorage.removeItem("claw_fill_seen"); } catch {} window.dispatchEvent(new Event("claw:auth-lost")); location.reload(); }}>退出登录</button>
     {user.authKind === "sso" && <p className="login-note">平台 SSO 会话由网关管理，应用不提供强制登出；“退出”仅清除本工作台会话视图。</p>}
@@ -262,10 +269,10 @@ function MyProfile({ user }: { user: MeUser }) {
 }
 
 const TABS = [
-  { key: "safety", ico: "🛡", label: "我的安全", el: (u: MeUser) => <MySafety user={u} /> },
-  { key: "risk", ico: "⚠", label: "今日风险", el: (u: MeUser) => <MyRisk user={u} /> },
-  { key: "training", ico: "🎓", label: "培训任务", el: () => <MyTraining /> },
-  { key: "profile", ico: "👤", label: "我的资料", el: (u: MeUser) => <MyProfile user={u} /> },
+  { key: "safety", ico: "◈", label: "我的安全", el: (u: MeUser) => <MySafety user={u} /> },
+  { key: "risk", ico: "△", label: "今日风险", el: (u: MeUser) => <MyRisk user={u} /> },
+  { key: "training", ico: "▤", label: "培训任务", el: () => <MyTraining /> },
+  { key: "profile", ico: "◎", label: "我的资料", el: (u: MeUser) => <MyProfile user={u} /> },
 ];
 
 export function DriverShell({ user }: { user: MeUser }) {
@@ -274,11 +281,10 @@ export function DriverShell({ user }: { user: MeUser }) {
   return <div className="driver-shell">
     <header className="driver-head">
       <GlobalSearch />
-      <div className="name">{user.displayName || "司机"}</div>
-      <div className="sub">数据截止 2026-07-31 · {user.driverId ? `绑定 ${user.driverId}（演示映射）` : "身份未核实（演示）"}</div>
+      <div className="driver-identity"><span className="brand-symbol" aria-hidden="true">行</span><div><div className="name">{user.displayName || "司机"}</div><div className="sub">{user.driverId ? user.bindingNote || "司机账号" : "身份待核实"}</div></div><span className="driver-app-label">司机端</span></div>
     </header>
     <main className="driver-main">
-      <Banner tone="info">演示窄屏端 · 评分快照已导入；台账/趋势“待导入”即空态，不补造。“无事件”不等于“无覆盖”。</Banner>
+      <div className="driver-safety-note">停车后操作</div>
       {active.el(user)}
     </main>
     <nav className="tabbar">
@@ -286,3 +292,4 @@ export function DriverShell({ user }: { user: MeUser }) {
     </nav>
   </div>;
 }
+
