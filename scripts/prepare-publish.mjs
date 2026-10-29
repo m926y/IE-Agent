@@ -50,4 +50,6 @@ if (packageJson.type !== "module") {
 }
 // The legacy hosted artifact keeps its standalone entry; the source tree defaults to source-only local mode.
 packageJson.scripts = { start: "node server.mjs" };
+// Hosted platform runtime is Node.js 22; server.mjs has no Node24/sqlite requirement (those belong to local-workbench scripts).
+packageJson.engines = { node: ">=22" };
 await writeFile(new URL("package.json", publishRoot), JSON.stringify(packageJson, null, 2) + "\n");

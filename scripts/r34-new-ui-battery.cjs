@@ -118,7 +118,7 @@ K("U13 RM01 QueueConfirm（非drop7分组可建单）", /对该对象发起人�
   await dp.locator(".login-submit").click(); await dp.waitForTimeout(2200);
   const DBT = (await dp.evaluate(() => document.body.innerText || ""));
   K("U24 司机端布局+演示水印", /司机端/.test(DBT) && /演示数据绑定/.test(DBT), DBT.replace(/\n/g, "|").slice(0, 120));
-  K("U25 EV04 六维/历史（补丁字段渲染）", /六维为最后一日/.test(DBT) && /历史/.test(DBT) && (DBT.match(/—/g) || []).length < 15);
+  K("U25 EV04 六维/历史（补丁字段渲染；R38 文案：本页最近一日+分页口径）", (/六维为(本页)?最(近|后)一日/.test(DBT)) && /历史/.test(DBT) && (DBT.match(/—/g) || []).length < 15);
   K("U26 匿名车队统计", /匿名车队统计/.test(DBT) && /500|74/.test(DBT));
   await dp.screenshot({ path: SHOT + "/ui34-07-driver.png" });
   for (const t of ["今日风险", "培训任务", "我的资料"]) { await dp.locator(".tabbar button", { hasText: t }).first().click().catch(() => {}); await dp.waitForTimeout(900); }
