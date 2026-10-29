@@ -1,4 +1,4 @@
-import { access, cp, mkdir, readFile, rm } from "node:fs/promises";
+import { access, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 
 const projectRoot = new URL("../", import.meta.url);
 const publishRoot = new URL("../.qw-pages/publish/", import.meta.url);
@@ -48,3 +48,6 @@ const packageJson = JSON.parse(
 if (packageJson.type !== "module") {
   throw new Error('Dynamic publish package must use "type": "module"');
 }
+// The legacy hosted artifact keeps its standalone entry; the source tree defaults to source-only local mode.
+packageJson.scripts = { start: "node server.mjs" };
+await writeFile(new URL("package.json", publishRoot), JSON.stringify(packageJson, null, 2) + "\n");

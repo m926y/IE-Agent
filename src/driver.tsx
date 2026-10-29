@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import { DriverReadError, DriverRiskPanel, DriverTrainingCard, numberText } from "./driver-learning";
+import { DriverEvidence } from "./driver-evidence";
 import type { FleetSummary } from "./api";import type { MeUser } from "./api";
-import { ApiError, fleetSummary, getOwnProfile, updateOwnProfile, getData, interventionRead, interventionReply, logout, myNotes, noteRead, rrCreate, taskSaveDraft, taskStart, taskSubmit } from "./api";
-import { Banner, EmptyState, ResourceTable, Tag, GlobalSearch} from "./ui";
+import { ApiError, fleetSummary, getOwnProfile, updateOwnProfile, getData, interventionRead, interventionReply, logout, myNotes, noteRead, rrCreate } from "./api";
+import { Banner, EmptyState, Tag, GlobalSearch} from "./ui";
 
 function FleetStatsPanel() {
   const [fs, setFs] = useState<FleetSummary | "loading" | "error" | null>(null);
@@ -42,23 +44,39 @@ function TabBtn({ active, ico, label, onClick }: { active: boolean; ico: string;
 
 function MyHistory() {
   const [rows, setRows] = useState<Record<string, unknown>[] | null | "error">(null);
-  useEffect(() => { getData<Record<string, unknown>>("my.score_history", { limit: 20, order: "as_of_date.desc" }).then((r) => setRows([...r.rows].sort((a, b) => String(a.as_of_date).localeCompare(String(b.as_of_date))))).catch(() => setRows("error")); }, []);
+  const [offset, setOffset] = useState(0);
+  const [more, setMore] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const [selectedEvidence, setSelectedEvidence] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true; setRows(null); setSelectedEvidence(null);
+    getData<Record<string, unknown>>("my.score_history", { limit: 20, offset }).then(r => {
+      if (!active) return;
+      setRows([...r.rows].reverse());
+      setMore(r.total === null ? r.rows.length === 20 : offset + r.rows.length < r.total);
+    }).catch(() => { if (active) setRows("error"); });
+    return () => { active = false; };
+  }, [offset, retry]);
   const DIMS = [["history_contribution", "历史"], ["fatigue_distraction_contribution", "疲劳分心"], ["driving_stability_contribution", "驾驶稳定性"], ["road_rule_contribution", "道路规则"], ["management_contribution", "管理配合"], ["imu_evidence_contribution", "IMU证据"]];
   const COLORS = ["#a480c4", "#b298d2", "#9b80bc", "#cab6dd", "#b68dbd", "#c4aed4"];
-  if (rows === "error") return <div className="panel"><EmptyState kind="error" /></div>;
+  if (rows === "error") return <div className="panel"><EmptyState kind="error" onRetry={() => setRetry(v => v + 1)} /></div>;
   if (!rows) return <div className="panel"><EmptyState kind="loading" /></div>;
   const last = rows[rows.length - 1] || {};
   const maxd = Math.max(...DIMS.map(([k]) => Number(last[k] ?? 0) || 0), 1e-9);
   return <div className="panel"><h3>评分历史与六维</h3>
-    <div className="table-wrap" style={{ marginBottom: 10 }}><table><thead><tr><th>截止日</th><th>安全分</th><th>等级</th><th>可信度</th></tr></thead><tbody>
-      {rows.map((r) => <tr key={String(r.score_id)}><td>{String(r.as_of_date)}</td><td>{Number(r.safety_score).toFixed(2)}</td><td>{String(r.risk_level)}</td><td>{String(r.confidence_level)}</td></tr>)}
+    <p className="meta">每页20条实际评价记录，第一页为最近记录，页内按时间顺序展示。近14天滚动评价不等同于独立周评分，版本或覆盖不一致时不能直接比较。</p>
+    {rows.length === 0 && <p>暂无评分历史，未将缺失分值显示为0。</p>}
+    <div className="table-wrap" style={{ marginBottom: 10 }}><table><thead><tr><th>截止日</th><th>安全分</th><th>等级</th><th>可信度</th><th>来源版本</th><th>依据</th></tr></thead><tbody>
+      {rows.map((r) => <tr key={String(r.score_id)}><td>{String(r.as_of_date)}</td><td>{numberText(r.safety_score)}</td><td>{String(r.risk_level || "—")}</td><td>{String(r.confidence_level || "—")}</td><td>{String(r.source_version || "未取得")}</td><td><button className="btn" aria-label={`查看 ${String(r.as_of_date)} 评分依据`} onClick={() => setSelectedEvidence(String(r.score_id))}>查看依据</button></td></tr>)}
     </tbody></table></div>
+    {selectedEvidence && <DriverEvidence key={selectedEvidence} kind="score_history" id={selectedEvidence} initialOpen />}
     {DIMS.map(([k, label], i) => <div key={k} className="row" style={{ marginBottom: 4 }}>
       <span style={{ width: 90, fontSize: 12.5, color: "var(--ink-2)" }}>{label}</span>
       <span style={{ height: 12, width: `${(Number(last[k] ?? 0) / maxd) * 40}%`, minWidth: 2, background: COLORS[i], borderRadius: 3, display: "inline-block" }} />
-      <span className="mono">{last[k] == null ? "—" : Number(last[k]).toFixed(2)}</span>
+      <span className="mono">{last[k] == null ? "—" : numberText(last[k])}</span>
     </div>)}
-    <p className="login-note">六维为最后一日（{String(last.as_of_date ?? "—")}）快照值，只读事实；“无事件”不等于“无覆盖”，本页不补造数据。</p>
+    <p className="login-note">六维为本页最近一日（{String(last.as_of_date ?? "—")}）快照值；翻至历史页时不代表当前最新状态。只读事实，不补造数据。</p>
+    <div className="row" aria-label="评分历史分页"><button className="btn" disabled={offset === 0} onClick={() => setOffset(v => Math.max(0, v - 20))}>较新评分</button><span>第 {offset / 20 + 1} 页</span><button className="btn" disabled={!more} onClick={() => setOffset(v => v + 20)}>更早评分</button></div>
   </div>;
 }
 
@@ -73,7 +91,8 @@ function RRRequestPanel({ unbound }: { unbound: boolean }) {
   const [scoreId, setScoreId] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [mine, setMine] = useState<Record<string, unknown>[] | null>(null);
-  const load = () => getData<Record<string, unknown>>("my.review_requests", { limit: 20 }).then((r) => setMine(r.rows)).catch(() => setMine([]));
+  const [mineError, setMineError] = useState<unknown>(null);
+  const load = () => { setMineError(null); getData<Record<string, unknown>>("my.review_requests", { limit: 20 }).then((r) => setMine(r.rows)).catch(setMineError); };
   useEffect(() => { if (!unbound) { load(); getData<Record<string, unknown>>("my.score", { limit: 1 }).then((r) => setScoreId(String(r.rows[0]?.score_id || ""))).catch(() => {}); } }, [unbound, msg]);
   function submit() {
     setMsg(null);
@@ -90,9 +109,9 @@ function RRRequestPanel({ unbound }: { unbound: boolean }) {
     <button className="btn primary" onClick={submit} disabled={!desc.trim() || !scoreId}>提交复核申请</button>
     {msg && <div className="alert info">{msg}</div>}
     <h4 style={{ fontSize: 13, marginTop: 10 }}>我的申请与处理记录</h4>
-    {mine === null && <EmptyState kind="loading" />}
-    {mine && mine.length === 0 && <p className="login-note">暂无申请。</p>}
-    {(mine || []).map((x) => <div key={String(x.request_id)} className="task-card"><div className="t"><span className="mono">{String(x.request_id)}</span> · <Tag tone={String(x.status) === "closed" ? "gray" : String(x.status) === "answered" ? "green" : "blue"}>{String(x.status)}</Tag></div>
+    {mineError ? <DriverReadError error={mineError} retry={load} /> : mine === null && <EmptyState kind="loading" />}
+    {!mineError && mine && mine.length === 0 && <p className="login-note">暂无申请。</p>}
+    {(!mineError ? mine || [] : []).map((x) => <div key={String(x.request_id)} className="task-card"><div className="t"><span className="mono">{String(x.request_id)}</span> · <Tag tone={String(x.status) === "closed" ? "gray" : String(x.status) === "answered" ? "green" : "blue"}>{String(x.status)}</Tag></div>
       <div className="meta">{RR_REASONS.find((k) => k[0] === x.reason_code)?.[1] || String(x.reason_code)} · 针对 {String(x.score_id || x.evidence_id)}</div>
       <div className="meta">我的原文：{String(x.description)}</div>
       {x.review_note ? <div className="meta">安全员答复（{String(x.reviewer_id)} @ {String(x.updated_at)}）：{String(x.review_note)}</div> : null}
@@ -107,11 +126,12 @@ function OwnScoreDetail() {
   if (row === "error") return <EmptyState kind="error" />;
   if (!row) return <><div className="panel score-hero"><div className="l">近 14 天安全评分</div><div className="n">—</div><div className="l">暂无评分记录</div></div><FleetStatsPanel /></>;
   const low = row.confidence_level === "low";
+  const confidenceTone = low ? "amber" : row.confidence_level === "high" ? "green" : row.confidence_level === "medium" ? "blue" : "gray";
   return <div className="stack">
     <div className="panel score-hero">
-      <div className="n" style={{ color: "var(--ink)" }}>{Number(row.safety_score).toFixed(2)}</div>
-      <div className="l">近14天安全评分 · {String(row.as_of_date)} · <Tag tone={low ? "amber" : "green"}>{String(row.confidence_level)}{low ? " · 建议先核验设备/数据" : ""}</Tag></div>
-      <div className="l">等级 {String(row.risk_level)}· 7 天变化 {row.score_change_7d == null ? "—" : Number(row.score_change_7d).toFixed(2)}</div>
+      <div className="n" style={{ color: "var(--ink)" }}>{numberText(row.safety_score)}</div>
+      <div className="l">近14天安全评分 · {String(row.as_of_date || "未取得")} · <Tag tone={confidenceTone}>{String(row.confidence_level || "可信度未取得")}{low ? " · 建议先核验设备/数据" : ""}</Tag></div>
+      <div className="l">等级 {String(row.risk_level || "未取得")}· 7 天变化 {row.score_change_7d == null ? "—" : numberText(row.score_change_7d)}</div>
     </div>
     {low && <Banner tone="warn">可信度低：说明数据覆盖或设备状态待核实，先做数据/设备核验，不会被当作“安全”或自动奖惩。</Banner>}
     <FleetStatsPanel />
@@ -119,8 +139,9 @@ function OwnScoreDetail() {
       <span className="kk">主风险维度</span><b>{{history:"历史事故与未遂", fatigue_distraction:"疲劳与分心", driving_stability:"驾驶稳定性", road_rule:"道路规则", management:"管理配合", imu_evidence:"IMU证据"}[String(row.primary_risk_dimension)] || String(row.primary_risk_dimension || "—")}</b>
       <span className="kk">建议动作</span><b>{String(row.recommended_action ?? "—")}</b>
       <span className="kk">首要扣分原因</span><b>{String(row.top_reason_1 ?? "—")}</b>
-      <span className="kk">未来40天预测</span><b>{row.forecast_40d_risk_prob == null ? "—" : (Number(row.forecast_40d_risk_prob) * 100).toFixed(2) + "%"}<small className="forecast-note">预测概率</small></b>
+      <span className="kk">未来40天预测</span><b>{row.forecast_40d_risk_prob == null || String(row.forecast_40d_risk_prob).trim() === "" || !Number.isFinite(Number(row.forecast_40d_risk_prob)) ? "—" : numberText(Number(row.forecast_40d_risk_prob) * 100) + "%"}<small className="forecast-note">预测概率</small></b>
     </div></div>
+    <DriverEvidence kind="score" id={String(row.score_id || "")} label="查看本次评分依据" />
     <MyHistory />
   </div>;
 }
@@ -129,9 +150,11 @@ function OwnScoreDetail() {
 function NotesInbox() {
   const [rows, setRows] = useState<Record<string, unknown>[] | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
-  const load = () => myNotes().then((r) => setRows(r.rows)).catch(() => setRows([]));
+  const [error, setError] = useState<unknown>(null);
+  const load = () => { setError(null); myNotes().then((r) => setRows(r.rows)).catch(setError); };
   useEffect(() => { load(); }, []);
   function read(id: string) { noteRead(id).then((r: { idempotent_replay?: boolean }) => { setMsg(r.idempotent_replay ? "此前已读（幂等）" : "已标记已读"); load(); }).catch((e: unknown) => setMsg(`拒绝：${e instanceof ApiError ? e.code : "net"}`)); }
+  if (error) return <DriverReadError error={error} retry={load} />;
   if (!rows) return <EmptyState kind="loading" />;
   return <div className="panel"><h3>站内消息</h3>
     {rows.length === 0 && <p className="login-note">暂无消息。</p>}
@@ -182,17 +205,18 @@ function MyRisk({ user }: { user: MeUser }) {
   const [msg, setMsg] = useState<string | null>(null);
   const [rep, setRep] = useState<Record<string, string>>({});
   useEffect(() => {
-    if (!user.driverId) { setRows("blocked"); return; }
+    if (!user.driverId || !user.bindingVerified) { setRows("blocked"); return; }
     getData<Record<string, unknown>>("my.interventions", { limit: 50 }).then((r) => setRows(r.rows)).catch(() => setRows("error"));
-  }, [user.driverId]);
+  }, [user.driverId, user.bindingVerified]);
   async function read(id: string) { setMsg(null); try { const r = await interventionRead(id); setMsg(r.idempotent_replay ? `幂等：已存在已读记录 ${r.read_at}` : `已标记已读 ${r.read_at}`); refresh(); } catch (e) { setMsg(`拒绝：${e instanceof ApiError ? e.code : "network"}`); } }
   async function reply(id: string) { setMsg(null); try { const r = await interventionReply(id, rep[id] || ""); setMsg(r.idempotent_replay ? `幂等：已有回复（${r.replied_at}），未重复写入` : `回复已发送 ${r.replied_at}`); refresh(); } catch (e) { setMsg(`拒绝：${e instanceof ApiError ? e.code : "network"}`); } }
-  function refresh() { if (user.driverId) getData<Record<string, unknown>>("my.interventions", { limit: 50 }).then((r) => setRows(r.rows)).catch(() => {}); }
+  function refresh() { if (user.driverId && user.bindingVerified) getData<Record<string, unknown>>("my.interventions", { limit: 50 }).then((r) => setRows(r.rows)).catch(() => setRows("error")); }
   if (rows === "blocked") return <EmptyState kind="nocov" hint="当前账号无核实有效绑定：不展示个人风险明细，且消息不会向其送达。" />;
-  if (rows === "error" || rows === null) return <EmptyState kind={rows === "error" ? "error" : "loading"} />;
+  if (rows === "error" || rows === null) return <div className="stack"><DriverRiskPanel /><EmptyState kind={rows === "error" ? "error" : "loading"} onRetry={refresh} /></div>;
   const mine = rows.filter((r) => ["sent", "read", "replied"].includes(String(r.status)));
   return <div className="stack">
-    <h3 style={{ fontSize: 15 }}>今日风险与人工沟通</h3>
+    <DriverRiskPanel />
+    <h3 style={{ fontSize: 15 }}>安全员干预沟通（全部日期）</h3>
     {rows.length === 0 && <EmptyState kind="nomatch" hint="暂无沟通记录" />}
     {rows.length > 0 && mine.length === 0 && <EmptyState kind="nomatch" hint="有记录但均未发送给你（当前均处草稿/内部状态）。" />}
     {mine.map((r) => <div className="task-card" key={String(r.intervention_id)}>
@@ -212,37 +236,18 @@ function MyRisk({ user }: { user: MeUser }) {
 }
 
 function MyTraining() {
-  const [rows, setRows] = useState<Record<string, unknown>[] | null | "blocked" | "error">(null);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [edits, setEdits] = useState<Record<string, string>>({});
-  const [fbs, setFbs] = useState<Record<string, string>>({});
-  const load = () => { getData<Record<string, unknown>>("my.trainings", { limit: 50 }).then((r) => setRows(r.rows)).catch(() => setRows("error")); };
-  useEffect(() => { load(); }, []);
-  if (rows === "blocked" || rows === null && false) return <EmptyState kind="nocov" hint="无有效绑定" />;
-  if (rows === "error") return <EmptyState kind="error" onRetry={load} />;
-  if (rows === null) return <EmptyState kind="loading" />;
-  function busy(fn: () => Promise<{ idempotent_replay?: boolean; status?: string; new_status?: string }>, ok: string) { setMsg(null); fn().then((r) => { setMsg(r.idempotent_replay ? `幂等：返回既有状态（${r.status || r.new_status}），未重复写入` : ok); load(); }).catch((e) => setMsg(`拒绝：${e instanceof ApiError ? e.code : "network"}`)); }
-  return <div className="stack">
-    <h3 style={{ fontSize: 15 }}>培训任务</h3>
-    {rows.length === 0 && <EmptyState kind="nomatch" hint="暂无培训任务" />}
-    {rows.map((r) => { const editable = ["assigned", "in_progress", "returned"].includes(String(r.status)); const done = ["submitted", "reviewed", "observation", "interview"].includes(String(r.status)); const overdue = editable && r.due_at && new Date(String(r.due_at)) < new Date();
-      return <div key={String(r.task_id)} className="task-card">
-        <div className="t">{String(r.goal || r.task_id)}{r.mandatory ? <Tag tone="red"> 强制</Tag> : null} {overdue ? <Tag tone="red">逾期</Tag> : null}</div>
-        <div className="meta">课程 {String(r.course_id)} · 截止 {String(r.due_at || "—")} · 状态 <Tag tone={done ? "green" : "blue"}>{String(r.status)}</Tag>{r.submitted_at ? <> · 提交于 {String(r.submitted_at)}</> : null}</div>
-        {editable && <>
-          <div className="field" style={{ marginTop: 6 }}><label>学习记录（事件复盘 + 行动；保存≠提交）</label>
-            <textarea style={{ width: "100%", minHeight: 66, borderRadius: 8, border: "1px solid var(--line)", padding: 8, font: "inherit" }} value={edits[String(r.task_id)] ?? String(r.learning_record || "")} onChange={(e) => setEdits((s) => ({ ...s, [String(r.task_id)]: e.target.value }))} aria-label="学习记录" /></div>
-          <input style={{ width: "100%", borderRadius: 8, border: "1px solid var(--line)", padding: 8, margin: "4px 0" }} value={fbs[String(r.task_id)] ?? ""} onChange={(e) => setFbs((s) => ({ ...s, [String(r.task_id)]: e.target.value }))} placeholder="反馈（可选）" aria-label="反馈" />
-          <div className="row">
-            {r.status === "assigned" || r.status === "returned" ? <button className="btn" onClick={() => { setMsg(null); taskStart(String(r.task_id)).then((x) => { setMsg(x.idempotent_replay ? `已开始（既有 ${x.started_at}）` : "任务已开始，进入进行中"); load(); }).catch((e) => setMsg(`拒绝：${e instanceof ApiError ? e.code : "network"}`)); }}>开始学习</button> : null}
-            <button className="btn" onClick={() => busy(() => taskSaveDraft(String(r.task_id), edits[String(r.task_id)] || String(r.learning_record || "")) as never, "草稿已保存（未提交）")}>保存草稿</button>
-            <button className="btn primary" style={{ width: "auto" }} onClick={() => busy(() => taskSubmit(String(r.task_id), edits[String(r.task_id)] || String(r.learning_record || ""), fbs[String(r.task_id)] || "") as never, "已提交，等待安全员复核（通知对方）")}>提交学习记录</button>
-          </div>
-          <p className="login-note">仅本人、仅未提交状态可改；提交后正文与时间持久化并由安全员在复核台处理。</p>
-        </>}
-        {done && <p className="login-note">{r.review_note ? `复核：${String(r.review_note)} @ ${String(r.reviewed_at)}` : "已提交，等待复核"}</p>}
-      </div>; })}
-    {msg && <div className="alert info">{msg}</div>}
+  const [rows, setRows] = useState<Record<string, unknown>[] | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [offset, setOffset] = useState(0);
+  const [more, setMore] = useState(false);
+  const load = () => { setError(null); getData<Record<string, unknown>>("my.trainings", { limit: 20, offset }).then(r => { setRows(r.rows); setMore(r.rows.length === 20); }).catch(setError); };
+  useEffect(() => { setRows(null); load(); }, [offset]);
+  if (error) return <DriverReadError error={error} retry={load} />;
+  if (!rows) return <EmptyState kind="loading" />;
+  return <div className="stack"><h3>培训任务</h3><button className="btn" onClick={load}>刷新任务状态</button>
+    {rows.length === 0 && <EmptyState kind="nomatch" hint="本页暂无培训任务。" />}
+    {rows.map(r => <DriverTrainingCard key={String(r.task_id)} row={r} reload={load} />)}
+    <div className="row"><button className="btn" disabled={offset === 0} onClick={() => setOffset(v => Math.max(0, v - 20))}>上一页</button><span>第 {offset / 20 + 1} 页</span><button className="btn" disabled={!more} onClick={() => setOffset(v => v + 20)}>下一页</button></div>
   </div>;
 }
 
@@ -285,6 +290,7 @@ export function DriverShell({ user }: { user: MeUser }) {
     </header>
     <main className="driver-main">
       <div className="driver-safety-note">停车后操作</div>
+      {user.localSourceOnly && <Banner tone="warn">数据来自IE亮剑历史材料；无实时监控或专业测验。课程状态和人工复核以实际记录为准。</Banner>}
       {active.el(user)}
     </main>
     <nav className="tabbar">

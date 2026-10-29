@@ -107,9 +107,9 @@ test("build emits a standalone dynamic QW Page and serves healthy root", async (
   try {
     await cp(publishRoot, appRoot, { recursive: true });
     await runCommand(
-      "npm",
-      ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
-      { cwd: appRoot },
+      process.execPath,
+      [process.env.npm_execpath || join(process.execPath, "..", "node_modules", "npm", "bin", "npm-cli.js"), "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
+      { cwd: appRoot, env: { ...process.env, npm_config_cache: join(writableRoot, "npm-cache") } },
     );
     await setTreeWritable(appRoot, false);
 

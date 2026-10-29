@@ -142,7 +142,7 @@ function resolveDbTarget() {
 }
 
 async function dbRequest(op, method, path, { query, body, headers } = {}) {
-  if (!SAFE_DATABASE_OPERATIONS.has(op)) throw new HttpError(500, "internal_error");
+  if (!SAFE_DATABASE_OPERATIONS.has(op) && op !== "task_learning_get") throw new HttpError(500, "internal_error");
   let target;
   try { target = resolveDbTarget(); } catch (error) {
     return handleDbError(op, error, null);
@@ -169,6 +169,7 @@ async function dbRequest(op, method, path, { query, body, headers } = {}) {
   if (!response.ok) {
     let code = "";
     try { const j = await response.json(); code = String(j?.code || j?.error || j?.message || "").slice(0, 32); } catch { /* ignore body */ }
+    if (op === "task_learning_get" && ["42703", "PGRST204"].includes(code)) throw new HttpError(503, "learning_migration_required");
     if (response.status === 409 || code === "23505" || code === "23P01") throw new HttpError(409, "db_conflict");
     console.error("DB_DETAIL", op, response.status, code, (response.headers.get("content-type") || ""));
     try { const tb = await response.clone().text(); tb && console.error("DB_BODY", tb.slice(0, 260)); } catch {}
@@ -416,7 +417,7 @@ const RESOURCE_DEFS = {
   "my.score": { table: "score_snapshots", order: "as_of_date.desc",
     cols: "score_id,safety_score,rank,risk_level,score_change_7d,confidence_level,as_of_date,window_start,top_reason_1,top_reason_2,top_reason_3,primary_risk_dimension,recommended_action,behavior_safety_score,confidence_adjusted_floor,forecast_40d_risk_prob,source_version,history_contribution,fatigue_distraction_contribution,driving_stability_contribution,road_rule_contribution,management_contribution,imu_evidence_contribution",
     roles: ["driver"], cap: "view.my_score", injectDriver: "driver_id" },
-  "my.score_history": { table: "score_history", order: "as_of_date.asc",
+  "my.score_history": { table: "score_history", order: "as_of_date.desc,score_id.desc",
     cols: "score_id,as_of_date,safety_score,risk_level,confidence_level,history_contribution,fatigue_distraction_contribution,driving_stability_contribution,road_rule_contribution,management_contribution,imu_evidence_contribution,source_version",
     roles: ["driver"], cap: "view.my_score", injectDriver: "driver_id" },
   "my.review_requests": { table: "review_requests", order: "created_at.desc",
@@ -504,10 +505,11 @@ async function listResource(principal, resName, url) {
   return { table: def.table, rows: result.data ?? [], total: parseCount(result.rangeHeader), limit, offset };
 }
 
-function requireUser(principal) {
+function requireUser(principal, capability = null) {
   const u = principal?.user;
   if (!u) throw new HttpError(401, "unauthenticated");
   if (u.account_status && u.account_status !== "active") throw new HttpError(403, "account_disabled");
+  if (capability && !ROLE_CAPABILITIES[u.role]?.has(capability)) throw new HttpError(403, "forbidden");
   return u;
 }
 
@@ -576,12 +578,13 @@ async function handleLogout(request, response, url, ctx) {
 function publicUser(u, authKind) {
   return {
     userId: u.user_id, username: u.username || null, displayName: u.display_name || "", role: u.role,
+    localSourceOnly: process.env.IE_LOCAL_SOURCE_ONLY === "1",
     fleetScope: u.fleet_scope || null, driverId: u.driver_id || null, binding_verified: Boolean(u.binding_verified), bindingVerified: Boolean(u.binding_verified),
     bindingVerified: Boolean(u.binding_verified), bindingNote: u.binding_note || null, accountStatus: u.account_status || "active",
     authKind,
     capabilities: [...(ROLE_CAPABILITIES[u.role] || [])],
     allowedResources: Object.entries(RESOURCE_DEFS).filter(([, d]) => d.roles.includes(u.role)).map(([k]) => k),
-    ssoEnabled: SSO_TRUST, dataManifest: "snapshot_ffbc02143fcb / as_of 2026-07-31 · drivers/score_snapshots/risk_snapshots 已导入（500/表）；score_history、deduction_ledger、review_queue、replay_events 等待导入",
+    ssoEnabled: SSO_TRUST, dataManifest: process.env.IE_DATA_MANIFEST || "数据以实际查询结果为准；演示身份不代表真实司机核验",
   };
 }
 
@@ -1264,33 +1267,46 @@ async function resolveTemplateForSend(templateRef, scene, facts) {
 }
 
 async function handleTrainingAssign(request, response, url, ctx) {
-  const user = requireUser(ctx.principal);
+  const user = requireUser(ctx.principal, "assign.training");
   const body = await readBody(request);
   await assertInScope(ctx.principal, { driverId: String(body.driver_id || "") });
   const courseId = String(body.course_id || "").slice(0, 40);
   const driverId = String(body.driver_id || "").slice(0, 60);
   if (!courseId || !driverId) throw new HttpError(400, "bad_request");
-  const c = await dbRequest("get_course_row", "GET", "training_courses", { query: { course_id: `eq.${courseId}`, select: "course_id,title,content_status" } });
+  const alertIdIn = String(body.alert_id || "").slice(0, 60);
+  const idem = String(body.idempotency_key || `assign:${courseId}:${driverId}:${alertIdIn || "none"}`).slice(0, 120);
+  const dup = await dbRequest("count_ops_rows", "GET", "training_tasks", { query: { idempotency_key: `eq.${idem}`, select: "task_id,status,updated_at,driver_id,course_id,alert_id,mandatory", limit: 1 } });
+  if (dup.data?.length) {
+    const old = dup.data[0];
+    if (old.driver_id !== driverId || old.course_id !== courseId || String(old.alert_id || "") !== alertIdIn) throw new HttpError(409, "assignment_idempotency_conflict");
+    const notification = await taskNotification(old, "assigned");
+    return sendJson(response, 200, { ok: true, idempotent_replay: true, task_id: old.task_id, status: old.status, mandatory: old.mandatory, created_at: old.updated_at, notification, assigned_notification: notification.notification_id });
+  }
+  const c = await dbRequest("get_course_row", "GET", "training_courses", { query: { course_id: `eq.${courseId}`, select: "course_id,title,content,completion_requirement,content_status,version_no,source_version" } });
   const course = c.data?.[0];
   if (!course) throw new HttpError(404, "not_found");
   if (course.content_status !== COURSE_APPROVED) throw new HttpError(409, "course_not_approved");
   const b = await dbRequest("get_binding_target", "GET", "user_bindings", {
-    query: { driver_id: `eq.${driverId}`, account_status: "eq.active", select: "binding_id,user_id,identity_status", limit: 1 },
+    query: { driver_id: `eq.${driverId}`, account_status: "eq.active", identity_status: "eq.已核实", select: "binding_id,user_id,identity_status", limit: 1 },
   });
   if (!b.data?.[0]) {
     const drv = await dbRequest("get_binding_target", "GET", "app_users", { query: { driver_id: `eq.${driverId}`, account_status: "eq.active", select: "user_id,binding_verified", limit: 1 } });
     if (!drv.data?.[0]?.binding_verified) throw new HttpError(409, "driver_binding_unverified");
   }
-  const alertIdIn = String(body.alert_id || "").slice(0, 60);
   if (alertIdIn) {
     const av = await dbRequest("get_alert_row", "GET", "alerts", { query: { alert_id: `eq.${alertIdIn}`, select: "alert_id,gpsno,driver_id,status", limit: 1 } });
     const ar = av.data?.[0];
     if (!ar) throw new HttpError(409, "evidence_alert_not_found");
     if (ar.driver_id && ar.driver_id !== driverId) throw new HttpError(409, "evidence_driver_mismatch");
   }
-  const idem = String(body.idempotency_key || `assign:${courseId}:${driverId}:${alertIdIn || "none"}`).slice(0, 120);
-  const dup = await dbRequest("count_ops_rows", "GET", "training_tasks", { query: { idempotency_key: `eq.${idem}`, select: "task_id,status,updated_at", limit: 1 } });
-  if (dup.data?.length) return sendJson(response, 200, { ok: true, idempotent_replay: true, task_id: dup.data[0].task_id, status: dup.data[0].status, created_at: dup.data[0].updated_at });
+  if (!(await taskLearning({ task_id: "__schema_probe__" })).available) throw new HttpError(503, "learning_migration_required");
+  let assignNoteUsed = null;
+  let msg = `新培训任务（课程 ${courseId}），请在“培训任务”查看并完成；本消息为站内演示通知，非外部渠道送达。`;
+  // Validate all caller-controlled content before creating the task.
+  if (body.template_ref) {
+    try { const tr = await resolveTemplateForSend(body.template_ref, "task_assigned", { driver_id: driverId, alert_id: alertIdIn, event_date: null, evidence_type: null, review_note: null }); if (!tr) throw new HttpError(503, "template_unavailable"); msg = tr.body + `\n（模板 ${tr.template_key}:v${tr.version}；本消息为站内演示通知，非外部渠道送达）`; assignNoteUsed = tr; }
+    catch (e) { if (String(e?.message) === "template_not_usable") throw new HttpError(409, "template_not_approved_or_disabled"); throw e; }
+  }
   // R37④：mandatory 缺省=按现行映射（等级→mandatory/optional）自动设定；表单显式值=人工改判（审计留 policy_expected）
   let mand = Boolean(body.mandatory); let mandSrc = "manual";
   const mp = await loadMandatePolicy();
@@ -1303,21 +1319,12 @@ async function handleTrainingAssign(request, response, url, ctx) {
   const at = nowIso();
   const taskId = newId("task");
   await dbRequest("insert_task_row", "POST", "training_tasks", {
-    body: [{ task_id: taskId, driver_id: driverId, alert_id: String(body.alert_id || ""), course_id: courseId, goal: String(body.goal || "").slice(0, 500), mandatory: mand, due_at: String(body.due_at || at), status: "assigned", created_by: user.user_id, idempotency_key: idem, updated_at: at }],
+    body: [{ task_id: taskId, driver_id: driverId, alert_id: alertIdIn, course_id: courseId, course_snapshot: { ...course, captured_at: at, captured_stage: "assignment", assignment_notice: { text: msg } }, goal: String(body.goal || "").slice(0, 500), mandatory: mand, due_at: String(body.due_at || at), status: "assigned", created_by: user.user_id, idempotency_key: idem, updated_at: at }],
     headers: { Prefer: "return=minimal" },
   });
-  let notif = null;
-  const acct0 = await dbRequest("get_binding_target", "GET", "app_users", { query: { driver_id: `eq.${driverId}`, account_status: "eq.active", binding_verified: "eq.true", select: "user_id", limit: 1 } });
-  let assignNoteUsed = null;
-  { const defMsg = `新培训任务（课程 ${courseId}），请在“培训任务”查看并完成；本消息为站内演示通知，非外部渠道送达。`;
-    let msg = defMsg;
-    if (body.template_ref) {
-      try { const tr = await resolveTemplateForSend(body.template_ref, "task_assigned", { driver_id: String(driverId), alert_id: String(body.alert_id || ""), event_date: null, evidence_type: null, review_note: null }); msg = tr.body + "\n（模板 " + tr.template_key + ":v" + tr.version + " 审核人 " + (tr.template_id && tr.template_id ? "已审核" : "") + "；本消息为站内演示通知，非外部渠道送达）"; assignNoteUsed = tr; }
-      catch (e) { if (String(e && e.message) === "template_not_usable") throw new HttpError(409, "template_not_approved_or_disabled"); throw e; }
-    }
-    if (acct0.data?.[0]) notif = await notify(acct0.data[0].user_id, "task_assigned", taskId, msg, `notif:taskas:${taskId}`); }
+  const notification = await taskNotification({ task_id: taskId, driver_id: driverId, course_id: courseId, status: "assigned" }, "assigned", msg);
   const auditId = await appendAudit(ctx.principal, "training.assign", "training_task", taskId, null, "assigned", ctx.requestId, null, { mandatory: mand, mandatory_source: mandSrc, policy_expected: wants || null, policy_level: lvlNow || null, template_ref: assignNoteUsed ? { template_id: assignNoteUsed.template_id, key: assignNoteUsed.template_key, version: assignNoteUsed.version } : null });
-  sendJson(response, 200, { ok: true, task_id: taskId, audit_id: auditId, mandatory: mand, mandatory_source: mandSrc, assigned_notification: notif, note: "司机为演示绑定身份，通知≠外发送达" });
+  sendJson(response, 200, { ok: true, task_id: taskId, audit_id: auditId, mandatory: mand, mandatory_source: mandSrc, course_version: course.version_no, course_snapshot_saved: true, assigned_notification: notification.notification_id, notification, note: "任务已保存；通知以独立回执为准，站内记录不等于已读或外发送达" });
 }
 
 
@@ -1569,6 +1576,109 @@ const TASK_FSM_SUBMIT = ["assigned", "in_progress", "returned"];
 const TASK_FSM_START = ["assigned", "returned"];
 const TASK_FSM_REVIEW = ["submitted"];
 
+function requireVerifiedDriver(principal) {
+  const user = requireUser(principal);
+  if (user.role !== "driver") throw new HttpError(403, "forbidden");
+  if (!user.driver_id) throw new HttpError(409, "binding_required");
+  if (!user.binding_verified) throw new HttpError(403, "binding_not_verified");
+  return user;
+}
+
+async function handleDriverRiskCenter(request, response, url, ctx) {
+  const user = requireVerifiedDriver(ctx.principal);
+  const date = url.searchParams.get("date") || new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new HttpError(400, "invalid_date");
+  const pageNumber = (key, fallback, max) => {
+    const raw = url.searchParams.get(key);
+    if (raw === null) return fallback;
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw) > max) throw new HttpError(400, "invalid_pagination");
+    return Number(raw);
+  };
+  const limit = pageNumber("limit", 100, 100);
+  if (limit < 1) throw new HttpError(400, "invalid_pagination");
+  const eventsOffset = pageNumber("events_offset", 0, 1000000), alertsOffset = pageNumber("alerts_offset", 0, 1000000);
+  const start = new Date(date + "T00:00:00+08:00");
+  const end = new Date(start.getTime() + 86400000);
+  const [events, alerts, score, latest] = await Promise.all([
+    dbRequest("list_resource", "GET", "replay_events", { query: { driver_id: `eq.${user.driver_id}`, replay_date: `eq.${date}`, select: "event_id,event_time,event_type,event_name,speed_kmh,dimension,replay_date,is_replay,source_version", order: "event_time.asc,event_id.asc", limit: limit + 1, offset: eventsOffset } }),
+    dbRequest("list_resource", "GET", "alerts", { query: { driver_id: `eq.${user.driver_id}`, and: `(occurred_at.gte.${start.toISOString()},occurred_at.lt.${end.toISOString()})`, select: "alert_id,rule_code,evidence_id,occurred_at,status,is_replay", order: "occurred_at.desc,alert_id.desc", limit: limit + 1, offset: alertsOffset } }),
+    listResource(ctx.principal, "my.score", new URL("http://local/?limit=1")),
+    dbRequest("list_resource", "GET", "replay_events", { query: { driver_id: `eq.${user.driver_id}`, select: "replay_date", order: "replay_date.desc", limit: 1 } }),
+  ]);
+  const rows = events.data || [], ars = alerts.data || [];
+  sendJson(response, 200, { date, timezone: "Asia/Shanghai", source_type: "replay", queried_at: nowIso(), latest_replay_date: latest.data?.[0]?.replay_date || null, snapshot: score.rows[0] || null, events: rows.slice(0, limit), alerts: ars.slice(0, limit), pagination: { limit, events_offset: eventsOffset, alerts_offset: alertsOffset, events_has_more: rows.length > limit, alerts_has_more: ars.length > limit }, truncated: rows.length > limit || ars.length > limit, note: "历史回放记录与人工告警分开展示；预测是未来40天概率，不是当天事故事实。无记录不等于零风险。" });
+}
+
+async function handleDriverEvidence(request, response, url, ctx) {
+  const user = requireVerifiedDriver(ctx.principal);
+  const kind = url.searchParams.get("kind"), id = url.searchParams.get("id") || "";
+  const definitions = {
+    event: ["replay_events", "event_id", "event_id,event_time,event_type,event_name,speed_kmh,dimension,replay_date,is_replay,source_version"],
+    alert: ["alerts", "alert_id", "alert_id,gpsno,rule_code,evidence_id,occurred_at,status,is_replay"],
+    score: ["score_snapshots", "score_id", "score_id,gpsno,safety_score,risk_level,as_of_date,window_start,confidence_level,source_version,primary_risk_dimension,history_contribution,fatigue_distraction_contribution,driving_stability_contribution,road_rule_contribution,management_contribution,imu_evidence_contribution"],
+    score_history: ["score_history", "score_id", "score_id,gpsno,safety_score,risk_level,as_of_date,confidence_level,source_version,history_contribution,fatigue_distraction_contribution,driving_stability_contribution,road_rule_contribution,management_contribution,imu_evidence_contribution"],
+  };
+  const def = Object.hasOwn(definitions, kind) ? definitions[kind] : null;
+  const rawOffset = url.searchParams.get("offset") || "0";
+  if (!def || !/^[\w:.,-]{1,100}$/.test(id) || !/^\d+$/.test(rawOffset) || Number(rawOffset) > 1000000) throw new HttpError(400, "invalid_evidence_request");
+  const offset = Number(rawOffset);
+  const r = await dbRequest("list_resource", "GET", def[0], { query: { [def[1]]: `eq.${id}`, driver_id: `eq.${user.driver_id}`, select: def[2], limit: 1 } });
+  const record = r.data?.[0];
+  if (!record) throw new HttpError(404, "not_found");
+  let linked = null, linkedKind = null, ledger = [], ledgerStatus = "not_applicable", hasMore = false;
+  if (kind === "alert" && record.evidence_id) {
+    const queueSource = [DUAL_RULE, DATA_RULE].includes(record.rule_code);
+    const ev = queueSource ? { data: [] } : await dbRequest("list_resource", "GET", "replay_events", { query: { event_id: `eq.${record.evidence_id}`, driver_id: `eq.${user.driver_id}`, select: definitions.event[2], limit: 1 } });
+    linked = ev.data?.[0] || null; linkedKind = linked ? "event" : null;
+    // Queue evidence is shown only through an owned alert and its exact vehicle/date, never arbitrary IDs.
+    if (queueSource && record.gpsno && record.occurred_at) {
+      const day = /^\d{4}-\d{2}-\d{2}$/.test(record.occurred_at) ? record.occurred_at : Number.isFinite(Date.parse(record.occurred_at)) ? new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(record.occurred_at)) : null;
+      if (day) {
+        const q = await dbRequest("list_resource", "GET", "review_queue", { query: { queue_id: `eq.${record.evidence_id}`, gpsno: `eq.${record.gpsno}`, as_of_date: `eq.${day}`, select: "queue_id,as_of_date,safety_score,risk_level,forecast_40d_risk_prob,confidence_level,source_version", limit: 1 } });
+        linked = q.data?.[0] || null; linkedKind = linked ? "queue" : null;
+      }
+    }
+  }
+  if (["score", "score_history"].includes(kind)) {
+    ledgerStatus = "unavailable";
+    if (record.gpsno && record.as_of_date) {
+      const ls = await dbRequest("list_resource", "GET", "deduction_ledger", { query: { gpsno: `eq.${record.gpsno}`, as_of_date: `eq.${record.as_of_date}`, select: "ledger_id,event_type,dimension,event_count,allocated_points,dimension_points,allocation_rule,as_of_date,source_version", order: "ledger_id.asc", offset, limit: 21 } });
+      ledger = (ls.data || []).slice(0, 20); hasMore = (ls.data || []).length > 20;
+      ledgerStatus = ledger.length ? "available" : "no_records";
+    }
+  }
+  // Vehicle keys are used internally for authorization, not exposed as a general lookup capability.
+  const { gpsno, ...safeRecord } = record;
+  sendJson(response, 200, { kind, record: safeRecord, linked, linked_kind: linkedKind, ledger, ledger_status: ledgerStatus, offset, has_more: hasMore, queried_at: nowIso(), limitations: "只展示本人记录及其精确关联。台账为该评价日期的扣分分摊，不是单事件因果解释；来源版本可能不同，未核验时不能据此重算历史评分。无台账不等于零风险。" });
+}
+
+// Compare-and-set: only a successful transition may audit/notify. Stale drafts cannot overwrite a submission.
+async function patchTaskExpected(row, patch) {
+  const at = new Date(Math.max(Date.now(), (Date.parse(row.updated_at) || 0) + 1)).toISOString();
+  const result = await dbRequest("patch_task_row", "PATCH", "training_tasks", {
+    query: { task_id: `eq.${row.task_id}`, status: `eq.${row.status}`, updated_at: row.updated_at ? `eq.${row.updated_at}` : "is.null", select: "task_id,updated_at" },
+    body: { ...patch, updated_at: at }, headers: { Prefer: "return=representation" },
+  });
+  if (!result.data?.length) throw new HttpError(409, "task_version_conflict");
+  return result.data[0].updated_at || at;
+}
+
+function checkTaskClientVersion(row, body) {
+  if (Object.hasOwn(body, "expected_updated_at") && body.expected_updated_at !== (row.updated_at || null)) throw new HttpError(409, "task_version_conflict");
+}
+
+
+async function taskLearning(row) {
+  try {
+    const r = await dbRequest("task_learning_get", "GET", "training_tasks", { query: { task_id: `eq.${row.task_id}`, select: "course_snapshot", limit: 1 } });
+    return { available: true, ...(r.data?.[0] || {}) };
+  } catch (e) {
+    // Only an absent-column response is a migration gap; outages must stay visible.
+    if (e instanceof HttpError && e.code === "learning_migration_required") return { available: false };
+    throw e;
+  }
+}
+
 async function loadTask(id, asDriverId) {
   const q = { task_id: `eq.${id}`, select: "task_id,driver_id,alert_id,course_id,goal,mandatory,due_at,status,started_at,submitted_at,learning_record,feedback,reviewer_id,review_note,reviewed_at,created_by,idempotency_key,updated_at" };
   if (asDriverId) q.driver_id = `eq.${asDriverId}`;
@@ -1578,19 +1688,64 @@ async function loadTask(id, asDriverId) {
   return row;
 }
 async function notify(targetUserId, type, sourceId, content, idem, entity = "training_task", title = null) {
-  const dup = await dbRequest("count_task_notifs", "GET", "notification_events", { query: { idempotency_key: `eq.${idem}`, select: "notification_id", limit: 1 } });
-  if (dup.data?.[0]) return dup.data[0].notification_id;
+  const dup = await dbRequest("count_task_notifs", "GET", "notification_events", { query: { idempotency_key: `eq.${idem}`, select: "notification_id,target_user_id", limit: 1 } });
+  if (dup.data?.[0]) {
+    if (dup.data[0].target_user_id !== targetUserId) throw new HttpError(409, "notification_recipient_changed");
+    return dup.data[0].notification_id;
+  }
   const nid = newId("noti");
   const role = ["rr_submitted", "task_submitted"].includes(type) ? "safety_admin" : "driver";
-  await dbRequest("insert_task_notify", "POST", "notification_events", {
+  try { await dbRequest("insert_task_notify", "POST", "notification_events", {
     body: [{ notification_id: nid, target_user_id: targetUserId, target_role: role, source_entity_type: entity, source_entity_id: sourceId, type, title: title || (type.includes("assigned") ? "新的培训任务" : type.includes("submitted") ? "待复核提醒" : "处理进展提醒"), body: String(content).slice(0, 500), content: String(content).slice(0, 500), read_at: null, idempotency_key: idem, created_at: nowIso() }],
     headers: { Prefer: "return=minimal" },
-  });
+  }); } catch (e) {
+    if (!(e instanceof HttpError) || e.status !== 409) throw e;
+    const existing = await dbRequest("count_task_notifs", "GET", "notification_events", { query: { idempotency_key: `eq.${idem}`, select: "notification_id,target_user_id", limit: 1 } });
+    if (!existing.data?.[0] || existing.data[0].target_user_id !== targetUserId) throw e;
+    return existing.data[0].notification_id;
+  }
   return nid;
 }
 async function adminAccountId() {
   const a = await dbRequest("get_task_row", "GET", "app_users", { query: { role: "eq.safety_admin", account_status: "eq.active", select: "user_id", limit: 1 } });
   return a.data?.[0]?.user_id || null;
+}
+
+async function taskNotification(row, kind, assignedText = null) {
+  if ((kind === "assigned" && row.status !== "assigned") || (kind === "submitted" && row.status !== "submitted")) return { state: "not_needed", notification_id: null };
+  try {
+    let target, text, idem;
+    if (kind === "assigned") {
+      const acct = await dbRequest("get_binding_target", "GET", "app_users", { query: { driver_id: `eq.${row.driver_id}`, role: "eq.driver", account_status: "eq.active", binding_verified: "eq.true", select: "user_id", limit: 1 } });
+      target = acct.data?.[0]?.user_id;
+      if (!assignedText) { const learning = await taskLearning(row); assignedText = learning.course_snapshot?.assignment_notice?.text || null; }
+      text = assignedText || `培训任务 ${row.task_id}（课程 ${row.course_id}），请在培训任务中查看。站内通知不等于外部渠道送达。`;
+      idem = `notif:taskas:${row.task_id}`;
+    } else {
+      const admins = await dbRequest("get_binding_target", "GET", "app_users", { query: { role: "eq.safety_admin", account_status: "eq.active", select: "user_id,fleet_scope", order: "user_id.asc", limit: 100 } });
+      const candidates = [...(admins.data || [])].sort((a, b) => Number(b.user_id === row.created_by) - Number(a.user_id === row.created_by));
+      let fleet = null;
+      if (candidates.some(a => String(a.fleet_scope || "*") !== "*")) {
+        const d = await dbRequest("get_binding_target", "GET", "drivers", { query: { driver_id: `eq.${row.driver_id}`, select: "fleet_id", limit: 1 } }); fleet = d.data?.[0]?.fleet_id;
+      }
+      target = candidates.find(a => String(a.fleet_scope || "*") === "*" || (fleet && String(a.fleet_scope) === String(fleet)))?.user_id;
+      text = `司机 ${row.driver_id} 提交培训任务 ${row.task_id}，请在TR06复核。`; idem = `notif:tasksub:${row.task_id}`;
+    }
+    if (!target) return { state: "no_recipient", notification_id: null };
+    const notificationId = await notify(target, kind === "assigned" ? "task_assigned" : "task_submitted", row.task_id, text, idem);
+    return { state: "recorded", notification_id: notificationId };
+  } catch { return { state: "pending", notification_id: null }; }
+}
+
+async function handleTaskNotificationRetry(request, response, url, ctx, taskId) {
+  requireUser(ctx.principal, "assign.training");
+  const row = await loadTask(taskId, null);
+  await assertInScope(ctx.principal, { driverId: row.driver_id });
+  const body = await readBody(request);
+  if (!["assigned", "submitted"].includes(body.kind)) throw new HttpError(400, "invalid_notification_kind");
+  const receipt = await taskNotification(row, body.kind);
+  const auditId = await appendAudit(ctx.principal, "training.notification_retry", "training_task", taskId, null, receipt.state, ctx.requestId, null, { kind: body.kind, notification_id: receipt.notification_id });
+  sendJson(response, 200, { ok: true, task_id: taskId, notification: receipt, audit_id: auditId });
 }
 
 // ===== R24：TR06 AI 辅助摘要（受控、只读、结构化、可点击回源；不改业务状态） =====
@@ -1824,50 +1979,55 @@ async function handleTaskSummary(request, response, url, ctx) {
 }
 
 async function handleTaskStart(request, response, url, ctx, taskId) {
-  const user = requireUser(ctx.principal);
-  if (user.role !== "driver" || !user.driver_id) throw new HttpError(403, "forbidden");
+  const user = requireVerifiedDriver(ctx.principal);
   const row = await loadTask(taskId, user.driver_id);
+  checkTaskClientVersion(row, await readBody(request));
   if (row.status === "in_progress") return sendJson(response, 200, { ok: true, idempotent_replay: true, task_id: taskId, status: row.status, started_at: row.started_at });
   if (!TASK_FSM_START.includes(row.status)) throw new HttpError(409, `task_state_${row.status}_cannot_start`);
   const at = nowIso();
-  await dbRequest("patch_task_row", "PATCH", "training_tasks", { query: { task_id: `eq.${taskId}`, status: `eq.${row.status}` }, body: { status: "in_progress", started_at: row.started_at || at, updated_at: at }, headers: { Prefer: "return=minimal" } });
+  await patchTaskExpected(row, { status: "in_progress", started_at: row.started_at || at });
   const auditId = await appendAudit(ctx.principal, "training.start", "training_task", taskId, row.status, "in_progress", ctx.requestId);
   sendJson(response, 200, { ok: true, task_id: taskId, status: "in_progress", started_at: row.started_at || at, audit_id: auditId });
 }
 
 async function handleTaskDraftSave(request, response, url, ctx, taskId) {
-  const user = requireUser(ctx.principal);
-  if (user.role !== "driver" || !user.driver_id) throw new HttpError(403, "forbidden");
+  const user = requireVerifiedDriver(ctx.principal);
   const row = await loadTask(taskId, user.driver_id);
   if (!TASK_EDITABLE.includes(row.status)) throw new HttpError(409, `task_state_${row.status}_not_editable`);
   const body = await readBody(request);
+  checkTaskClientVersion(row, body);
   const lr = String(body.learning_record ?? row.learning_record ?? "").slice(0, 6000);
-  await dbRequest("patch_task_row", "PATCH", "training_tasks", { query: { task_id: `eq.${taskId}` }, body: { learning_record: lr, updated_at: nowIso() }, headers: { Prefer: "return=minimal" } });
-  sendJson(response, 200, { ok: true, task_id: taskId, saved_at: nowIso(), note: "未提交草稿可反复保存；提交后司机端不可再改" });
+  const patch = { learning_record: lr, ...(body.feedback !== undefined ? { feedback: String(body.feedback).slice(0, 3000) } : {}) };
+  if (body.self_check !== undefined) throw new HttpError(410, "quiz_not_supported_by_source_materials");
+  const updatedAt = await patchTaskExpected(row, patch);
+  sendJson(response, 200, { ok: true, task_id: taskId, saved_at: updatedAt, updated_at: updatedAt, note: "未提交草稿可反复保存；提交后司机端不可再改" });
 }
 
 async function handleTaskSubmit(request, response, url, ctx, taskId) {
-  const user = requireUser(ctx.principal);
-  if (user.role !== "driver" || !user.driver_id) throw new HttpError(403, "forbidden");
+  const user = requireVerifiedDriver(ctx.principal);
   const row = await loadTask(taskId, user.driver_id);
-  if (row.status === "submitted") return sendJson(response, 200, { ok: true, idempotent_replay: true, task_id: taskId, status: "submitted", submitted_at: row.submitted_at });
+  if (row.status === "submitted") {
+    const notification = await taskNotification(row, "submitted");
+    return sendJson(response, 200, { ok: true, idempotent_replay: true, task_id: taskId, status: "submitted", submitted_at: row.submitted_at, notification, reviewer_notified: notification.notification_id });
+  }
   if (!TASK_FSM_SUBMIT.includes(row.status)) throw new HttpError(409, `task_state_${row.status}_cannot_submit`);
   const body = await readBody(request);
+  checkTaskClientVersion(row, body);
   const lr = String(body.learning_record ?? row.learning_record ?? "").slice(0, 6000);
   const fb = String(body.feedback ?? "").slice(0, 3000);
   if (!lr.trim()) throw new HttpError(409, "learning_record_required");
   const at = nowIso();
-  await dbRequest("patch_task_row", "PATCH", "training_tasks", { query: { task_id: `eq.${taskId}`, status: `eq.${row.status}` }, body: { status: "submitted", submitted_at: at, learning_record: lr, feedback: fb, started_at: row.started_at || at, updated_at: at }, headers: { Prefer: "return=minimal" } });
+  await patchTaskExpected(row, { status: "submitted", submitted_at: at, learning_record: lr, feedback: fb, started_at: row.started_at || at });
   const auditId = await appendAudit(ctx.principal, "training.submit", "training_task", taskId, row.status, "submitted", ctx.requestId);
-  const adm = await adminAccountId(); let notif = null;
-  if (adm) notif = await notify(adm, "task_submitted", taskId, `司机 ${user.driver_id} 提交培训任务 ${taskId}，请在TR06复核。`, `notif:tasksub:${taskId}`);
-  sendJson(response, 200, { ok: true, task_id: taskId, status: "submitted", submitted_at: at, audit_id: auditId, reviewer_notified: notif });
+  const notification = await taskNotification({ ...row, status: "submitted" }, "submitted");
+  sendJson(response, 200, { ok: true, task_id: taskId, status: "submitted", submitted_at: at, audit_id: auditId, reviewer_notified: notification.notification_id, notification });
 }
 
 async function handleTaskReview(request, response, url, ctx, taskId) {
-  const user = requireUser(ctx.principal);
+  const user = requireUser(ctx.principal, "review.training_feedback");
   const body = await readBody(request);
   const row = await loadTask(taskId, null);
+  await assertInScope(ctx.principal, { driverId: row.driver_id });
   if (row.status === "reviewed" || row.status === "observation" || row.status === "interview") {
     return sendJson(response, 200, { ok: true, idempotent_replay: true, task_id: taskId, status: row.status, reviewed_at: row.reviewed_at, reviewer_id: row.reviewer_id });
   }
@@ -1879,35 +2039,58 @@ async function handleTaskReview(request, response, url, ctx, taskId) {
   const reason = String(body.reason || "").slice(0, 1000);
   if (!reason.trim()) throw new HttpError(409, "review_reason_required");
   const at = nowIso();
-  await dbRequest("patch_task_row", "PATCH", "training_tasks", {
-    query: { task_id: `eq.${taskId}`, status: "eq.submitted" },
-    body: { status: next, reviewer_id: user.user_id, review_note: reason, reviewed_at: at, updated_at: at },
-    headers: { Prefer: "return=minimal" },
-  });
+  await patchTaskExpected(row, { status: next, reviewer_id: user.user_id, review_note: reason, reviewed_at: at });
   const auditId = await appendAudit(ctx.principal, `training.review.${decision}`, "training_task", taskId, "submitted", next, ctx.requestId);
   sendJson(response, 200, { ok: true, task_id: taskId, new_status: next, reviewer_id: user.user_id, reviewed_at: at, audit_id: auditId });
 }
 
 async function handleTaskView(request, response, url, ctx, taskId) {
   const user = requireUser(ctx.principal);
-  const row = await loadTask(taskId, user.role === "driver" ? user.driver_id : null);
   const isDriver = user.role === "driver";
+  if (isDriver) requireVerifiedDriver(ctx.principal);
+  else if (!ROLE_CAPABILITIES[user.role]?.has("assign.training")) throw new HttpError(403, "forbidden");
+  const row = await loadTask(taskId, user.role === "driver" ? user.driver_id : null);
+  if (!isDriver) await assertInScope(ctx.principal, { driverId: row.driver_id });
   const [al, co] = await Promise.all([
     row.alert_id ? dbRequest("get_alert_row", "GET", "alerts", { query: { alert_id: `eq.${row.alert_id}`, select: "alert_id,gpsno,rule_code,evidence_id,occurred_at,status" } }) : { data: [] },
-    dbRequest("get_course_row", "GET", "training_courses", { query: { course_id: `eq.${row.course_id}`, select: "course_id,title,completion_requirement,content_status" } }),
+    dbRequest("get_course_row", "GET", "training_courses", { query: { course_id: `eq.${row.course_id}`, select: "course_id,title,content,completion_requirement,content_status,version_no,source_version" } }),
   ]);
-  const t2 = await dbRequest("list_audit", "GET", "audit_logs", { query: { entity_id: `eq.${taskId}`, select: "audit_id,action,old_status,new_status,actor_id,actor_role,occurred_at", order: "occurred_at.asc", limit: 40 } });
-  let reassess = null;
-  if (!isDriver) {
-    const ds = await dbRequest("list_resource", "GET", "score_snapshots", { query: { select: "as_of_date", order: "as_of_date.desc", limit: 1 } });
-    const latest = ds.data?.[0]?.as_of_date || null;
-    // 复评只认晚于分配时间且真实存在的下一日终快照；无则 null，页面显示“待下一周期数据”
-    if (row.submitted_at && latest && new Date(latest) > new Date(row.submitted_at.slice ? Date.parse(row.submitted_at) : row.submitted_at)) {
-      const nx = await dbRequest("list_resource", "GET", "score_history", { query: { driver_id: `eq.${row.driver_id}`, as_of_date: `eq.${latest}`, select: "score_id,safety_score,risk_level,confidence_level" } });
-      reassess = { date: latest, row: nx.data?.[0] || null };
-    } else reassess = { date: null, row: null };
+  const t2 = isDriver ? { data: [] } : await dbRequest("list_audit", "GET", "audit_logs", { query: { entity_id: `eq.${taskId}`, select: "audit_id,action,old_status,new_status,actor_id,actor_role,occurred_at", order: "occurred_at.asc", limit: 40 } });
+  const learning = await taskLearning(row);
+  const current = co.data?.[0] || null;
+  // A snapshot is captured on first learning save, never mislabeled as the assignment version.
+  const course = learning.course_snapshot || (current?.content_status === "approved" ? current : current ? { ...current, content: null } : null);
+  let reassess = { date: null, row: null, status: "awaiting_submission", note: "提交并经人工复核后，等待本人下一周期数据。" };
+  if (row.submitted_at) {
+    const submitDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(row.submitted_at));
+    const cols = "score_id,as_of_date,safety_score,risk_level,confidence_level,source_version";
+    const [before, after] = await Promise.all([
+      dbRequest("list_resource", "GET", "score_history", { query: { driver_id: `eq.${row.driver_id}`, as_of_date: `lte.${submitDate}`, select: cols, order: "as_of_date.desc", limit: 1 } }),
+      dbRequest("list_resource", "GET", "score_history", { query: { driver_id: `eq.${row.driver_id}`, as_of_date: `gt.${submitDate}`, select: cols, order: "as_of_date.desc", limit: 1 } }),
+    ]);
+    const base = before.data?.[0], next = after.data?.[0];
+    let status = "awaiting_data", note = "等待本人下一周期数据，不以培训完成宣称改善有效。";
+    if (next) {
+      status = "requires_review"; note = "已有后续数据，需人工核验评价口径与覆盖，分值变化不证明培训的因果效果。";
+      if (row.status !== "reviewed") { status = "awaiting_review"; note = "培训尚未通过人工复核，后续数据仅供查看。"; }
+      else if (!base || !base.source_version || base.source_version !== next.source_version) { status = "not_comparable"; note = "缺少基线或来源版本不同，不能直接比较；来源版本一致也仍需人工核验算法口径。"; }
+      else if (base.confidence_level === "low" || next.confidence_level === "low") { status = "low_confidence"; note = "基线或后续数据可信度低，优先核验数据。"; }
+      else if (Date.parse(next.as_of_date) - Date.parse(submitDate) < 14 * 86400000) { status = "overlapping_window"; note = "后续14天滚动评价窗口可能包含培训前数据，暂不做改善效果判定。"; }
+    }
+    reassess = { date: next?.as_of_date || null, row: next || null, baseline: base || null, status, note };
   }
-  sendJson(response, 200, { task: row, alert: al.data?.[0] || null, course: co.data?.[0] || null, timeline: isDriver ? [] : t2.data || [], reassess });
+  sendJson(response, 200, { task: row, alert: al.data?.[0] || null, course, current_course_status: current?.content_status || null, course_basis: learning.course_snapshot?.captured_stage || (learning.course_snapshot ? "first_learning_save" : "current_version"), learning_available: learning.available, timeline: t2.data || [], reassess });
+}
+
+async function handleLearningReport(request, response, url, ctx) {
+  const user = requireVerifiedDriver(ctx.principal);
+  const taskId = String(url.searchParams.get("task_id") || "");
+  if (!/^[\w:,.-]{1,80}$/.test(taskId)) throw new HttpError(400, "invalid_task_id");
+  const task = await loadTask(taskId, user.driver_id);
+  const learning = await taskLearning(task);
+  const courseResult = await dbRequest("get_course_row", "GET", "training_courses", { query: { course_id: `eq.${task.course_id}`, select: "course_id,title,content_status,version_no,source_version,completion_requirement", limit: 1 } });
+  const course = learning.course_snapshot || courseResult.data?.[0] || null;
+  sendJson(response, 200, { task_id: task.task_id, course: course ? { course_id: course.course_id, title: course.title, completion_requirement: course.completion_requirement, version_no: course.version_no ?? null, source_version: course.source_version || null } : null, goal: task.goal || null, status: task.status, learning_record: task.learning_record ?? null, feedback: task.feedback ?? null, review_note: task.review_note ?? null, submitted_at: task.submitted_at || null, reviewed_at: task.reviewed_at || null, alert_id: task.alert_id || null, conclusion: task.review_note ? "以下是安全员已记录的复核意见，不等于事故风险降低的证明。" : "尚无人工复核结论。", limitations: "本汇总仅整理来源课程、本人学习记录及已保存的流程事实，不生成专业测验分数，不推断培训效果，不改安全评分。", generated_at: nowIso() });
 }
 
 
@@ -3187,6 +3370,9 @@ const API_ROUTES = [
   { method: "POST", path: "/api/me/profile", needAuth: true, handler: handleOwnProfile },
   { method: "GET", path: "/api/analysis/root-causes", needAuth: true, handler: handleRootCauses },
   { method: "GET", path: "/api/driver/fleet-summary", needAuth: true, handler: handleDriverFleetSummary },
+  { method: "GET", path: "/api/driver/risk-center", needAuth: true, handler: handleDriverRiskCenter },
+  { method: "GET", path: "/api/driver/evidence", needAuth: true, handler: handleDriverEvidence },
+  { method: "GET", path: "/api/driver/learning-report", needAuth: true, handler: handleLearningReport },
   { method: "GET", path: "/api/rm/drop7", needAuth: true, handler: handleDrop7 },
   { method: "GET", path: "/api/overview", needAuth: true, handler: handleOverview },
   { method: "GET", path: "/api/meta/history-dates", needAuth: true, handler: handleHistoryDates },
@@ -3259,6 +3445,7 @@ const CASE_ROUTES = [
   { method: "PATCH", re: /^\/api\/training-tasks\/([^/]+)\/draft$/, h: handleTaskDraftSave },
   { method: "POST", re: /^\/api\/training-tasks\/([^/]+)\/submit$/, h: handleTaskSubmit },
   { method: "POST", re: /^\/api\/training-tasks\/([^/]+)\/review$/, h: handleTaskReview, cap: "review.training_feedback" },
+  { method: "POST", re: /^\/api\/training-tasks\/([^/]+)\/retry-notification$/, h: handleTaskNotificationRetry },
   { method: "GET", re: /^\/api\/training-tasks\/([^/]+)$/, h: handleTaskView },
   { method: "GET", re: /^\/api\/review-requests\/([^/]+)$/, h: handleRRView },
   { method: "POST", re: /^\/api\/review-requests\/([^/]+)\/advance$/, h: handleRRAdvance },
@@ -3273,6 +3460,7 @@ const CASE_ROUTES = [
   { method: "GET", re: /^\/api\/notes$/, h: handleMyNotes },
 ];
 function crOf(pn) {
+  if (pn.endsWith("/retry-notification")) return "assign.training";
   if (pn.endsWith("/review")) return "review.training_feedback";
   if (pn.endsWith("/start") || pn.endsWith("/submit") || pn.endsWith("/draft")) return "view.my_training";
   if (pn.endsWith("/read") || pn.endsWith("/reply")) return null; // 司机本人路由内handler强制
@@ -3304,6 +3492,12 @@ const server = createServer(async (request, response) => {
   const requestId = newId("req");
   try {
     const url = new URL(request.url ?? "/", "http://qwenwork.local");
+    if (process.env.IE_LOCAL_SOURCE_ONLY === "1" && (/^\/api\/(ai|agent1)\//.test(url.pathname) || url.pathname === "/api/meta/egress-probe")) {
+      sendJson(response, 503, { error: "local_source_only", note: "当前仅使用IE亮剑本地材料，不调用外部模型或数据服务。" }); return;
+    }
+    if (process.env.IE_LOCAL_SOURCE_ONLY === "1" && (url.pathname.startsWith("/api/import/") || url.pathname === "/api/admin/course-draft" || (request.method !== "GET" && /^\/api\/admin\/(knowledge|templates)/.test(url.pathname)))) {
+      sendJson(response, 403, { error: "local_source_files_only", note: "本地候选仅使用IE亮剑已登记文件，不接收额外业务数据或专业内容。" }); return;
+    }
     // 健康检查先于一切鉴权（部署验证探针）
     if (url.pathname === "/healthz" || url.pathname === "/api/health") {
       sendJson(response, 200, { status: "ok" });

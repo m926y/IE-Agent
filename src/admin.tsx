@@ -12,6 +12,7 @@ import { TemplatesTab, TemplateScenePicker } from "./sm27";
 import { AuditConsole, CourseBoard } from "./sm19";
 import { Dashboard } from "./dashboard";
 import { RootCausesPage, MandatePolicyCard } from "./r37";
+import { TrainingNotificationRecovery, notificationText } from "./training-recovery";
 
 const IMPORTABLE_TABLES = [
   "drivers", "risk_snapshots", "score_snapshots", "review_queue", "score_history", "deduction_ledger",
@@ -793,6 +794,7 @@ function TrLedger()  {
   if (sel) return <TaskDetail taskId={sel} onBack={() => { setSel(null); setTick((x) => x + 1); }} />;
   return <div>
     <PageHead code="TR01" title="培训任务台账" desc="任务状态按“草稿(TR02未提交)→已分配→进行中→已提交→已复核”，逾期/退回为分支（红=逾期）。计数为 training_tasks 实数。" />
+    <TrainingNotificationRecovery />
     <div className="cards">
       {["assigned", "in_progress", "submitted", "reviewed", "returned", "overdue"].map((k) => <div key={k} className={`card ${k === "overdue" ? "risk" : ""}`}><div className="k">{({ assigned: "已分配", in_progress: "进行中", submitted: "待复核", reviewed: "已复核", returned: "退回补充", overdue: "逾期(展示)" } as Record<string, string>)[k]}</div><div className={`v ${!(counts[k] || 0) ? "zero" : ""}`}>{counts[k] || 0}</div></div>)}
     </div>
@@ -806,10 +808,10 @@ function TrLedger()  {
   </div>;
 }
 
-function TrCourses() {
+function TrCourses({ localOnly = false }: { localOnly?: boolean }) {
   return <div>
     <PageHead code="TR05 / SM06" title="课程库与人工审核" desc="真实 training_courses：保留原 content_status 与课程文本；作者/审核人/审核时间由 audit_logs 合成（表无该列，平台无 DDL 通道）。三门 DEMO_C01–C03 保持待团队审核，不因挂载自动批准。批准/停用为明确确认动作；TR02 与 AI 只引用 approved 版本，草稿/待审/停用直接接口请求被服务端拒绝。" />
-    <CourseBoard />
+    <CourseBoard localOnly={localOnly} />
   </div>;
 }
 
@@ -942,8 +944,8 @@ function TrCreate() {
   async function submit() {
     setBusy(true); setMsg(null);
     try { const r = await trainingAssign({ course_id: course, driver_id: driver, goal: goal || `结合 ${driver} 已核实证据完成 ${course} 复盘`, ...(mandTouched ? { mandatory: mand } : {}), due_at: due, alert_id: alertId || undefined, template_ref: tplRef || undefined } as never);
-      setMsg(`分配成功 task_id=${(r as { task_id?: string }).task_id} · 强制=${(r as { mandatory?: boolean }).mandatory ? "是" : "否"}（来源 ${(r as { mandatory_source?: string }).mandatory_source || "manual"}）${!mandTouched && (r as { mandatory_source?: string }).mandatory_source === "default_false" ? "——未配置等级映射故缺省非强制，可在 SM03 建立映射" : ""}（通知已面向有效绑定账号生成）`); }
-    catch (e) { const c2 = e instanceof ApiError ? e.code : "network"; setMsg({ course_not_approved: "服务端拒绝：课程处于待审核演示草稿——安全管理员团队人工审核通过前不得正式分配（training_tasks 不新增）", driver_binding_unverified: "服务端拒绝：目标司机绑定未核实", evidence_driver_mismatch: "服务端拒绝：所选告警证据与该司机不匹配", evidence_alert_not_found: "服务端拒绝：告警不存在" }[c2] || `拒绝：${c2}`); }
+      setMsg(`${r.idempotent_replay ? "已存在同一任务" : "分配成功"} task_id=${r.task_id} · 强制=${r.mandatory ? "是" : "否"}（来源 ${r.mandatory_source || "已有任务"}）${r.course_snapshot_saved ? ` · 已留存课程版本 ${r.course_version}` : ""} · ${notificationText(r.notification)}${r.idempotent_replay ? " · 未重复创建任务" : ""}`); }
+      catch (e) { const c2 = e instanceof ApiError ? e.code : "network"; setMsg({ course_not_approved: "服务端拒绝：课程处于待审核演示草稿——安全管理员团队人工审核通过前不得正式分配（training_tasks 不新增）", driver_binding_unverified: "服务端拒绝：目标司机绑定未核实", evidence_driver_mismatch: "服务端拒绝：所选告警证据与该司机不匹配", evidence_alert_not_found: "服务端拒绝：告警不存在", learning_migration_required: "学习扩展尚未迁移：请先执行008数据库迁移，再分配带版本留存的新任务。此次未创建任务。", assignment_idempotency_conflict: "请求标识已用于其他课程或司机，请核对任务来源。此次未创建任务。", template_unavailable: "通知模板暂不可用，请重试或取消模板选择。此次未创建任务。", template_not_approved_or_disabled: "通知模板尚未批准或已停用。此次未创建任务。" }[c2] || `拒绝：${c2}`); }
     setBusy(false);
   }
   return <div>
@@ -1001,7 +1003,7 @@ export function AdminShell({ user, aiOpen, onAiToggle }: { user: MeUser; aiOpen:
       case "rm-replay": return <RmReplay />;
       case "rm-alerts": { const m = location.hash.match(/[?&]alert_id=([^&#]+)/); return <RmAlerts initialAlertId={m ? decodeURIComponent(m[1]) : null} />; }
       case "tr-ledger": return <TrLedger />;
-      case "tr-courses": return <TrCourses />;
+      case "tr-courses": return <TrCourses localOnly={Boolean(user.localSourceOnly)} />;
       case "tr-create": return <TrCreate />;
       case "sm-accounts": return <SmAccounts />;
       case "sm-bindings": return <SmBindings />;
@@ -1026,10 +1028,11 @@ export function AdminShell({ user, aiOpen, onAiToggle }: { user: MeUser; aiOpen:
         const active = NAV[index].items.some(it => it.key === route) || (index === 0 && !NAV.some(g => g.items.some(it => it.key === route)));
         return <a key={label} className={active ? "active" : ""} href={`#/${NAV[index].items[0].key}`} aria-current={active ? "page" : undefined}><NavIcon kind={icon} /><span>{label}</span></a>;
       })}
-      <button className={aiOpen ? "active" : ""} onClick={onAiToggle} aria-pressed={aiOpen}><NavIcon kind={4} /><span>智能助手</span></button>
+      {!user.localSourceOnly && <button className={aiOpen ? "active" : ""} onClick={onAiToggle} aria-pressed={aiOpen}><NavIcon kind={4} /><span>智能助手</span></button>}
       <a className={route.startsWith("sm-") ? "active" : ""} href="#/sm-accounts" aria-current={route.startsWith("sm-") ? "page" : undefined}><NavIcon kind={5} /><span>系统管理</span></a>
     </nav>
     <main className="main" key={routeKey}>
+      {user.localSourceOnly && <Banner tone="warn">仅使用IE亮剑本地材料和历史回放。课程待团队审核；本地模式不提供专业测验或外部AI问答。</Banner>}
       {NAV.filter(g => g.items.length > 1 && g.items.some(it => it.key === route)).map(g => <nav className="module-tabs" aria-label={g.group} key={g.group}>{g.items.filter(it => it.key !== "ev-driver").map(it => <a key={it.key} href={`#/${it.key}`} aria-current={route === it.key ? "page" : undefined} className={route === it.key ? "active" : ""}>{it.label.replace("/数据异议", "")}</a>)}</nav>)}
       {view}
     </main>

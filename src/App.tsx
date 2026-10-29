@@ -210,8 +210,8 @@ export function App() {
   if (!me) return <LoginView onDone={reload} />;
   return <div className={`app-workspace ${me.role === "driver" ? "driver-workspace" : "admin-workspace"} ${ai ? "ai-open" : ""}`}>
     {me.role === "driver" ? <DriverShell user={me} /> : <AdminShell user={me} aiOpen={ai} onAiToggle={() => setAi(v => !v)} />}
-    {me.role === "driver" && <button className="ai-fab" onClick={() => setAi((v) => !v)} title="AI 助手">AI</button>}
-    {ai && <AiPanel onClose={() => setAi(false)} who={{ role: me!.role, userId: me!.userId }} preset={aiPreset} onPresetUsed={() => setAiPreset(null)} />}
+    {me.role === "driver" && !me.localSourceOnly && <button className="ai-fab" onClick={() => setAi((v) => !v)} title="AI 助手">AI</button>}
+    {ai && !me.localSourceOnly && <AiPanel onClose={() => setAi(false)} who={{ role: me!.role, userId: me!.userId }} preset={aiPreset} onPresetUsed={() => setAiPreset(null)} />}
   </div>;
 }
 

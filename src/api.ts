@@ -1,4 +1,5 @@
 export type MeUser = {
+  localSourceOnly?: boolean;
   userId: string;
   username: string | null;
   displayName: string;
@@ -98,7 +99,8 @@ export const importCommit = (payload: { run_id: string; csv: string }) =>
 
 export type CourseReviewResult = { ok: boolean; course_id: string; old_status: string; new_status: string; version_no: number; reviewed_by: string; audit_id: string | null };
 export type OpsUpdateResult = { ok: boolean; config_id: string; old_value: string; new_value: string; old_version: string | number; new_version: number; effective_at: string; audit_id: string | null };
-export type AssignResult = { ok: boolean; task_id?: string; audit_id?: string | null; idempotent_replay?: boolean; error?: string };
+export type TaskNotificationReceipt = { state: "recorded" | "pending" | "no_recipient" | "not_needed"; notification_id: string | null };
+export type AssignResult = { ok: boolean; task_id?: string; audit_id?: string | null; idempotent_replay?: boolean; error?: string; course_version?: string | number; course_snapshot_saved?: boolean; assigned_notification?: string | null; mandatory?: boolean; mandatory_source?: string; notification?: TaskNotificationReceipt };
 export const courseReview = (p2: { course_id: string; new_status: string; note?: string; confirm_by?: string }) => api<CourseReviewResult>("/api/admin/course-review", { method: "POST", body: JSON.stringify(p2) });
 export const opsConfigUpdate = (p2: { config_id: string; value: string; effective_at?: string }) => api<OpsUpdateResult>("/api/admin/ops-config", { method: "POST", body: JSON.stringify(p2) });
 export const trainingAssign = (p2: { course_id: string; driver_id: string; goal?: string; mandatory?: boolean; alert_id?: string; due_at?: string; idempotency_key?: string; template_ref?: string }) => api<AssignResult>("/api/admin/training-assign", { method: "POST", body: JSON.stringify(p2) });
@@ -115,11 +117,20 @@ export const interventionRead = (id: string) => api<InterResult>(`/api/intervent
 export const interventionReply = (id: string, reply_text: string) => api<InterResult>(`/api/interventions/${encodeURIComponent(id)}/reply`, { method: "POST", body: JSON.stringify({ reply_text }) });
 export const caseView = (alertId: string) => api<CaseView>(`/api/cases/${encodeURIComponent(alertId)}`);
 
-export type TaskView = { task: Record<string, unknown>; alert: Record<string, unknown> | null; course: Record<string, unknown> | null; timeline: Record<string, unknown>[]; reassess: { date: string | null; row: Record<string, unknown> | null } | null };
+export type TaskView = { task: Record<string, unknown>; alert: Record<string, unknown> | null; course: Record<string, unknown> | null; timeline: Record<string, unknown>[]; course_basis?: string; current_course_status?: string | null; learning_available?: boolean; reassess: { date: string | null; row: Record<string, unknown> | null; status?: string; note?: string } | null };
 export const taskView = (id: string) => api<TaskView>(`/api/training-tasks/${encodeURIComponent(id)}`);
-export const taskStart = (id: string) => api<{ ok: true; status: string; started_at?: string | null; audit_id?: string | null; idempotent_replay?: boolean }>(`/api/training-tasks/${encodeURIComponent(id)}/start`, { method: "POST", body: "{}" });
-export const taskSaveDraft = (id: string, learning_record: string) => api<{ ok: true; saved_at: string }>(`/api/training-tasks/${encodeURIComponent(id)}/draft`, { method: "PATCH", body: JSON.stringify({ learning_record }) });
-export const taskSubmit = (id: string, learning_record: string, feedback = "") => api<{ ok: true; status: string; submitted_at?: string | null; audit_id?: string | null; reviewer_notified?: string | null; idempotent_replay?: boolean }>(`/api/training-tasks/${encodeURIComponent(id)}/submit`, { method: "POST", body: JSON.stringify({ learning_record, feedback }) });
+export const taskStart = (id: string, expectedUpdatedAt?: string | null) => api<{ ok: true; status: string; started_at?: string | null; audit_id?: string | null; idempotent_replay?: boolean }>(`/api/training-tasks/${encodeURIComponent(id)}/start`, { method: "POST", body: JSON.stringify(expectedUpdatedAt === undefined ? {} : { expected_updated_at: expectedUpdatedAt }) });
+export const taskSaveDraft = (id: string, learning_record: string, extra: { feedback?: string; expected_updated_at?: string | null } = {}) => api<{ ok: true; saved_at: string; updated_at: string }>(`/api/training-tasks/${encodeURIComponent(id)}/draft`, { method: "PATCH", body: JSON.stringify({ learning_record, ...extra }) });
+
+export type DriverRiskResult = { date: string; timezone: string; source_type: string; queried_at: string; latest_replay_date: string | null; snapshot: Record<string, unknown> | null; events: Record<string, unknown>[]; alerts: Record<string, unknown>[]; pagination: { limit: number; events_offset: number; alerts_offset: number; events_has_more: boolean; alerts_has_more: boolean }; truncated: boolean; note: string };
+export const driverRiskCenter = (date: string, eventsOffset = 0, alertsOffset = 0) => api<DriverRiskResult>(`/api/driver/risk-center?${new URLSearchParams({ date, limit: "20", events_offset: String(eventsOffset), alerts_offset: String(alertsOffset) })}`);
+export type DriverEvidenceKind = "event" | "alert" | "score" | "score_history";
+export type DriverEvidenceResult = { kind: DriverEvidenceKind; record: Record<string, unknown>; linked: Record<string, unknown> | null; linked_kind: string | null; ledger: Record<string, unknown>[]; ledger_status: string; offset: number; has_more: boolean; queried_at: string; limitations: string };
+export const driverEvidence = (kind: DriverEvidenceKind, id: string, offset = 0) => api<DriverEvidenceResult>(`/api/driver/evidence?${new URLSearchParams({ kind, id, offset: String(offset) })}`);
+export type LearningReport = { task_id: string; course: { title: string; source_version: string | null; completion_requirement: string | null } | null; goal: string | null; status: string; learning_record: string | null; feedback: string | null; review_note: string | null; submitted_at: string | null; reviewed_at: string | null; conclusion: string; limitations: string; generated_at: string };
+export const learningReport = (taskId: string) => api<LearningReport>(`/api/driver/learning-report?task_id=${encodeURIComponent(taskId)}`);
+export const retryTaskNotification = (id: string, kind: "assigned" | "submitted") => api<{ ok: boolean; task_id: string; notification: TaskNotificationReceipt; audit_id: string | null }>(`/api/training-tasks/${encodeURIComponent(id)}/retry-notification`, { method: "POST", body: JSON.stringify({ kind }) });
+export const taskSubmit = (id: string, learning_record: string, feedback = "", expectedUpdatedAt?: string | null) => api<{ ok: true; status: string; submitted_at?: string | null; audit_id?: string | null; reviewer_notified?: string | null; idempotent_replay?: boolean; notification?: TaskNotificationReceipt }>(`/api/training-tasks/${encodeURIComponent(id)}/submit`, { method: "POST", body: JSON.stringify({ learning_record, feedback, ...(expectedUpdatedAt !== undefined ? { expected_updated_at: expectedUpdatedAt } : {}) }) });
 export const taskReview = (id: string, decision: string, reason: string) => api<{ ok: true; new_status: string; audit_id: string | null; task_id?: string; idempotent_replay?: boolean }>(`/api/training-tasks/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify({ decision, reason }) });
 
 export type RRView = { request: Record<string, unknown>; snapshot: Record<string, unknown> | null; ledger: Record<string, unknown>[] | null; timeline: Record<string, unknown>[] | null };

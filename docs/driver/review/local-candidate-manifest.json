@@ -1,0 +1,271 @@
+{
+  "candidate": "IE-Agent source-only local candidate",
+  "business_source": "IE亮剑/outputs/agent_starter/import only",
+  "source_hash": "258cb8bd9f8d20715a0f603c3e183a2699d00d8f7ee095587444e02dee3aaac9",
+  "source_files": [
+    {
+      "table": "drivers",
+      "file": "outputs/agent_starter/import/drivers.csv",
+      "rows": 500,
+      "sha256": "72e07abac8b52a173ba9c90194bd38560638223ba788291826f6cd695760217f"
+    },
+    {
+      "table": "risk_snapshots",
+      "file": "outputs/agent_starter/import/risk_snapshots.csv",
+      "rows": 500,
+      "sha256": "dfc8b92b68676b22a6394f4f034d8a6da8fa4cb1c2e0e84fb0f5712e989e8905"
+    },
+    {
+      "table": "score_snapshots",
+      "file": "outputs/agent_starter/import/score_snapshots.csv",
+      "rows": 500,
+      "sha256": "6a212c3d35191fdfd8bc8a0e91c33d07c49d314a456b773ab5d80e07057f3cdf"
+    },
+    {
+      "table": "review_queue",
+      "file": "outputs/agent_starter/import/review_queue.csv",
+      "rows": 500,
+      "sha256": "9afaeb3c12a86fc077533ca55b72ee8ad10312c04882d6c6923f88f6c048f829"
+    },
+    {
+      "table": "score_history",
+      "file": "outputs/agent_starter/import/score_history.csv",
+      "rows": 4000,
+      "sha256": "33d95d653edc2317da45c76d3612d81921602d9a728edab6962f2b8f4cd96e61"
+    },
+    {
+      "table": "deduction_ledger",
+      "file": "outputs/agent_starter/import/deduction_ledger.csv",
+      "rows": 6267,
+      "sha256": "ac09e6db96bd813100cbb0a6cf44543b37ba75b5541e33c3295d08bf26060796"
+    },
+    {
+      "table": "replay_events",
+      "file": "outputs/agent_starter/import/replay_events.csv",
+      "rows": 883,
+      "sha256": "0de8685b5f67bb67125a93884fa7ff6127e4e465f6b51f86b7cc0705c1ba3690"
+    },
+    {
+      "table": "evaluation_rules",
+      "file": "outputs/agent_starter/import/evaluation_rules.csv",
+      "rows": 6,
+      "sha256": "5ace14caed90f35ee22242ee5a173160aa65419d0bb8c97bd079e586fa6456e5"
+    },
+    {
+      "table": "training_courses",
+      "file": "outputs/agent_starter/import/training_courses.csv",
+      "rows": 3,
+      "sha256": "75457af00819c6f0484eaf269a74bcab2c1c0b6e1168bb5ce7f8da7133398247"
+    },
+    {
+      "table": "operation_config",
+      "file": "outputs/agent_starter/import/operation_config.csv",
+      "rows": 3,
+      "sha256": "7d8c09e85d228fc34e0fd498ea9e1726061df45d48f5e61389a6c6fe5f1270c8"
+    },
+    {
+      "table": "user_bindings",
+      "file": "outputs/agent_starter/import/user_bindings.csv",
+      "rows": 0,
+      "sha256": "e4e9871da725846f14b34e7a70f9fe1c618b7545fcf355267fedf0b8eb9ce8be"
+    },
+    {
+      "table": "alerts",
+      "file": "outputs/agent_starter/import/alerts.csv",
+      "rows": 0,
+      "sha256": "06cdc458a39f108b4589b92c5af6518398eb86ab4da3c0c5ecb3e291ddcf0edf"
+    },
+    {
+      "table": "interventions",
+      "file": "outputs/agent_starter/import/interventions.csv",
+      "rows": 0,
+      "sha256": "da230644bfdbf30f398b3d8f357a00926b308fea7669e44689f949b8509eccf8"
+    },
+    {
+      "table": "training_tasks",
+      "file": "outputs/agent_starter/import/training_tasks.csv",
+      "rows": 0,
+      "sha256": "8797c4f95d2abcbd57be3ab60d59a01b9422c1cf9a41af6875e10c8c0ae0fca8"
+    },
+    {
+      "table": "audit_logs",
+      "file": "outputs/agent_starter/import/audit_logs.csv",
+      "rows": 0,
+      "sha256": "54c9959d39497235afca9217ac6286f3ae0d5246bfd1339b2bf9445981f86f6a"
+    }
+  ],
+  "code_hash": "1f0c1b667789ad31b77e7b68e369082dcc82b4d29e47aa9427487cd1bfad6706",
+  "files": [
+    {
+      "file": "dist/assets/index-CDx123AW.css",
+      "sha256": "ebbf7a16147cd590a4c32e2e49a78f2d3df5f4812338d6ee2a5aa3330aa011ab"
+    },
+    {
+      "file": "dist/assets/index-d0kEdAhw.js",
+      "sha256": "57eef4698bebe55fc51ffc17cba0a643718ba67f9475b838edb5da2057859a4b"
+    },
+    {
+      "file": "dist/index.html",
+      "sha256": "d3892cdfe80d1187a1017fee3495e45bfccd4a3e1ca2c96b711b34393a75360f"
+    },
+    {
+      "file": "index.html",
+      "sha256": "8eba3fa039b166a3d9b0aa9cdfa588d80348d1c6604637055f45712449e4e0ae"
+    },
+    {
+      "file": "package-lock.json",
+      "sha256": "f2c56f028ed9edfaff81b779892105d5da75fd0be789d9fb5417482b63ac9574"
+    },
+    {
+      "file": "package.json",
+      "sha256": "aa578dbb31e39a94b6f85f781113bd0fa0c2dce8d4173631efd58e0b97161ca2"
+    },
+    {
+      "file": "scripts/build-local-manifest.mjs",
+      "sha256": "af92ce047ee312257356c401af1fddba201f4f3cc5a83348fab034fb395a0c65"
+    },
+    {
+      "file": "scripts/local-broker.mjs",
+      "sha256": "89143e613a841e3fd762c3323b14b216f59028234aafa32d64be2a1139b98663"
+    },
+    {
+      "file": "scripts/local-data-store.mjs",
+      "sha256": "27833bce8c8a6f7a5cc73e544cd1f1ddfd424f55ce4b691b69e42d4448076dbe"
+    },
+    {
+      "file": "scripts/local-workbench.mjs",
+      "sha256": "04ba0f21acd06837cc8cb6dce34f4b7d76ae1912ed9f6c9359b98cc7cd7b8a79"
+    },
+    {
+      "file": "scripts/prepare-publish.mjs",
+      "sha256": "3ed4cb8c3c31c5d534d6fc8c78edc0f2aaff19ac52c2c5ad7b9e1738daa141f4"
+    },
+    {
+      "file": "scripts/source-ui-battery.mjs",
+      "sha256": "340bfd12b34dc3f0fdc25886ea37d9b7015ed0737ab7b138e47e1896ddae190b"
+    },
+    {
+      "file": "server.mjs",
+      "sha256": "d9f35c3562e6d9771ab677a8dc90495b9e968664d6f7222b680b79d03afc6ab6"
+    },
+    {
+      "file": "src/App.tsx",
+      "sha256": "28fc4d6e72470cb25ac156a30d625b842c0ff7fb2fb4f8c937c98e28cb5e93a9"
+    },
+    {
+      "file": "src/admin.tsx",
+      "sha256": "e83e50a902251d6dfef324872bf4bdc9a84890accf666316e9e3d6bcf213e0a6"
+    },
+    {
+      "file": "src/api.ts",
+      "sha256": "30a89bc453094e638019e211ddc64444ce78d5541bcfdf02df80f5cbb0be6020"
+    },
+    {
+      "file": "src/dashboard.tsx",
+      "sha256": "6808e68244b09c9dc0a1e6a61322557bd12d0fa5fe63719cf095127d567dd385"
+    },
+    {
+      "file": "src/driver-evidence.tsx",
+      "sha256": "5d9cc5479702b21bf055c9bf09e7d685913cf51b8ef99825190448eb608b94e0"
+    },
+    {
+      "file": "src/driver-learning.tsx",
+      "sha256": "e1f03a0ece51403cc84084454f4d4577d05c7fd4705c3696b60c205694e899bc"
+    },
+    {
+      "file": "src/driver.tsx",
+      "sha256": "84c18775feb163adf0c0e36437d6505f6b275badc0bf4fbe93fdeeb882e53df3"
+    },
+    {
+      "file": "src/learning-report.tsx",
+      "sha256": "711c5d8117e6dd25ffcc214fdec4949b4398f287a16aab0d0a41a05a91cdbecb"
+    },
+    {
+      "file": "src/main.tsx",
+      "sha256": "859ec1422b8865f4f90b9fc4483411093a4ce7228b362aee64c24ea261b9d42d"
+    },
+    {
+      "file": "src/r37.tsx",
+      "sha256": "6974b2d0029f02d9ad2fa54dece029797a36e74a596491974ae312da90ab3f1b"
+    },
+    {
+      "file": "src/sm17.tsx",
+      "sha256": "f403ea98f8eea40b6a616b58450cf4b90c5ff5da9fc18030df2f0894e4655746"
+    },
+    {
+      "file": "src/sm18.tsx",
+      "sha256": "9651ba98ec8d9b78e99ea729d68262c69c791ef430d4f5002617b20fa0f0ee77"
+    },
+    {
+      "file": "src/sm19.tsx",
+      "sha256": "065c737d9df1b87965dd17b63e1d83056afeffefffebf59f4971ea948e05962e"
+    },
+    {
+      "file": "src/sm23.tsx",
+      "sha256": "840c053e01c2ab7eb94976e2f13dafe3616fc4fa57ab5a5ea85690249aedfe69"
+    },
+    {
+      "file": "src/sm26.tsx",
+      "sha256": "9a46d871ebe57e02e7c9e37822ca923b394222f63c7a8f225576a2ee5e9c96bd"
+    },
+    {
+      "file": "src/sm27.tsx",
+      "sha256": "50f718dd80895e2487edb13a45978e5ef70a9ff682b9af016adfa0660722ec79"
+    },
+    {
+      "file": "src/styles.css",
+      "sha256": "00849998d60db2a942d35b6810d940c5f397942702daf1ccdf43f388a6851ef7"
+    },
+    {
+      "file": "src/theme.css",
+      "sha256": "fe7927d3e2a1d768ff89799cee52553c5eef40733eaa0f0b67de299362451c63"
+    },
+    {
+      "file": "src/training-recovery.tsx",
+      "sha256": "7ef48f486316fbcd2d73304c39412d04d569f00cf531ef5cd1ed2e5be93ede0d"
+    },
+    {
+      "file": "src/ui.tsx",
+      "sha256": "1fb927845f763480e99f4c9c4ce603bd357c07f4432fc38fd7eabdd37c88da09"
+    },
+    {
+      "file": "src/vite-env.d.ts",
+      "sha256": "424faf9241dd699dda995b367ed36665732da1e6ec1f33b2fd40394488ecac92"
+    },
+    {
+      "file": "tests/local-source.test.mjs",
+      "sha256": "2456f7c38f1b1b4a945fd3e84a686ca40706207a9ea9d4498f1360950e11c672"
+    },
+    {
+      "file": "tests/runtime.test.mjs",
+      "sha256": "6a290d3671e9f5f117c5b9db5b16c269ee36a5edcdedfc628c5e9bec16df2c07"
+    },
+    {
+      "file": "tsconfig.json",
+      "sha256": "f2406e21a2835c9d3645b8b2ff257ee7ceb2e2373a13dc4802390ec0fa4675bf"
+    }
+  ],
+  "node": "v24.16.0",
+  "clean_state": {
+    "training_tasks": 0,
+    "course_statuses": [
+      {
+        "course_id": "DEMO_C01",
+        "status": "demo_draft_requires_team_review"
+      },
+      {
+        "course_id": "DEMO_C02",
+        "status": "demo_draft_requires_team_review"
+      },
+      {
+        "course_id": "DEMO_C03",
+        "status": "demo_draft_requires_team_review"
+      }
+    ]
+  },
+  "limits": [
+    "No external model or data calls in local mode",
+    "No professional quiz or invented approvals",
+    "SQLite acceptance is not PostgreSQL/cloud deployment acceptance"
+  ]
+}

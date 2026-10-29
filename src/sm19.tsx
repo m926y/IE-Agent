@@ -14,7 +14,7 @@ const STY: Record<string, [string, React.CSSProperties]> = {
 };
 const Tag2 = ({ s }: { s: string }) => { const [t, st] = STY[s] || [s, {}]; return <span style={{ fontSize: 11, padding: "1px 6px", borderRadius: 6, ...st }}>{t}</span>; };
 
-export function CourseBoard() {
+export function CourseBoard({ localOnly = false }: { localOnly?: boolean }) {
   const [rows, setRows] = useState<Course[] | null>(null);
   const [open, setOpen] = useState<Course | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -59,7 +59,7 @@ export function CourseBoard() {
           <button className="btn primary" style={{ width: "auto" }} onClick={() => { if (window.confirm(`确认以你的名义批准课程 ${open.course_id}？批准后方可被 TR02 正式分配（人工决定，不自动批准）。`)) review(open, "approved", true); }}>批准（明确确认）</button>
         </>}
         {open.content_status === "approved" && <button className="btn" onClick={() => { if (window.confirm(`停用 ${open.course_id}？此后 TR02 分配与 AI 引用将拒绝（文本与轨迹保留）。`)) review(open, "disabled", true); }}>停用（明确确认）</button>}
-        {["draft", "pending_review", "demo_draft_requires_team_review"].includes(String(open.content_status)) && <button className="btn" onClick={() => setEditFor(open)}>修订文本</button>}
+        {!localOnly && ["draft", "pending_review", "demo_draft_requires_team_review"].includes(String(open.content_status)) && <button className="btn" onClick={() => setEditFor(open)}>修订文本</button>}
         <button className="btn" onClick={() => setOpen(null)}>收起</button>
       </div>
       {showTrail === open.course_id && <div style={{ marginTop: 6 }}>
@@ -69,7 +69,7 @@ export function CourseBoard() {
         </div>)}
         {!(open.review_trail || []).length && <div className="meta">无审计事件</div>}
       </div>}
-      {editFor && <div style={{ marginTop: 6, display: "grid", gap: 4 }}>
+      {editFor && !localOnly && <div style={{ marginTop: 6, display: "grid", gap: 4 }}>
         <textarea className="btn" style={{ minHeight: 60, textAlign: "left", fontFamily: "inherit" }} defaultValue={String(editFor.content)} onChange={(e) => ((editFor as { _new?: string; })._new = e.target.value)} />
         <div style={{ display: "flex", gap: 6 }}>
           <button className="btn primary" style={{ width: "auto" }} onClick={async () => { try { const r = await courseDraftEdit({ course_id: editFor.course_id, content: (editFor as { _new?: string; })._new ?? String(editFor.content) }); setMsg(`已修订 ${r.course_id} → v${r.version_no} · 审计 ${r.audit_id}`); setEditFor(null); await reload(editFor.course_id); } catch (e) { setErr("修订被拒：" + String((e as { code?: string }).code || e)); } }}>保存修订（仅未审核课程）</button>
@@ -78,7 +78,7 @@ export function CourseBoard() {
         <div className="meta">已 approved 的课程修订走"停用 + 新课程"流程，避免静默改词。</div>
       </div>}
     </div>}
-    <div className="task-card" style={{ marginTop: 8, padding: 8 }}>
+    <div className="task-card" hidden={localOnly} style={{ marginTop: 8, padding: 8 }}>
       <div className="t">自建课程草稿（初始 draft，永不自动批准/分配）</div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         <input className="btn" style={{ width: 150 }} placeholder="course_id(大写)" value={nc.course_id} onChange={(e) => setNc({ ...nc, course_id: e.target.value.toUpperCase() })} aria-label="新课程ID" />

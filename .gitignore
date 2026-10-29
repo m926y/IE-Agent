@@ -1,4 +1,7 @@
 node_modules/
+.npm-cache/
+.local/
+.source-tests/
 dist/
 .qw-pages/
 coverage/
@@ -8,11 +11,9 @@ coverage/
 *.log
 .DS_Store
 .runtime-tmp/
-.runtime-tmp/
 .playwright-cli/
-dist/
-.qw-pages/
-*.log
 *.png
 !src/**/*.png
-node_modules/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

@@ -4,15 +4,17 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "vite build && node scripts/prepare-publish.mjs",
+    "build": "vite build --configLoader runner && node scripts/prepare-publish.mjs",
     "preview": "vite preview --host 0.0.0.0",
-    "start": "node server.mjs",
+    "start": "node scripts/local-workbench.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test tests/runtime.test.mjs"
+    "test": "npm run build && node --test tests/runtime.test.mjs tests/local-source.test.mjs",
+    "test:driver": "node --test tests/local-source.test.mjs",
+    "start:local": "node scripts/local-workbench.mjs"
   },
   "dependencies": {
     "react": "18.3.1",
