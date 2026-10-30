@@ -145,6 +145,29 @@ export type NoteRow = { notification_id: string; source_entity_type: string; sou
 export const notesSummary = () => api<NotesSummary>("/api/notes/summary");
 export const myNotes = () => api<{ rows: NoteRow[] }>("/api/notes");
 export const noteRead = (id: string) => api<{ ok: true; read_at: string; idempotent_replay?: boolean }>(`/api/notes/${encodeURIComponent(id)}/read`, { method: "POST", body: "{}" });
+
+export type DailyRisk = { eventType:string; eventName:string|null; dimension:string|null; observedCount:number; priority:number; priorityBasis:string; priorityScore:null; firstObservedAt:string; lastObservedAt:string; evidenceRefs:string[] };
+export type DailyCard = { type:string; priority:number; title:string; description:string; evidenceRefs:string[] };
+export type DailySafetyReport = {
+  schemaVersion:number; reportDate:string; driverId:string; dataAsOf:string; dataStatus:string; sourceFingerprint:string; title:string; summary:string;
+  metrics:{personalScore:number|null;personalScoreDate:string|null;scoreEvidenceId:string|null;scoreChange:number|null;scoreComparisonStatus:string;scoreConfidence:string|null;fleetAverage:number|null;fleetScoredDrivers:number|null;fleetDate:string|null;riskCount7d:number|null;riskRate:number|null};
+  risks:DailyRisk[];cards:DailyCard[];dailyGoal:{type:string;description:string;status:string;recommendationBasis?:string;scoreEvidenceRef?:string|null;evidenceRefs:string[]}|null;
+  goalTracking?:{previousGoalId:number;previousReportDate:string;previousStatus:string;previousFeedbackCode:string|null;newEvidence:boolean;assessment:string;note:string}|null;
+  approvedCourseRefs:string[];
+  coverage:{source:string;observedDates:string[];firstOwnedEventAt:string|null;complete7d:boolean;complete30d:boolean;exposureAvailable:boolean};dataLimitations:string[];
+};
+export type PublishedDailyReport = {id:number;reportVersion:number;publishedAt:string;report:DailySafetyReport};
+export type DailyHistory = {rows:{id:number;reportDate:string;reportVersion:number;isCurrent:boolean;publishedAt:string;title:string}[];total:number;limit:number;offset:number};
+export type DailyGoal = {id:number;reportId:number;previousGoalId:number|null;type:string;description:string;status:string;feedbackCode:string|null;feedbackText:string|null;updatedAt:string|null;createdAt:string};
+export const dailyReportToday = () => api<PublishedDailyReport|null>('/api/driver/reports/today');
+export const dailyReportHistory = (offset=0) => api<DailyHistory>(`/api/driver/reports/history?limit=20&offset=${offset}`);
+export const dailyReportDetail = (id:number) => api<PublishedDailyReport>(`/api/driver/reports/${id}`);
+export const dailyReportNotifications = () => api<{rows:NoteRow[]}>('/api/driver/notifications');
+export const dailySafetyGoals = () => api<{rows:DailyGoal[]}>('/api/driver/safety-goals');
+export const dailyGoalFeedback = (id:number,code:'will_review'|'need_help'|'dismissed',text='') => api<{id:number;status:string;feedbackCode:string;updatedAt:string;idempotentReplay:boolean}>(`/api/driver/safety-goals/${id}/feedback`,{method:'POST',body:JSON.stringify({code,text})});
+export const adminDailyReportRun = (driverId:string,reportDate:string,revise=false) => api<PublishedDailyReport & {idempotentReplay:boolean;notificationCount:number}>('/api/admin/daily-reports/run',{method:'POST',body:JSON.stringify({driver_id:driverId,report_date:reportDate,revise})});
+export type DailyReportJobs = {date:string;total:number;byStatus:Record<string,number>;rows:{id:number;driver_id:string;report_date:string;status:string;attempts:number;started_at:string|null;finished_at:string|null;error_message:string|null}[];limit:number;offset:number};
+export const adminDailyReportJobs = (date:string,status?:'failed') => api<DailyReportJobs>(`/api/admin/daily-reports/jobs?${new URLSearchParams({date,...(status?{status}:{})})}`);
 export const alertHandoff = (id: string, to_user_id: string) => api<{ ok: true; owner_user_id: string; audit_id: string | null }>(`/api/alerts/${encodeURIComponent(id)}/handoff`, { method: "POST", body: JSON.stringify({ to_user_id }) });
 export const alertNote = (id: string, note: string) => api<{ ok: true; audit_id: string | null; note: string }>(`/api/alerts/${encodeURIComponent(id)}/note`, { method: "POST", body: JSON.stringify({ note }) });
 export const alertContact = (id: string, next_contact_at: string) => api<{ ok: true; next_contact_at: string; audit_id: string | null }>(`/api/alerts/${encodeURIComponent(id)}/contact`, { method: "POST", body: JSON.stringify({ next_contact_at }) });

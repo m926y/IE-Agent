@@ -1,5 +1,7 @@
 import { createServer } from "node:http";
 import { compileFilters } from "./local-data-store.mjs";
+import { publishDailyReport, getDailyReport, listDailyReports, listSafetyGoals, listDailyReportNotifications, feedbackSafetyGoal } from './daily-report/report-store.mjs';
+import { listDailyReportJobs } from './daily-report/report-scheduler.mjs';
 
 // Restricted localhost adapter. The app server owns user authorization.
 export function createLocalBroker(store, key, faults) {
@@ -8,6 +10,26 @@ export function createLocalBroker(store, key, faults) {
     try {
       if (req.headers.apikey !== key) return send(403, { code: "forbidden" });
       const url = new URL(req.url, "http://local"), table = url.pathname.replace(/^\/rest\/v1\//, "");
+      if (url.pathname === '/internal/daily-reports') {
+        let input={};
+        if (req.method==='POST') { let raw=''; for await (const part of req) { raw+=part; if(raw.length>4096) return send(413,{code:'body_too_large'}); } input=raw?JSON.parse(raw):{}; }
+        try {
+          if(req.method==='GET' && url.searchParams.get('kind')==='jobs') return send(200,listDailyReportJobs(store,{date:url.searchParams.get('date'),limit:Number(url.searchParams.get('limit')||50),offset:Number(url.searchParams.get('offset')||0),fleetId:url.searchParams.get('fleet_id'),status:url.searchParams.get('status')}));
+          const driverId=String(input.driverId || url.searchParams.get('driver_id') || '');
+          if (!/^[\w.-]{1,100}$/.test(driverId)) return send(400,{code:'invalid_driver_id'});
+          if (req.method==='POST' && input.action==='publish') return send(200,publishDailyReport(store,{driverId,reportDate:input.reportDate,actorId:input.actorId,revise:input.revise===true}));
+          if (req.method==='POST' && input.action==='feedback') { const result=feedbackSafetyGoal(store,driverId,input.goalId,{code:input.code,text:input.text,actorId:input.actorId}); return result?send(200,result):send(404,{code:'not_found'}); }
+          if (req.method==='GET') {
+            const kind=url.searchParams.get('kind');
+            if (kind==='today') { const row=getDailyReport(store,driverId,{date:url.searchParams.get('date')}); return row?send(200,row):send(404,{code:'not_found'}); }
+            if (kind==='detail') { const row=getDailyReport(store,driverId,{id:Number(url.searchParams.get('id'))}); return row?send(200,row):send(404,{code:'not_found'}); }
+            if (kind==='history') return send(200,listDailyReports(store,driverId,{limit:Number(url.searchParams.get('limit')||20),offset:Number(url.searchParams.get('offset')||0)}));
+            if (kind==='goals') return send(200,{rows:listSafetyGoals(store,driverId)});
+            if (kind==='notifications') return send(200,listDailyReportNotifications(store,driverId,String(url.searchParams.get('user_id')||'')));
+          }
+          return send(400,{code:'invalid_daily_report_request'});
+        } catch(error) { const code=String(error?.message||'');return send(code==='report_revision_required'?409:code==='driver_not_found_or_ambiguous'?404:code.startsWith('invalid_')?400:503,{code:code==='report_revision_required'?code:code==='driver_not_found_or_ambiguous'?'not_found':code.startsWith('invalid_')?code:'daily_report_store_unavailable'}); }
+      }
       if (!Object.hasOwn(store.pk, table)) return send(404, { code: "unknown_local_table" });
       if (!["GET", "HEAD", "POST", "PATCH", "DELETE"].includes(req.method)) return send(405, { code: "method_not_allowed" });
       if (store.immutable.has(table) && !["GET", "HEAD"].includes(req.method)) return send(403, { code: "source_facts_read_only" });

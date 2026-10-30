@@ -1566,6 +1566,72 @@ function requireVerifiedDriver(principal) {
   return user;
 }
 
+const dailyBusinessDate = () => new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+const validDailyDate = value => typeof value==='string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString().slice(0,10)===value;
+async function dailyReportStore(method,params={}) {
+  if (process.env.IE_LOCAL_SOURCE_ONLY!=='1') throw new HttpError(503,'daily_reports_local_only');
+  const target=resolveDbTarget();
+  let result;
+  try {
+    const query=method==='GET'?'?'+new URLSearchParams(params):'';
+    result=await fetch(`${target.url}/internal/daily-reports${query}`,{method,headers:{apikey:target.key,'content-type':'application/json'},body:method==='POST'?JSON.stringify(params):undefined});
+  } catch { throw new HttpError(503,'daily_report_store_unavailable'); }
+  let payload;try{payload=await result.json();}catch{throw new HttpError(503,'daily_report_store_unavailable');}
+  if (!result.ok) throw new HttpError(result.status===404?404:result.status===409?409:result.status===400?400:503,payload.code||'daily_report_store_unavailable');
+  return payload;
+}
+async function handleDailyReportRun(request,response,url,ctx) {
+  const user=requireUser(ctx.principal);
+  if (user.role!=='safety_admin') throw new HttpError(403,'forbidden');
+  const body=await readBody(request);
+  const driverId=String(body.driver_id||'');
+  const reportDate=body.report_date||dailyBusinessDate();
+  if (!/^[\w.-]{1,100}$/.test(driverId)||!validDailyDate(reportDate)||reportDate>dailyBusinessDate()||typeof body.revise!=='undefined'&&typeof body.revise!=='boolean') throw new HttpError(400,'invalid_daily_report_request');
+  const driver=(await dbRequest('list_resource','GET','drivers',{query:{driver_id:`eq.${driverId}`,select:'driver_id,fleet_id',limit:1}})).data?.[0];
+  if (!driver) throw new HttpError(404,'not_found');
+  await assertInScope(ctx.principal,{driverId});
+  sendJson(response,200,await dailyReportStore('POST',{action:'publish',driverId,reportDate,actorId:user.user_id,revise:body.revise===true}));
+}
+async function handleDailyReportJobs(request,response,url,ctx) {
+  const user=requireUser(ctx.principal);
+  if(user.role!=='safety_admin') throw new HttpError(403,'forbidden');
+  const date=url.searchParams.get('date')||dailyBusinessDate(),limit=url.searchParams.get('limit')||'50',offset=url.searchParams.get('offset')||'0',status=url.searchParams.get('status');
+  if(!validDailyDate(date)||date>dailyBusinessDate()||!/^[1-9]\d*$/.test(limit)||Number(limit)>100||!/^\d+$/.test(offset)||!Number.isSafeInteger(Number(offset))||status!==null&&!['pending','running','succeeded','failed'].includes(status)) throw new HttpError(400,'invalid_job_query');
+  const fleetId=String(user.fleet_scope||'*');
+  sendJson(response,200,await dailyReportStore('GET',{kind:'jobs',date,limit,offset,...(status?{status}:{}),...(fleetId==='*'?{}:{fleet_id:fleetId})}));
+}
+async function handleDailyReportToday(request,response,url,ctx) {
+  const user=requireVerifiedDriver(ctx.principal);
+  let report=null;try{report=await dailyReportStore('GET',{kind:'today',driver_id:user.driver_id,date:dailyBusinessDate()});}catch(error){if(!(error instanceof HttpError&&error.status===404))throw error;}
+  sendJson(response,200,report);
+}
+async function handleDailyReportHistory(request,response,url,ctx) {
+  const user=requireVerifiedDriver(ctx.principal);
+  const limit=url.searchParams.get('limit')||'20',offset=url.searchParams.get('offset')||'0';
+  if (!/^\d+$/.test(limit)||Number(limit)<1||Number(limit)>50||!/^\d+$/.test(offset)||!Number.isSafeInteger(Number(offset))) throw new HttpError(400,'invalid_pagination');
+  sendJson(response,200,await dailyReportStore('GET',{kind:'history',driver_id:user.driver_id,limit,offset}));
+}
+async function handleDailyReportDetail(request,response,url,ctx) {
+  const user=requireVerifiedDriver(ctx.principal),id=url.pathname.slice('/api/driver/reports/'.length);
+  if (!/^[1-9]\d*$/.test(id)||!Number.isSafeInteger(Number(id))) throw new HttpError(404,'not_found');
+  sendJson(response,200,await dailyReportStore('GET',{kind:'detail',driver_id:user.driver_id,id}));
+}
+async function handleDailySafetyGoals(request,response,url,ctx) {
+  const user=requireVerifiedDriver(ctx.principal);
+  sendJson(response,200,await dailyReportStore('GET',{kind:'goals',driver_id:user.driver_id}));
+}
+async function handleDailyGoalFeedback(request,response,url,ctx) {
+  const user=requireVerifiedDriver(ctx.principal),match=/^\/api\/driver\/safety-goals\/([1-9]\d*)\/feedback$/.exec(url.pathname);
+  if (!match||!Number.isSafeInteger(Number(match[1]))) throw new HttpError(404,'not_found');
+  const body=await readBody(request);
+  if (!['will_review','need_help','dismissed'].includes(body.code)||typeof (body.text??'')!=='string'||(body.text??'').length>500) throw new HttpError(400,'invalid_goal_feedback');
+  sendJson(response,200,await dailyReportStore('POST',{action:'feedback',driverId:user.driver_id,actorId:user.user_id,goalId:Number(match[1]),code:body.code,text:body.text??''}));
+}
+async function handleDailyReportNotifications(request,response,url,ctx) {
+  const user=requireVerifiedDriver(ctx.principal);
+  sendJson(response,200,await dailyReportStore('GET',{kind:'notifications',driver_id:user.driver_id,user_id:user.user_id}));
+}
+
 const driverProjectionRead = (table, query) => dbRequest("list_resource", "GET", table, { query, headers: { Prefer: "count=exact" } });
 const projectionFail = (status, code) => { throw new HttpError(status, code); };
 async function handleDriverActionCenter(request, response, url, ctx) {
@@ -3416,6 +3482,14 @@ const API_ROUTES = [
   { method: "POST", path: "/api/me/profile", needAuth: true, handler: handleOwnProfile },
   { method: "GET", path: "/api/analysis/root-causes", needAuth: true, handler: handleRootCauses },
   { method: "GET", path: "/api/driver/fleet-summary", needAuth: true, handler: handleDriverFleetSummary },
+  { method: "GET", path: "/api/driver/reports/today", needAuth: true, handler: handleDailyReportToday },
+  { method: "GET", path: "/api/driver/reports/history", needAuth: true, handler: handleDailyReportHistory },
+  { method: "GET", pathPrefix: "/api/driver/reports/", needAuth: true, handler: handleDailyReportDetail },
+  { method: "GET", path: "/api/driver/safety-goals", needAuth: true, handler: handleDailySafetyGoals },
+  { method: "POST", pathPrefix: "/api/driver/safety-goals/", needAuth: true, handler: handleDailyGoalFeedback },
+  { method: "GET", path: "/api/driver/notifications", needAuth: true, handler: handleDailyReportNotifications },
+  { method: "POST", path: "/api/admin/daily-reports/run", needAuth: true, handler: handleDailyReportRun },
+  { method: "GET", path: "/api/admin/daily-reports/jobs", needAuth: true, handler: handleDailyReportJobs },
   { method: "GET", path: "/api/driver/action-center", needAuth: true, handler: handleDriverActionCenter },
   { method: "GET", path: "/api/driver/score-comparison", needAuth: true, handler: handleDriverScoreComparison },
   { method: "GET", path: "/api/driver/intervention", needAuth: true, handler: handleDriverInterventionView },

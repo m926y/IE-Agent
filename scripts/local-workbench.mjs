@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { openLocalStore } from "./local-data-store.mjs";
+import { runDailyReportCycle } from './daily-report/report-scheduler.mjs';
 
 import { createLocalBroker } from "./local-broker.mjs";
 
@@ -21,14 +22,25 @@ export async function startLocalWorkbench(options = {}) {
   let logs=""; app.stdout.on("data",c=>{logs+=c;});app.stderr.on("data",c=>{logs+=c;});
   let worker;
   if(!options.pauseOutbox) worker=setInterval(()=>{try{store.drainOutbox();}catch{ /* remains durable pending; retry next tick */ }},1000);
+  let dailyTimer,dailyKick,stopping=false,dailyBusy=false;
+  const runDaily=()=>{
+    if(stopping||dailyBusy)return;
+    dailyBusy=true;
+    try{
+      const result=runDailyReportCycle(store,{now:options.dailyReportClock?.()||new Date()});
+      if(result.due>0) dailyKick=setImmediate(runDaily);
+    }catch(error){logs+=`\nDaily report worker: ${String(error?.message||error)}`;}
+    finally{dailyBusy=false;}
+  };
   const base=`http://127.0.0.1:${port}`;
-  async function stop(){clearInterval(worker);if(app.exitCode===null){app.kill();await once(app,"close");}await new Promise(r=>broker.close(r));store.close();}
+  async function stop(){stopping=true;clearInterval(worker);clearInterval(dailyTimer);clearImmediate(dailyKick);if(app.exitCode===null){app.kill();await once(app,"close");}await new Promise(r=>broker.close(r));store.close();}
   for(let i=0;i<200;i++){try{if((await fetch(base+"/healthz")).ok)break;}catch{}if(i===199){await stop();throw new Error("Local app did not start: "+logs.slice(-500));}await new Promise(r=>setTimeout(r,25));}
+  if(options.enableDailyReports){dailyTimer=setInterval(runDaily,60000);dailyKick=setImmediate(runDaily);}
   return {base,store,faults,stop,logs:()=>logs};
 }
 
 if(process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
-  const local=await startLocalWorkbench({port:Number(process.env.LOCAL_PORT||3100),directory:process.env.LOCAL_STATE_DIR});
+  const local=await startLocalWorkbench({port:Number(process.env.LOCAL_PORT||3100),directory:process.env.LOCAL_STATE_DIR,enableDailyReports:true});
   console.log(`Local workbench: ${local.base}\nData source: IE亮剑 only\nAccount file: ${local.store.directory}/accounts.json\nDatabase: ${local.store.directory}/workbench.sqlite`);
   for(const signal of ["SIGINT","SIGTERM"])process.once(signal,()=>local.stop().then(()=>process.exit(0)));
 }

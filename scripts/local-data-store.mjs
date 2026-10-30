@@ -3,6 +3,7 @@ import { readFile, realpath, mkdir, writeFile } from "node:fs/promises";
 import { resolve, relative, isAbsolute, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes, scryptSync } from "node:crypto";
+import { initDailyReportTables } from './daily-report/report-store.mjs';
 
 const allowedRoot = fileURLToPath(new URL("../../IE亮剑/", import.meta.url));
 export function parseCsv(text) {
@@ -75,6 +76,7 @@ export async function openLocalStore({ directory, sourceRoot = allowedRoot } = {
   }
   const previous = db.prepare("SELECT value FROM metadata WHERE key='source_hash'").get()?.value;
   if (previous && previous !== sourceHash) { db.close(); throw new Error("Source files changed. Use a new local database directory; existing state was not overwritten."); }
+  initDailyReportTables(db);
   // Additive local upgrade: existing business rows and the training outbox remain intact.
   db.exec(`CREATE TABLE IF NOT EXISTS review_outbox (
     request_id TEXT NOT NULL,kind TEXT NOT NULL,target_user_id TEXT,content TEXT,

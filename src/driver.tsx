@@ -4,9 +4,10 @@ import { DriverRiskPanel, DriverTrainingCard } from "./driver-learning";
 import { DriverReadError, numberText, finiteValue, driverDimensions } from "./driver-shared";
 import { DriverEvidence } from "./driver-evidence";
 import { DriverActions } from "./driver-actions";
+import { DailyReportEntry, DailyReportPage } from './daily-report';
 import type { DriverDestination } from "./driver-actions";
 import type { FleetSummary } from "./api";import type { MeUser } from "./api";
-import { ApiError, fleetSummary, getOwnProfile, updateOwnProfile, getData, interventionRead, interventionReply, logout, myNotes, noteRead, rrCreate } from "./api";
+import { ApiError, dailyReportNotifications, fleetSummary, getOwnProfile, updateOwnProfile, getData, interventionRead, interventionReply, logout, myNotes, noteRead, rrCreate } from "./api";
 import { Banner, EmptyState, Tag, GlobalSearch} from "./ui";
 
 function FleetStatsPanel() {
@@ -203,13 +204,14 @@ function ProfileEdit() {
   </div>;
 }
 
-function MySafety({ user, onNavigate = () => {}, reviewOpen = false }: { user: MeUser; onNavigate?: (target: DriverDestination) => void; reviewOpen?: boolean }) {
+function MySafety({ user, onNavigate = () => {}, onReport = () => {}, reviewOpen = false }: { user: MeUser; onNavigate?: (target: DriverDestination) => void; onReport?:()=>void; reviewOpen?: boolean }) {
   const unbound = !user.driverId || !user.bindingVerified;
   return <div className="stack">
     {unbound
       ? <Banner tone="warn">当前账号未完成“已核实司机绑定”。未核实时不展示个人明细——这是设计约束，不是数据丢失。安全管理员在 SM01/SM02 核实绑定后刷新即可见。</Banner>
       : <Banner tone="warn"><span>演示数据绑定：{user.driverId}（{user.bindingNote || "synthetic_demo_mapping"}）。非真实司机身份核验，仅用于工作台演示。</span></Banner>}
     {!unbound && <DriverActions navigate={onNavigate} />}
+    {!unbound && <DailyReportEntry onOpen={onReport} />}
     {!unbound ? <OwnScoreDetail /> : <div className="panel score-hero"><div className="n">—</div><div className="l">近14天安全评分（绑定核实后显示 · 只读算法事实）</div></div>}
     <details className="panel driver-review" open={reviewOpen}><summary>评分复核申请（EV05）</summary><RRRequestPanel unbound={unbound} /></details>
   </div>;
@@ -309,6 +311,7 @@ const TABS = [
   { key: "risk", ico: "△", label: "历史风险与沟通", el: (u: MeUser) => <MyRisk user={u} /> },
   { key: "training", ico: "▤", label: "培训任务", el: () => <MyTraining /> },
   { key: "profile", ico: "◎", label: "我的资料", el: (u: MeUser) => <MyProfile user={u} /> },
+  { key: "report", ico: "▣", label: "安全简报", el: (u: MeUser) => <DailyReportPage enabled={Boolean(u.driverId&&u.bindingVerified)} /> },
 ];
 
 export function DriverShell({ user }: { user: MeUser }) {
@@ -319,6 +322,8 @@ function DriverShellContent({ user }: { user: MeUser }) {
   const navigation = useDriverNavigation();
   const [tab, setTab] = useState(0);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [reportUnread,setReportUnread]=useState(0);
+  useEffect(()=>{if(!user.driverId||!user.bindingVerified)return;let live=true;const refresh=()=>{if(document.visibilityState==='hidden')return;dailyReportNotifications().then(result=>{if(live)setReportUnread(result.rows.filter(row=>!row.read_at).length);}).catch(()=>{});};refresh();const timer=setInterval(refresh,60000);document.addEventListener('visibilitychange',refresh);return()=>{live=false;clearInterval(timer);document.removeEventListener('visibilitychange',refresh);};},[user.driverId,user.bindingVerified]);
   const navigate = (target: DriverDestination) => navigation.request(() => { setReviewOpen(target === "review"); setTab(target === "training" ? 2 : target === "risk" ? 1 : 0); });
   const active = TABS[tab];
   return <div className="driver-shell">
@@ -329,10 +334,10 @@ function DriverShellContent({ user }: { user: MeUser }) {
     <main className="driver-main">
       <div className="driver-safety-note">停车后操作</div>
       {user.localSourceOnly && <Banner tone="warn">数据来自IE亮剑历史材料；无实时监控或专业测验。课程状态和人工复核以实际记录为准。</Banner>}
-      {active.key === "safety" ? <MySafety user={user} onNavigate={navigate} reviewOpen={reviewOpen} /> : active.el(user)}
+      {active.key === "safety" ? <MySafety user={user} onNavigate={navigate} onReport={()=>navigation.request(()=>setTab(4))} reviewOpen={reviewOpen} /> : active.el(user)}
     </main>
     <nav className="tabbar">
-      {TABS.map((t, i) => <TabBtn key={t.key} active={i === tab} ico={t.ico} label={t.label} onClick={() => { if (i !== tab) navigation.request(() => { setReviewOpen(false); setTab(i); }); }} />)}
+      {TABS.map((t, i) => <TabBtn key={t.key} active={i === tab} ico={t.ico} label={t.key==='report'&&reportUnread>0?`${t.label} · ${reportUnread}`:t.label} onClick={() => { if (i !== tab) navigation.request(() => { setReviewOpen(false); setTab(i); }); }} />)}
     </nav>
   </div>;
 }

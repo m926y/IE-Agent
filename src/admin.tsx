@@ -13,6 +13,7 @@ import { AuditConsole, CourseBoard } from "./sm19";
 import { Dashboard } from "./dashboard";
 import { RootCausesPage, MandatePolicyCard } from "./r37";
 import { TrainingNotificationRecovery, notificationText } from "./training-recovery";
+import { AdminDailyReportPanel } from './daily-report';
 
 const IMPORTABLE_TABLES = [
   "drivers", "risk_snapshots", "score_snapshots", "review_queue", "score_history", "deduction_ledger",
@@ -110,7 +111,7 @@ function ImportPanel({ onCommitted }: { onCommitted: () => void }) {
 }
 
 const NAV: { group: string; items: { key: string; label: string; code?: string }[] }[] = [
-  { group: "工作台", items: [{ key: "overview", label: "工作台总览" }] },
+  { group: "工作台", items: [{ key: "overview", label: "工作台总览" }, { key: "daily-reports", label: "每日安全简报" }] },
   { group: "安全评价", items: [
     { key: "ev-fleet", label: "车队总览", code: "EV01" },
     { key: "ev-week", label: "周度分析", code: "EV02" },
@@ -995,6 +996,7 @@ export function AdminShell({ user, aiOpen, onAiToggle }: { user: MeUser; aiOpen:
   const view = useMemo(() => {
     switch (route) {
       case "ev-fleet": return <EvFleet />;
+      case "daily-reports": return <AdminDailyReportPanel localOnly={Boolean(user.localSourceOnly)} />;
       case "ev-week": return <EvWeek />;
       case "ev-driver": return <EvFleet />; // 详情需从列表行进入
       case "ev-review": return <EvReview />;

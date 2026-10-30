@@ -94,19 +94,19 @@
       "sha256": "54c9959d39497235afca9217ac6286f3ae0d5246bfd1339b2bf9445981f86f6a"
     }
   ],
-  "code_hash": "1e706d934aa0adc1469d6dcef8226dde8eabb7b8a56924f6fa246067495c995f",
+  "code_hash": "39fc3e07309a7e209008fac4b8f040514cd41ee106010b5e03f7960e78710674",
   "files": [
     {
-      "file": "dist/assets/index-Bpg3-Wkp.js",
-      "sha256": "f35fbb6a040a1b9266153e7d7bfae47065641dca278d395e811b78d1e97ffd4b"
+      "file": "dist/assets/index-B0ymHcwh.js",
+      "sha256": "447630fd573fa539c2654b70b3359ac4a23b9d8d8a38386ee6282f1225cd60e0"
     },
     {
-      "file": "dist/assets/index-C699quFR.css",
-      "sha256": "2cd3bd450807a1538693264b2099c7c440bf7d2fa33bf88d914b009948347824"
+      "file": "dist/assets/index-Dftai2zb.css",
+      "sha256": "ef2294262f10b7226bb576cd388ac1ac362ea5bf6632317fb2c9af458af4337b"
     },
     {
       "file": "dist/index.html",
-      "sha256": "45b40524dd87a34579ff9a8a030454a9c739c1571083aca2bb4710d42247ff9e"
+      "sha256": "c0ed3d52053fc8298205b6b5623f91765ccb5acaa582e13c4d6ff6d265a56382"
     },
     {
       "file": "index.html",
@@ -118,7 +118,7 @@
     },
     {
       "file": "package.json",
-      "sha256": "0cf83b6c973f0e6a782d1aecfaf740567c2cf9d5f781d0e11b7b3ee1656ae67e"
+      "sha256": "a6b6e37b859a848c3785f05dd21faf6797c4de864ed188342195c05812cb07de"
     },
     {
       "file": "scripts/build-local-manifest.mjs",
@@ -169,16 +169,56 @@
       "sha256": "8e15f60a44aa9b39b70e318a5f678f00b742166aeb12d9df09400a934ffd8e25"
     },
     {
+      "file": "scripts/daily-report/cli.mjs",
+      "sha256": "9e2ad71446b3a347eec330a28a3031c70ad6abeaf54fcdb6122aedc2fde49bf7"
+    },
+    {
+      "file": "scripts/daily-report/data-reader.mjs",
+      "sha256": "014fbd8e36db50349e850106f32219fb082400de9edaac662768c0073407f810"
+    },
+    {
+      "file": "scripts/daily-report/report-agent.mjs",
+      "sha256": "16e486c10cdab49c29265a2c9da7b668fca02760080c6a921ddaf305ffda613e"
+    },
+    {
+      "file": "scripts/daily-report/report-scheduler.mjs",
+      "sha256": "4466bf48a2b54e65eac7a3b90239ae66095f429e44b9205b8592db99efd4746b"
+    },
+    {
+      "file": "scripts/daily-report/report-schema.json",
+      "sha256": "c5483f53f69054d4c687aea25298d4fe9d61a2092671a4c321c7406d2b9f6ca1"
+    },
+    {
+      "file": "scripts/daily-report/report-service.mjs",
+      "sha256": "6cc049778495d9b8e38c1213f0cfb713532f15300e193cc986fe924a28a609c6"
+    },
+    {
+      "file": "scripts/daily-report/report-store.mjs",
+      "sha256": "ead3f16198945298fa5271e64ecb5d1566e806e4df5ebab0bdf79d9441f96b13"
+    },
+    {
+      "file": "scripts/daily-report/report-validator.mjs",
+      "sha256": "477fb9a2c9591469b53aa4a2fdc6130972f2f1e971afd9c7994af1d18c290b83"
+    },
+    {
+      "file": "scripts/daily-report/safety-analyzer.mjs",
+      "sha256": "682e896ac492277f3cca6e8444c7dfe1eff9b86cdf3f250db592926764ae0365"
+    },
+    {
+      "file": "scripts/daily-report/ui-smoke.mjs",
+      "sha256": "959dcb2dc4985d3b0a4ada8aba42832544452da76e0b8388a76034d887129375"
+    },
+    {
       "file": "scripts/local-broker.mjs",
-      "sha256": "11b74a22158356cb2306bea89dd0d3268ae8e02104d3a18bca508fc9cd77e058"
+      "sha256": "6e0d2eee861d52b03ee89e5ad363939fd861eefd1f6d88a34c2005a1ee596cd9"
     },
     {
       "file": "scripts/local-data-store.mjs",
-      "sha256": "e9657c3d9db0cec3c8ca2fce427351f564905b238c58b93c2f515a88f3d17de1"
+      "sha256": "a54bcf64238c917147004dc8ca464e004d79bf7277f5850eb259e4c1c14f8eac"
     },
     {
       "file": "scripts/local-workbench.mjs",
-      "sha256": "04ba0f21acd06837cc8cb6dce34f4b7d76ae1912ed9f6c9359b98cc7cd7b8a79"
+      "sha256": "c5bbc1af3dbd30f7208863c4c6582d24fc5828955bed42c8693f68fd2914c9d9"
     },
     {
       "file": "scripts/prepare-publish.mjs",
@@ -194,11 +234,11 @@
     },
     {
       "file": "server.mjs",
-      "sha256": "f6484cfee8ad60a86a09e7ba9674affd3f4bd680367fa07493b32a108a9e42e8"
+      "sha256": "3733d11996721c6a63cbe6918b6ebd0cfe32cea951e15f4c9ece350893a2ad10"
     },
     {
       "file": "server/driver-actions.mjs",
-      "sha256": "b3904ec6b510b01a85608e62c87c57b5bf5265b17e6a3a482dc812acadddf7d4"
+      "sha256": "d34107be39d11277bac6b349bae5aa0e39712f9c15aa0acbc57b4aa1cb7a17ca"
     },
     {
       "file": "src/App.tsx",
@@ -206,11 +246,15 @@
     },
     {
       "file": "src/admin.tsx",
-      "sha256": "e83e50a902251d6dfef324872bf4bdc9a84890accf666316e9e3d6bcf213e0a6"
+      "sha256": "a347019b5c63f4cc4a856592ff461eff2cb58403738ec2dbc5e20b7a3b7a4fae"
     },
     {
       "file": "src/api.ts",
-      "sha256": "62a451fad2780e79aaf32637381c2233e940428eb16fb322d822f4c61d85ed4e"
+      "sha256": "bcd0edbed7c1f43fd2f621dd69bd7b6ec84cfa760ee2db535b1e387fd92ceabd"
+    },
+    {
+      "file": "src/daily-report.tsx",
+      "sha256": "bc33a471cbabbdbf1fcadf711091ca8246dd8237b53c3b2f55233a4982c48ce9"
     },
     {
       "file": "src/dashboard.tsx",
@@ -238,7 +282,7 @@
     },
     {
       "file": "src/driver.tsx",
-      "sha256": "29af198a34b92f0e4e621a6e258a7ce28a0e854eeef9a0c4c44316f72b9b5f66"
+      "sha256": "725df96968b1ea3625e18d7183340bc1982e798ef7698d5c4dfb5f338066ab8a"
     },
     {
       "file": "src/learning-report.tsx",
@@ -278,7 +322,7 @@
     },
     {
       "file": "src/styles.css",
-      "sha256": "1ba7821d1283ee8a7873237c2c513f7618fdf5595c054911241e774f778dd062"
+      "sha256": "ef2a481917b70b41bf1e0c2a1373c17c5542f8c04fed0eb486ae3940d7aa1510"
     },
     {
       "file": "src/theme.css",
@@ -295,6 +339,18 @@
     {
       "file": "src/vite-env.d.ts",
       "sha256": "424faf9241dd699dda995b367ed36665732da1e6ec1f33b2fd40394488ecac92"
+    },
+    {
+      "file": "tests/daily-report-http.test.mjs",
+      "sha256": "bc8624e6e3ede51e71c4de18df19d0d9e6a1b220e2bce773c645dce4b211adcf"
+    },
+    {
+      "file": "tests/daily-report-scheduler.test.mjs",
+      "sha256": "99b8323f9ba6ada5abf9d0226ce69dd84e91b9cd91f160ae4b5c40f961aaf320"
+    },
+    {
+      "file": "tests/daily-report.test.mjs",
+      "sha256": "254977804ec8eb04ffa3da69d146eabde619c6a046d13e7fc23362b9e905a16a"
     },
     {
       "file": "tests/docs.test.mjs",

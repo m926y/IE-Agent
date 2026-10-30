@@ -123,7 +123,7 @@ tbody tr:hover { background: #f7f9fd; }
 .driver-head .name { font-weight: 600; font-size: 15px; }
 .driver-head .sub { font-size: 12px; color: #b9c8e4; margin-top: 2px; }
 .driver-main { flex: 1; padding: 14px 14px 86px; }
-.tabbar { position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); width: min(520px, 100%); display: grid; grid-template-columns: repeat(4, 1fr); background: var(--card); border-top: 1px solid var(--line); z-index: 30; }
+.tabbar { position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); width: min(520px, 100%); display: grid; grid-template-columns: repeat(5, 1fr); background: var(--card); border-top: 1px solid var(--line); z-index: 30; }
 .tabbar button { border: 0; background: none; padding: 9px 0 12px; color: var(--ink-3); font-size: 12px; display: flex; flex-direction: column; gap: 2px; align-items: center; }
 .tabbar button .ico { font-size: 18px; line-height: 1; }
 .tabbar button.active { color: var(--navy); font-weight: 600; }
