@@ -197,6 +197,11 @@ export function App() {
   const [forceLogin, setForceLogin] = useState(false);
   const [ai, setAi] = useState(false);
   const [aiPreset, setAiPreset] = useState<string | null>(null);
+  useEffect(() => {
+    const lost = () => { setMe(null); setUnbound(null); setAi(false); };
+    window.addEventListener("claw:auth-lost", lost);
+    return () => window.removeEventListener("claw:auth-lost", lost);
+  }, []);
   useEffect(() => { const h = (ev: Event) => { const d = (ev as CustomEvent<{ prompt?: string }>).detail; if (d && d.prompt) { setAiPreset(String(d.prompt).slice(0, 400)); setAi(true); } }; window.addEventListener("claw:ai-preset", h); return () => window.removeEventListener("claw:ai-preset", h); }, []);
   const reload = () => getMe().then((r) => {
     if (!r) { setMe(null); return; }

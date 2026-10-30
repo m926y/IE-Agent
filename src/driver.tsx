@@ -1,12 +1,16 @@
-import { useEffect, useState } from "react";
-import { DriverReadError, DriverRiskPanel, DriverTrainingCard, numberText } from "./driver-learning";
+import { useEffect, useRef, useState } from "react";
+import { DriverNavigationProvider, useDriverNavigation } from "./driver-navigation";
+import { DriverRiskPanel, DriverTrainingCard } from "./driver-learning";
+import { DriverReadError, numberText, finiteValue, driverDimensions } from "./driver-shared";
 import { DriverEvidence } from "./driver-evidence";
+import { DriverActions } from "./driver-actions";
+import type { DriverDestination } from "./driver-actions";
 import type { FleetSummary } from "./api";import type { MeUser } from "./api";
 import { ApiError, fleetSummary, getOwnProfile, updateOwnProfile, getData, interventionRead, interventionReply, logout, myNotes, noteRead, rrCreate } from "./api";
 import { Banner, EmptyState, Tag, GlobalSearch} from "./ui";
 
 function FleetStatsPanel() {
-  const [fs, setFs] = useState<FleetSummary | "loading" | "error" | null>(null);
+  const [fs, setFs] = useState<FleetSummary | "loading" | "error" | null>("loading");
   useEffect(() => { fleetSummary().then((r) => setFs(r)).catch(() => setFs("error")); }, []);
   return <div className="panel" style={{ borderColor: "var(--line)", background: "#fcf9ff" }} aria-label="anonymous fleet statistics panel">
     <h3>匿名车队统计</h3>
@@ -15,7 +19,7 @@ function FleetStatsPanel() {
     {typeof fs === "object" && fs && fs.data_status !== "ok" && (
       <div className={"alert " + (fs.data_status === "query_failed" ? "warn" : "info")}>
         {fs.data_status === "insufficient_sample" ? "样本不足：该车队有效评分人数少于 10，均值与分布已隐藏（隐私保护，不以 0 或空壳冒充）"
-          : fs.data_status === "no_data" ? fs.note : "统计查询失败：请稍后重试（未以空值冒充 0）"}
+          : fs.note || "统计查询失败：请稍后重试（未以空值冒充 0）"}
         {fs.as_of_date ? " · 数据截止 " + fs.as_of_date : ""}
       </div>)}
     {typeof fs === "object" && fs && fs.data_status === "ok" && <>
@@ -33,6 +37,7 @@ function FleetStatsPanel() {
       </div> : <div className="alert info" style={{ marginTop: 6 }}>{fs.note || "等级类别过细可能反推个人：本次不展示分布（人数与均值保留）"}</div>}
       <p className="login-note">{fs.note}</p>
     </>}
+    {typeof fs === "object" && fs?.sample_definition && <p className="meta">有效样本口径：{fs.sample_definition}</p>}
   </div>;
 }
 
@@ -57,12 +62,13 @@ function MyHistory() {
     }).catch(() => { if (active) setRows("error"); });
     return () => { active = false; };
   }, [offset, retry]);
-  const DIMS = [["history_contribution", "历史"], ["fatigue_distraction_contribution", "疲劳分心"], ["driving_stability_contribution", "驾驶稳定性"], ["road_rule_contribution", "道路规则"], ["management_contribution", "管理配合"], ["imu_evidence_contribution", "IMU证据"]];
+  const DIMS = driverDimensions;
   const COLORS = ["#a480c4", "#b298d2", "#9b80bc", "#cab6dd", "#b68dbd", "#c4aed4"];
   if (rows === "error") return <div className="panel"><EmptyState kind="error" onRetry={() => setRetry(v => v + 1)} /></div>;
   if (!rows) return <div className="panel"><EmptyState kind="loading" /></div>;
   const last = rows[rows.length - 1] || {};
-  const maxd = Math.max(...DIMS.map(([k]) => Number(last[k] ?? 0) || 0), 1e-9);
+  const dimensionValue = (key: string) => finiteValue(last[key]);
+  const maxd = Math.max(...DIMS.map(([k]) => Math.max(0, dimensionValue(k) ?? 0)), 1);
   return <div className="panel"><h3>评分历史与六维</h3>
     <p className="meta">每页20条实际评价记录，第一页为最近记录，页内按时间顺序展示。近14天滚动评价不等同于独立周评分，版本或覆盖不一致时不能直接比较。</p>
     {rows.length === 0 && <p>暂无评分历史，未将缺失分值显示为0。</p>}
@@ -72,8 +78,7 @@ function MyHistory() {
     {selectedEvidence && <DriverEvidence key={selectedEvidence} kind="score_history" id={selectedEvidence} initialOpen />}
     {DIMS.map(([k, label], i) => <div key={k} className="row" style={{ marginBottom: 4 }}>
       <span style={{ width: 90, fontSize: 12.5, color: "var(--ink-2)" }}>{label}</span>
-      <span style={{ height: 12, width: `${(Number(last[k] ?? 0) / maxd) * 40}%`, minWidth: 2, background: COLORS[i], borderRadius: 3, display: "inline-block" }} />
-      <span className="mono">{last[k] == null ? "—" : numberText(last[k])}</span>
+      {dimensionValue(k) == null ? <span className="meta">未取得，未绘制</span> : <><span style={{ height: 12, width: `${Math.max(0, dimensionValue(k)!) / maxd * 40}%`, background: COLORS[i], borderRadius: 3, display: "inline-block" }} /><span className="mono">{numberText(last[k])}</span></>}
     </div>)}
     <p className="login-note">六维为本页最近一日（{String(last.as_of_date ?? "—")}）快照值；翻至历史页时不代表当前最新状态。只读事实，不补造数据。</p>
     <div className="row" aria-label="评分历史分页"><button className="btn" disabled={offset === 0} onClick={() => setOffset(v => Math.max(0, v - 20))}>较新评分</button><span>第 {offset / 20 + 1} 页</span><button className="btn" disabled={!more} onClick={() => setOffset(v => v + 20)}>更早评分</button></div>
@@ -92,11 +97,19 @@ function RRRequestPanel({ unbound }: { unbound: boolean }) {
   const [msg, setMsg] = useState<string | null>(null);
   const [mine, setMine] = useState<Record<string, unknown>[] | null>(null);
   const [mineError, setMineError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
   const load = () => { setMineError(null); getData<Record<string, unknown>>("my.review_requests", { limit: 20 }).then((r) => setMine(r.rows)).catch(setMineError); };
-  useEffect(() => { if (!unbound) { load(); getData<Record<string, unknown>>("my.score", { limit: 1 }).then((r) => setScoreId(String(r.rows[0]?.score_id || ""))).catch(() => {}); } }, [unbound, msg]);
-  function submit() {
-    setMsg(null);
-    rrCreate({ score_id: scoreId || undefined, reason_code: reason, description: desc }).then((r: { request_id: string; status: string; idempotent_replay?: boolean }) => setMsg(r.idempotent_replay ? `幂等：已有同一申请 ${r.request_id}（状态 ${r.status}）` : `已提交 request_id=${r.request_id}（submitted），安全员处理后此处可见答复`)).catch((e) => setMsg(`拒绝：${e instanceof ApiError ? e.code : "network"}`));
+  useEffect(() => { if (!unbound) { load(); getData<Record<string, unknown>>("my.score", { limit: 1 }).then((r) => setScoreId(String(r.rows[0]?.score_id || ""))).catch(() => {}); } }, [unbound]);
+  async function submit() {
+    if (inFlight.current || unbound || !scoreId || !desc.trim()) return;
+    inFlight.current = true; setBusy(true); setMsg(null);
+    try {
+      const r = await rrCreate({ score_id: scoreId, reason_code: reason, description: desc });
+      setMsg(`${r.idempotent_replay ? "已有同一申请" : "已提交申请"} ${r.request_id}（${r.status}）。${r.notification?.state === "pending" ? "申请已保存，站内提醒待恢复。" : "安全员处理后此处可见答复。"}`);
+      load();
+    } catch (e) { setMsg(`提交未确认（${e instanceof ApiError ? e.code : "network"}），说明已保留。请先查看处理记录，确认状态后重试。`); }
+    finally { inFlight.current = false; setBusy(false); }
   }
   if (unbound) return <><h3>对评分有疑问？</h3><p className="page-desc">当前无核实绑定：不展示对象明细，也无法针对本人评分提交复核。</p></>;
   return <>
@@ -104,10 +117,11 @@ function RRRequestPanel({ unbound }: { unbound: boolean }) {
     <p className="page-desc">填写原因及说明，提交后由安全员核查。仅可针对<b>本人真实存在</b>的评分/证据记录提交（系统按登录会话取 driver_id，不信任页面参数）；司机端不能修改任何评分，如源数据确有问题，由安全员转数据负责人走正式版本化流程。</p>
     <div className="field"><label>针对的评分记录</label><input value={scoreId || "（未取到本人快照）"} readOnly aria-label="针对评分记录" style={{ background: "var(--bg)" }} /></div>
     <div className="field"><label>原因</label>
-      <select className="btn" style={{ background: "#fff", textAlign: "left" }} value={reason} onChange={(e) => setReason(e.target.value)} aria-label="复核原因">{RR_REASONS.map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></div>
-    <div className="field"><label>说明（必填）</label><textarea style={{ width: "100%", minHeight: 60, borderRadius: 8, border: "1px solid var(--line)", padding: 8, font: "inherit" }} value={desc} onChange={(e) => setDesc(e.target.value)} aria-label="复核说明" /></div>
-    <button className="btn primary" onClick={submit} disabled={!desc.trim() || !scoreId}>提交复核申请</button>
-    {msg && <div className="alert info">{msg}</div>}
+      <select className="btn" disabled={busy} style={{ background: "#fff", textAlign: "left" }} value={reason} onChange={(e) => setReason(e.target.value)} aria-label="复核原因">{RR_REASONS.map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></div>
+    <div className="field"><label>说明（必填）</label><textarea disabled={busy} maxLength={4000} style={{ width: "100%", minHeight: 60, borderRadius: 8, border: "1px solid var(--line)", padding: 8, font: "inherit" }} value={desc} onChange={(e) => setDesc(e.target.value)} aria-label="复核说明" /></div>
+    <p className="meta">说明 {desc.length}/4000 字；服务器最多保存4000字。</p>
+    <button className="btn primary" onClick={() => void submit()} disabled={busy || !desc.trim() || !scoreId}>{busy ? "正在提交申请…" : "提交复核申请"}</button>
+    {msg && <div role="status" className="alert info">{msg}</div>}
     <h4 style={{ fontSize: 13, marginTop: 10 }}>我的申请与处理记录</h4>
     {mineError ? <DriverReadError error={mineError} retry={load} /> : mine === null && <EmptyState kind="loading" />}
     {!mineError && mine && mine.length === 0 && <p className="login-note">暂无申请。</p>}
@@ -189,14 +203,15 @@ function ProfileEdit() {
   </div>;
 }
 
-function MySafety({ user }: { user: MeUser }) {
+function MySafety({ user, onNavigate = () => {}, reviewOpen = false }: { user: MeUser; onNavigate?: (target: DriverDestination) => void; reviewOpen?: boolean }) {
   const unbound = !user.driverId || !user.bindingVerified;
   return <div className="stack">
     {unbound
       ? <Banner tone="warn">当前账号未完成“已核实司机绑定”。未核实时不展示个人明细——这是设计约束，不是数据丢失。安全管理员在 SM01/SM02 核实绑定后刷新即可见。</Banner>
       : <Banner tone="warn"><span>演示数据绑定：{user.driverId}（{user.bindingNote || "synthetic_demo_mapping"}）。非真实司机身份核验，仅用于工作台演示。</span></Banner>}
+    {!unbound && <DriverActions navigate={onNavigate} />}
     {!unbound ? <OwnScoreDetail /> : <div className="panel score-hero"><div className="n">—</div><div className="l">近14天安全评分（绑定核实后显示 · 只读算法事实）</div></div>}
-    <details className="panel driver-review"><summary>评分复核申请（EV05）</summary><RRRequestPanel unbound={unbound} /></details>
+    <details className="panel driver-review" open={reviewOpen}><summary>评分复核申请（EV05）</summary><RRRequestPanel unbound={unbound} /></details>
   </div>;
 }
 
@@ -204,14 +219,24 @@ function MyRisk({ user }: { user: MeUser }) {
   const [rows, setRows] = useState<Record<string, unknown>[] | null | "blocked" | "error">(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [rep, setRep] = useState<Record<string, string>>({});
+  const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
+  const inFlight = useRef(new Set<string>());
   useEffect(() => {
     if (!user.driverId || !user.bindingVerified) { setRows("blocked"); return; }
     getData<Record<string, unknown>>("my.interventions", { limit: 50 }).then((r) => setRows(r.rows)).catch(() => setRows("error"));
   }, [user.driverId, user.bindingVerified]);
-  async function read(id: string) { setMsg(null); try { const r = await interventionRead(id); setMsg(r.idempotent_replay ? `幂等：已存在已读记录 ${r.read_at}` : `已标记已读 ${r.read_at}`); refresh(); } catch (e) { setMsg(`拒绝：${e instanceof ApiError ? e.code : "network"}`); } }
-  async function reply(id: string) { setMsg(null); try { const r = await interventionReply(id, rep[id] || ""); setMsg(r.idempotent_replay ? `幂等：已有回复（${r.replied_at}），未重复写入` : `回复已发送 ${r.replied_at}`); refresh(); } catch (e) { setMsg(`拒绝：${e instanceof ApiError ? e.code : "network"}`); } }
+  async function act(id: string, action: "read" | "reply") {
+    if (inFlight.current.has(id) || (action === "reply" && !rep[id]?.trim())) return;
+    inFlight.current.add(id); setBusyIds(new Set(inFlight.current)); setMsg(null);
+    try {
+      const r = action === "read" ? await interventionRead(id) : await interventionReply(id, rep[id] || "");
+      setMsg(action === "read" ? `消息 ${id} 已读回执：${r.read_at}` : `消息 ${id} ${r.idempotent_replay ? "已有回复，未重复写入" : "回复已保存"} · ${r.replied_at} · 保存原文：${r.reply_text ?? "请刷新查看"}`);
+      refresh();
+    } catch (e) { setMsg(`消息 ${id} 操作结果未确认（${e instanceof ApiError ? e.code : "network"}），回复输入已保留，请查询最新状态后重试。`); }
+    finally { inFlight.current.delete(id); setBusyIds(new Set(inFlight.current)); }
+  }
   function refresh() { if (user.driverId && user.bindingVerified) getData<Record<string, unknown>>("my.interventions", { limit: 50 }).then((r) => setRows(r.rows)).catch(() => setRows("error")); }
-  if (rows === "blocked") return <EmptyState kind="nocov" hint="当前账号无核实有效绑定：不展示个人风险明细，且消息不会向其送达。" />;
+  if (!user.driverId || !user.bindingVerified || rows === "blocked") return <EmptyState kind="nocov" hint="当前账号无核实有效绑定：不展示个人风险明细，且消息不会向其送达。" />;
   if (rows === "error" || rows === null) return <div className="stack"><DriverRiskPanel /><EmptyState kind={rows === "error" ? "error" : "loading"} onRetry={refresh} /></div>;
   const mine = rows.filter((r) => ["sent", "read", "replied"].includes(String(r.status)));
   return <div className="stack">
@@ -223,35 +248,41 @@ function MyRisk({ user }: { user: MeUser }) {
       <div className="t">{String(r.sent_text || "")}</div>
       <div className="meta">发送 {String(r.sent_at || "—")} · 状态 <Tag tone={String(r.status) === "replied" ? "green" : "blue"}>{String(r.status)}</Tag>{r.read_at ? <> · 已读 {String(r.read_at)}</> : null}{r.replied_at ? <> · 已回复 {String(r.replied_at)}</> : null}</div>
       <div className="row" style={{ marginTop: 8 }}>
-        {!r.read_at ? <button className="btn" onClick={() => read(String(r.intervention_id))}>标记已读</button> : null}
+        {!r.read_at ? <button className="btn" disabled={busyIds.has(String(r.intervention_id))} onClick={() => void act(String(r.intervention_id), "read")}>标记已读</button> : null}
         {!r.replied_at ? <>
-          <input style={{ flex: 1, padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 8 }} placeholder="回复内容（仅本人可见给安全员）" value={rep[String(r.intervention_id)] || ""} onChange={(e) => setRep((s) => ({ ...s, [String(r.intervention_id)]: e.target.value }))} />
-          <button className="btn primary" style={{ width: "auto" }} onClick={() => reply(String(r.intervention_id))}>提交回复</button>
+          <input aria-label={`回复 ${String(r.intervention_id)}`} disabled={busyIds.has(String(r.intervention_id))} maxLength={2000} style={{ flex: 1, minWidth: 0, padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 8 }} placeholder="回复内容（发送给安全员）" value={rep[String(r.intervention_id)] || ""} onChange={(e) => setRep((s) => ({ ...s, [String(r.intervention_id)]: e.target.value }))} />
+          <button className="btn primary" disabled={busyIds.has(String(r.intervention_id)) || !rep[String(r.intervention_id)]?.trim()} style={{ width: "auto" }} onClick={() => void act(String(r.intervention_id), "reply")}>{busyIds.has(String(r.intervention_id)) ? "正在处理…" : "提交回复"}</button>
+          <span className="meta">回复 {(rep[String(r.intervention_id)] || "").length}/2000 字；服务器最多保存2000字。</span>
         </> : null}
         {r.replied_at ? <div className="meta">回复原文：{String(r.reply_text)}</div> : null}
       </div>
     </div>)}
-    {msg && <div className="alert info">{msg}</div>}
+    {msg && <div role="status" className="alert info">{msg}</div>}
   </div>;
 }
 
 function MyTraining() {
+  const navigation = useDriverNavigation();
   const [rows, setRows] = useState<Record<string, unknown>[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [offset, setOffset] = useState(0);
   const [more, setMore] = useState(false);
-  const load = () => { setError(null); getData<Record<string, unknown>>("my.trainings", { limit: 20, offset }).then(r => { setRows(r.rows); setMore(r.rows.length === 20); }).catch(setError); };
-  useEffect(() => { setRows(null); load(); }, [offset]);
-  if (error) return <DriverReadError error={error} retry={load} />;
+  const sequence = useRef(0);
+  const load = () => { const seq = ++sequence.current; setError(null); getData<Record<string, unknown>>("my.trainings", { limit: 20, offset }).then(r => { if (seq !== sequence.current) return; setRows(previous => [...(previous || []).filter(row => !r.rows.some(next => next.task_id === row.task_id) && navigation.isProtected(`training:${String(row.task_id)}`)), ...r.rows]); setMore(r.total == null ? r.rows.length === 20 : offset + r.rows.length < r.total); }).catch(e => { if (seq === sequence.current) setError(e); }); };
+  useEffect(() => { setRows(null); load(); return () => { sequence.current++; }; }, [offset]);
+  if (error && !rows) return <DriverReadError error={error} retry={load} />;
   if (!rows) return <EmptyState kind="loading" />;
   return <div className="stack"><h3>培训任务</h3><button className="btn" onClick={load}>刷新任务状态</button>
+    <p className="meta">刷新后会保留尚未保存或正在处理的任务；保存或明确放弃后，再切页查看其他任务。</p>
+    {error ? <DriverReadError error={error} retry={load} /> : null}
     {rows.length === 0 && <EmptyState kind="nomatch" hint="本页暂无培训任务。" />}
     {rows.map(r => <DriverTrainingCard key={String(r.task_id)} row={r} reload={load} />)}
-    <div className="row"><button className="btn" disabled={offset === 0} onClick={() => setOffset(v => Math.max(0, v - 20))}>上一页</button><span>第 {offset / 20 + 1} 页</span><button className="btn" disabled={!more} onClick={() => setOffset(v => v + 20)}>下一页</button></div>
+    <div className="row" aria-label="培训分页"><button className="btn" disabled={offset === 0} onClick={() => navigation.request(() => setOffset(v => Math.max(0, v - 20)))}>上一页</button><span>第 {offset / 20 + 1} 页</span><button className="btn" disabled={!more} onClick={() => navigation.request(() => setOffset(v => v + 20))}>下一页</button></div>
   </div>;
 }
 
 function MyProfile({ user }: { user: MeUser }) {
+  const navigation = useDriverNavigation();
   return <div className="stack">
     <h3 style={{ fontSize: 15 }}>我的资料</h3>
     <div className="panel"><div className="kv">
@@ -268,20 +299,27 @@ function MyProfile({ user }: { user: MeUser }) {
     </div>
     <ProfileEdit />
     <NotesInbox />
-    <button className="btn" onClick={async () => { await logout().catch(() => {}); try { const o = sessionStorage.getItem("claw_ai_owner"); if (o) sessionStorage.removeItem("claw_ai_msgs_" + o); sessionStorage.removeItem("claw_ai_owner"); sessionStorage.removeItem("claw_fill"); sessionStorage.removeItem("claw_fill_seen"); } catch {} window.dispatchEvent(new Event("claw:auth-lost")); location.reload(); }}>退出登录</button>
+    <button className="btn" onClick={() => navigation.request(() => { void (async () => { await logout().catch(() => {}); try { const o = sessionStorage.getItem("claw_ai_owner"); if (o) sessionStorage.removeItem("claw_ai_msgs_" + o); sessionStorage.removeItem("claw_ai_owner"); sessionStorage.removeItem("claw_fill"); sessionStorage.removeItem("claw_fill_seen"); } catch {} window.dispatchEvent(new Event("claw:auth-lost")); location.reload(); })(); })}>退出登录</button>
     {user.authKind === "sso" && <p className="login-note">平台 SSO 会话由网关管理，应用不提供强制登出；“退出”仅清除本工作台会话视图。</p>}
   </div>;
 }
 
 const TABS = [
   { key: "safety", ico: "◈", label: "我的安全", el: (u: MeUser) => <MySafety user={u} /> },
-  { key: "risk", ico: "△", label: "今日风险", el: (u: MeUser) => <MyRisk user={u} /> },
+  { key: "risk", ico: "△", label: "历史风险与沟通", el: (u: MeUser) => <MyRisk user={u} /> },
   { key: "training", ico: "▤", label: "培训任务", el: () => <MyTraining /> },
   { key: "profile", ico: "◎", label: "我的资料", el: (u: MeUser) => <MyProfile user={u} /> },
 ];
 
 export function DriverShell({ user }: { user: MeUser }) {
+  return <DriverNavigationProvider key={user.userId}><DriverShellContent user={user} /></DriverNavigationProvider>;
+}
+
+function DriverShellContent({ user }: { user: MeUser }) {
+  const navigation = useDriverNavigation();
   const [tab, setTab] = useState(0);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const navigate = (target: DriverDestination) => navigation.request(() => { setReviewOpen(target === "review"); setTab(target === "training" ? 2 : target === "risk" ? 1 : 0); });
   const active = TABS[tab];
   return <div className="driver-shell">
     <header className="driver-head">
@@ -291,10 +329,10 @@ export function DriverShell({ user }: { user: MeUser }) {
     <main className="driver-main">
       <div className="driver-safety-note">停车后操作</div>
       {user.localSourceOnly && <Banner tone="warn">数据来自IE亮剑历史材料；无实时监控或专业测验。课程状态和人工复核以实际记录为准。</Banner>}
-      {active.el(user)}
+      {active.key === "safety" ? <MySafety user={user} onNavigate={navigate} reviewOpen={reviewOpen} /> : active.el(user)}
     </main>
     <nav className="tabbar">
-      {TABS.map((t, i) => <TabBtn key={t.key} active={i === tab} ico={t.ico} label={t.label} onClick={() => setTab(i)} />)}
+      {TABS.map((t, i) => <TabBtn key={t.key} active={i === tab} ico={t.ico} label={t.label} onClick={() => { if (i !== tab) navigation.request(() => { setReviewOpen(false); setTab(i); }); }} />)}
     </nav>
   </div>;
 }

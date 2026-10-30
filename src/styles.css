@@ -130,6 +130,13 @@ tbody tr:hover { background: #f7f9fd; }
 .task-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
 .task-card .t { font-weight: 600; }
 .task-card .meta { color: var(--ink-2); font-size: 12.5px; margin-top: 3px; }
+.driver-leave-dialog { width: min(440px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; box-sizing: border-box; border: 1px solid var(--line); border-radius: 12px; padding: 20px; color: var(--ink); background: var(--card); }
+.driver-leave-dialog::backdrop { background: rgb(0 0 0 / 45%); }
+.driver-leave-dialog .btn { white-space: normal; }
+.driver-shell .task-card, .driver-shell .alert { overflow-wrap: anywhere; min-width: 0; }
+.driver-shell textarea { box-sizing: border-box; }
+.driver-shell select { max-width: 100%; min-width: 0; }
+.driver-shell label textarea { width: 100%; }
 .score-hero { text-align: center; padding: 20px 12px; }
 .score-hero .n { font-size: 44px; font-weight: 700; color: var(--ink-3); }
 .score-hero .l { color: var(--ink-2); font-size: 13px; }

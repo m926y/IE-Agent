@@ -1,0 +1,340 @@
+{
+  "base_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+  "merged_documents": [
+    {
+      "original": "docs/代码结构与维护说明.md",
+      "sha256": "2b948d99afd230cbc97985f70d1faba9335acb88119aff7d7b3b9a3011d38b65",
+      "bytes": 3040,
+      "destination": "docs/开发与验收指南.md"
+    },
+    {
+      "original": "docs/driver/本地使用与验收说明.md",
+      "sha256": "cb3191361ae9e50b06b17512a63a2e7bad58fd4dbcf0edc50272ec19132b1a98",
+      "bytes": 12333,
+      "destination": "docs/开发与验收指南.md"
+    },
+    {
+      "original": "docs/driver/司机端开发指导文档_V2.0.md",
+      "sha256": "6dc18acd381c7c965fe1284ed1eba9fcc39eefef796505c98aeec696ae6cdcf2",
+      "bytes": 12011,
+      "destination": "docs/历史指导与评估归档.md#archive-1"
+    },
+    {
+      "original": "docs/driver/司机端开发指导文档_V2.1.md",
+      "sha256": "10226614b24d11bc6a3f9539b3f1c987a679204b6032335f7b30dc1e41d920a0",
+      "bytes": 13650,
+      "destination": "docs/历史指导与评估归档.md#archive-2"
+    },
+    {
+      "original": "docs/driver/司机端开发指导文档_V2.2.md",
+      "sha256": "faa9fe2480f78fd898dbedc5973ba7f541587c1c283a3192ca9543ea8bf123ce",
+      "bytes": 15669,
+      "destination": "docs/历史指导与评估归档.md#archive-3"
+    },
+    {
+      "original": "docs/driver/后续三轮开发与验收计划.md",
+      "sha256": "31003e492592c414de119e0b770240db7df68b8f6333774aa2f399d7366608f5",
+      "bytes": 5318,
+      "destination": "docs/历史指导与评估归档.md#archive-4"
+    },
+    {
+      "original": "docs/driver/review/可行性与创新性评估_2026-10-28.md",
+      "sha256": "acdcfda4978c99631767a8e40e9311d1606212f86a3c4cf4ca80926306930079",
+      "bytes": 10648,
+      "destination": "docs/历史指导与评估归档.md#archive-5"
+    },
+    {
+      "original": "docs/driver/review/司机端可行性创新性与后续改进计划_2026-10-30.md",
+      "sha256": "9d2bfd80b16fdd7b9e9296d89ec86a98caa4cc813cdcd5f85ca0bbbed451d8c9",
+      "bytes": 16858,
+      "destination": "docs/历史指导与评估归档.md#archive-6"
+    }
+  ],
+  "removed_legacy_files": [
+    {
+      "path": "scripts/ai-audit-battery.js",
+      "sha256": "efd41b92fa23a295dea92adc6b1a9a32ac26ee2c251b94b976f2cb1a0662bb67",
+      "git_blob_sha256": "12f1ae49213090dad19786d62ec71c0bad546110fce2a2bf7e868c66976ff85b",
+      "bytes": 6581,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/ai03-fillto-battery.cjs",
+      "sha256": "d9b12bc088e1da9ff625c33afec6f62e33ac763b8af369a8296844ca91750d8c",
+      "git_blob_sha256": "d7df7ebc6106ce976e228fd4e79f3e6fc26b021dd9a18846c8a3d6c250ce515e",
+      "bytes": 9474,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/ai03-ui-battery.cjs",
+      "sha256": "30fe042c5bbea746099dfdd810c2a493f9670c711d42325504680ee8fcd99dbb",
+      "git_blob_sha256": "1486d7ad4f0730184a6020466e5efacade44e3c53134e29ec3a8bbf2e9495cc1",
+      "bytes": 9193,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/app_tables.json",
+      "sha256": "d17bf0be566d543ea963227de3565483cc3072a992e4557fe3a94807e5e2fb68",
+      "git_blob_sha256": "d357b8cc3ba491d01d060e4038b0691aff0ff99ad317c70d671f4f1c42013ad8",
+      "bytes": 4234,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/branch-demo.py",
+      "sha256": "9e88e3477cfe68c88aec7e2b0f6bdfa250f61a5652610e0ba49c340fd6ba6216",
+      "git_blob_sha256": "c28fa04ce4fd204a4833d1a1bf4cdceefb6dcca76351f95a6032aad8b06e70e6",
+      "bytes": 3358,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/data_dictionary.json",
+      "sha256": "d08e55c06399db6f1a1a6eca4ab81ee97c509db8af948b95f34a29bc91850c6f",
+      "git_blob_sha256": "d08e55c06399db6f1a1a6eca4ab81ee97c509db8af948b95f34a29bc91850c6f",
+      "bytes": 32560,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": false
+    },
+    {
+      "path": "scripts/notification-rr-chain-battery.cjs",
+      "sha256": "3d63ea6ed5ec81c7d747af0d72ecf0528dcd0d2b2fa4185c733dd714e843f812",
+      "git_blob_sha256": "044842c4ca5a8021f09db64a9335c4abdcd52009b040fbb812b9b7bd139a513d",
+      "bytes": 4738,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/notification-send-chains-battery.cjs",
+      "sha256": "c291d41695aa3057092b449f3f66d365c2180a3a3992f3686101bb8701555046",
+      "git_blob_sha256": "3fb5a7582401916dc6bcccda648e77a6a03ed67800efeab067fff3619095cd5a",
+      "bytes": 7834,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/notification-template-acceptance.cjs",
+      "sha256": "d08c7174b30ba4a5ca45b3f7175ff495f49b1845095343d000683625f4ef454c",
+      "git_blob_sha256": "9850afa0170f82666bd03382e51c302f3ef755821058cab5b60e94d89154e0fa",
+      "bytes": 5848,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/page-value-audit.py",
+      "sha256": "a58172fb38741f35cf87dee135aa54979a7ccb92c6d351f5fea9b3b1af43f720",
+      "git_blob_sha256": "c3738621bd098e2848645da304a7e34f02d84b64831395ebdc5374c339598b40",
+      "bytes": 3384,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/pilot-import.mjs",
+      "sha256": "0c6c873efc6308204aa63c3202190f43777a03048ab43de375f03da7e94efcc9",
+      "git_blob_sha256": "b90c59676038369787a1f1d9d777a48a0bb9e9f5c4f0bd29a2c8919423b07d84",
+      "bytes": 5317,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r17-search-sm05-sm06-battery.cjs",
+      "sha256": "880a10ccbede8ced03909d619f1b0b718bfcfc50fa5210c8a0c68c7f7c397a09",
+      "git_blob_sha256": "05b536f4697d5ce782ec77f42e979150ce482fa627e11c5853fd96046124a4d3",
+      "bytes": 12045,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r17-ui-battery.cjs",
+      "sha256": "0b3fb742ef0e67dfe503bdf7fb8ac6e2f5475b05bdb5ad3c81e4ad2f397bb6f5",
+      "git_blob_sha256": "ddba513943a12cb3f859f2fd92c101d94c2ee6ca234d5639cff3b322a254bb18",
+      "bytes": 5620,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r18-account-retest-battery.cjs",
+      "sha256": "ecf45de785088478ae77f5c63ab6515c3c6898bc621de0d680b132003501f6ed",
+      "git_blob_sha256": "d0a1083405981a0d5cb41d929d3c2208be4c314d51af5686210e98331d21bd2b",
+      "bytes": 10841,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r18-ui-retest-battery.cjs",
+      "sha256": "f0999d2c76f5af9bbff936ec2a37b1ca60bc6e7322d88ac6626db42cbd9b8851",
+      "git_blob_sha256": "41e77883e31cb1e3df77e98f1e2234cb70f44ad4d380a0b99328a6bdebe9ecea",
+      "bytes": 7174,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r19-courses-audit-longsess-battery.cjs",
+      "sha256": "1a2affad2091be12ff52832ee5b063663c97ee210f1cf90271ca154715b13ba2",
+      "git_blob_sha256": "0004e442069ff1645f2faef47ff7c77d59c5f7f2ec9610821bb488007a8c7fc8",
+      "bytes": 9102,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r19-ui-battery.cjs",
+      "sha256": "80b518615ad4d8bb272519e634b00589ec09b19fefa40763d89db970ada57275",
+      "git_blob_sha256": "06d7c01fea339805684029b1282a4076cc2867d9d18ee044ace7fc7b9e36ddb2",
+      "bytes": 8833,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r20-fleet-scope-battery.cjs",
+      "sha256": "f797ce71b3eea287eca6b1f5e276e7c6d8a62e0cb467de782546330817d4f7bb",
+      "git_blob_sha256": "9b92f0ce3a703f6919aacc92295b1963e3619b0e494177a4e266cea7e6ebcd8d",
+      "bytes": 8886,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r20-ui-battery.cjs",
+      "sha256": "965d13c34458d33e15f87cf95c7b2fa95808bd3901dee5fe87e6aeb5eb3f0a0a",
+      "git_blob_sha256": "18eddcfda2d94bf80e51167311c3b29424f806bcd8fce1bdb721041e4d4d6fc8",
+      "bytes": 7388,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r21-fleet-summary-battery.cjs",
+      "sha256": "9cb1bd8ef3d39727397eee75226106e3bcc1f8a8a2bc3c56a16e7fa3535588a6",
+      "git_blob_sha256": "e3f64a738d1f799140501b5c31b81f4ac4a4264150c303f33565e723eff1eeb4",
+      "bytes": 7475,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r21-ui-battery.cjs",
+      "sha256": "63c398996f67ac4d982823b78c58cdc27f12dde46c26605c789014259dde5b89",
+      "git_blob_sha256": "24d071f8b082b820b435c6955998e9b2010afa10ffaa71e45314dc6ebc9f4ca1",
+      "bytes": 2853,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r22-drop7-battery.cjs",
+      "sha256": "754a1d6e9ee309f2305cabc8cd0d2b1c904c9c49f8862c336a63016050429c1b",
+      "git_blob_sha256": "3411f58dc8fee1728e2b1a4ea17d4ca293815a18e1caebb3336fcaf6260e4a5b",
+      "bytes": 8224,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r22-ui-battery.cjs",
+      "sha256": "5213c41be31a865c7e7c20ab72ffbf0edc41fe665488f9c2ce0330416869e151",
+      "git_blob_sha256": "506fc95e811c3a3b295cb630100ad2db078eae60b21b511e5a3406beda4b8c0d",
+      "bytes": 3758,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r23-binding-windows-battery.cjs",
+      "sha256": "3fa8821d1fb06162bd1c44401fd7cad79162792e3ab61e4cbb7edb4f7886501d",
+      "git_blob_sha256": "6a6e2452c7635eef186e0a803e5f86af5c5c96ae93e902beab30409cf36cf49a",
+      "bytes": 10573,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r23-ui-battery.cjs",
+      "sha256": "b89f6e424fe9286dc7673c3c676d3517d4cbd38e4940bbc7c7e66a77266b6293",
+      "git_blob_sha256": "ebb433dd1ff8deec80c7f15d7861bc3e90b8d943e0343852f96e0d99d80648e1",
+      "bytes": 4544,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r24-tr06-ai-summary-battery.cjs",
+      "sha256": "91a2444274fd5e01e8b0785b45f2375d245c2e6b1f1b753babd85340cc1be152",
+      "git_blob_sha256": "329227697e4a7a0eb5d48e2ad0d9790e491bcc5a5a1c182c4965c8338b954c86",
+      "bytes": 11034,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r24-ui-battery.cjs",
+      "sha256": "ad4b214acbc669d175baeea4d757794af876ec29dd86ce4e5b45db44bbee1cfe",
+      "git_blob_sha256": "d39dad511bd280765758c2e57a0e6f5b0e486f3babef57f43e588f099af7b1ef",
+      "bytes": 5658,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r25-ev03-tabs-battery.cjs",
+      "sha256": "40a916e7d6c6b389ef7e71ba87fcc1806365585bde5dd808e5336e56a08314ca",
+      "git_blob_sha256": "9e447bf0cf77061ef4fa0ddf298346fe3cd7bef331fd025baecea2c81306bc1c",
+      "bytes": 10986,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r26-ai04-preplan-battery.cjs",
+      "sha256": "4372c4c433d3b0ae2f73061344369174e859ee4c40ca004fb1f26f1a3930f5d5",
+      "git_blob_sha256": "2facb2c361f9bd2e8a89e9ce87227f8a7032e62596501b0b35750306a7070157",
+      "bytes": 11518,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r34-new-ui-battery.cjs",
+      "sha256": "f284c5546cd9213d8ee0576a63e891a08bf3110e86a9f5cfa3596aa602f60d68",
+      "git_blob_sha256": "9a0376f792d56d861fa0eddad07f7a1c019d1cf391b31e9087e1df1ca7701087",
+      "bytes": 13201,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r35-agent1-battery.cjs",
+      "sha256": "bcd111938b4ca3ca8ea8831fe0611a81d9db827e1400b5825d03713d3093d920",
+      "git_blob_sha256": "6c84f7cb479fcd85db6c08cae1035a95d4585992f8d3161987ec2e082fa56e08",
+      "bytes": 7603,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r37-four-feats-battery.cjs",
+      "sha256": "677c0d71c47fc965f735a64867ba7c614019a6d8bf2bde5433a5bff73fa9837d",
+      "git_blob_sha256": "dc20e0b28379303aa4cfbefdc600443dbc56ef3b5143a262149fd0849258b774",
+      "bytes": 12772,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/r37-ui-battery.cjs",
+      "sha256": "9dd37a6a3eac9491e6233cfd3f611159f2dc87d8b82d810c4b3ae7c9d44412e5",
+      "git_blob_sha256": "08078fc408ec45823a6a2f1ec91c069bbe21f1dd1b01370a5fd06b043788005c",
+      "bytes": 5481,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/training-closed-loop-battery.js",
+      "sha256": "17ae48640bbc605460a8541eaa9482e36bf4c1edb0810c164e339baf954f7b14",
+      "git_blob_sha256": "2fd85c571db9f784ee358853beecde3cc52d19c969366e45e978a0e1432adb76",
+      "bytes": 5040,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    },
+    {
+      "path": "scripts/verify-local.mjs",
+      "sha256": "63a92590de720c7642b14d73d2711b17eb5a97a571760f1f402e735a10101203",
+      "git_blob_sha256": "cd80ec03f08876b3b12c23c797b5953dada0fd054b9335a71316d2dc474ba990",
+      "bytes": 43854,
+      "recover_from_commit": "b190c0e6bcfe6e833683854dc9494ab6c16ed333",
+      "line_endings_differ": true
+    }
+  ],
+  "notes": [
+    "正文合并前哈希用于来源追溯；合并后内部链接已调整。",
+    "删除的历史代码逐文件核对Git基线正文一致，工作区CRLF与Git LF差异分别留存哈希；未删除用户未提交的业务实现。",
+    "源数据、Word原稿、迁移、唯一契约、运行状态和隔离验收材料保持原位。"
+  ]
+}

@@ -12,8 +12,10 @@
     "preview": "vite preview --host 0.0.0.0",
     "start": "node scripts/local-workbench.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test tests/runtime.test.mjs tests/local-source.test.mjs",
+    "test": "npm run build && node --test tests/runtime.test.mjs tests/local-source.test.mjs tests/docs.test.mjs",
     "test:driver": "node --test tests/local-source.test.mjs",
+    "test:ui": "node scripts/source-ui-battery.mjs",
+    "test:value": "node scripts/source-value-audit.mjs",
     "start:local": "node scripts/local-workbench.mjs"
   },
   "dependencies": {

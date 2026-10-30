@@ -5,19 +5,8 @@ import { EmptyState, Tag } from "./ui";
 import { DriverEvidence } from "./driver-evidence";
 import { notificationText } from "./training-recovery";
 import { LearningReportPanel } from "./learning-report";
-
-export function numberText(value: unknown, digits = 2): string {
-  if (value == null || (typeof value !== "number" && typeof value !== "string") || String(value).trim() === "") return "—";
-  const n = Number(value);
-  return Number.isFinite(n) ? n.toFixed(digits) : "—";
-}
-
-export function DriverReadError({ error, retry }: { error: unknown; retry: () => void }) {
-  const code = error instanceof ApiError ? error.code : "network";
-  if (["binding_required", "binding_not_verified"].includes(code)) return <EmptyState kind="nocov" hint="当前账号尚未完成已核实司机绑定，请联系安全管理员。" />;
-  if (error instanceof ApiError && [403, 404].includes(error.status)) return <EmptyState kind="noperm" hint="记录不存在或当前账号无权查看。" />;
-  return <EmptyState kind="error" hint={`读取失败（${code}），未以空记录或零风险代替。`} onRetry={retry} />;
-}
+import { useDriverDraft } from "./driver-navigation";
+import { DriverReadError, numberText, trainingStatusNames } from "./driver-shared";
 
 export function DriverRiskPanel() {
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
@@ -56,7 +45,6 @@ export function DriverRiskPanel() {
   </section>;
 }
 
-const statusNames: Record<string, string> = { assigned: "待开始", in_progress: "学习中", submitted: "待人工复核", returned: "需补充", reviewed: "复核通过", observation: "继续观察", interview: "需面谈" };
 
 export function DriverTrainingCard({ row, reload }: { row: Record<string, unknown>; reload: () => void }) {
   const id = String(row.task_id);
@@ -68,60 +56,83 @@ export function DriverTrainingCard({ row, reload }: { row: Record<string, unknow
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [conflict, setConflict] = useState(false);
+  const [conflictRead, setConflictRead] = useState(false);
+  const [unsaved, setUnsaved] = useState(false);
+  const busyRef = useRef(false);
+  const saved = useRef({ record, feedback });
   const dirty = useRef(false);
   const sequence = useRef(0);
-  const load = async () => {
+  function markDirty(value: boolean) { dirty.current = value; setUnsaved(value); }
+  const load = async (checkingConflict = false) => {
     const seq = ++sequence.current; setError(null);
     try {
       const r = await taskView(id);
       if (seq !== sequence.current) return;
-      setView(r); setConflict(false);
-      if (!dirty.current) { setRecord(String(r.task.learning_record || "")); setFeedback(String(r.task.feedback || "")); }
+      setView(r);
+      if (checkingConflict) setConflictRead(true);
+      saved.current = { record: String(r.task.learning_record ?? ""), feedback: String(r.task.feedback ?? "") };
+      if (!dirty.current) { setRecord(saved.current.record); setFeedback(saved.current.feedback); }
     } catch (e) { if (seq === sequence.current) setError(e); }
   };
   useEffect(() => { if (open) load(); return () => { sequence.current++; }; }, [open, id, row.status]);
   const status = String(view?.task.status || row.status);
   const editable = ["assigned", "in_progress", "returned"].includes(status);
   const overdue = editable && row.due_at && Date.parse(String(row.due_at)) < Date.now();
+  function discard() { setRecord(saved.current.record); setFeedback(saved.current.feedback); markDirty(false); }
+  useDriverDraft(`training:${id}`, { label: `培训任务 ${id}`, get dirty() { return dirty.current; }, get busy() { return busyRef.current; }, save: () => act("save"), discard });
   async function act(action: "start" | "save" | "submit") {
-    if (busy) return; setBusy(true); setMsg("");
+    if (busyRef.current || conflict || !view || error || !editable) return false;
+    busyRef.current = true; setBusy(true); setMsg("");
     try {
       let notificationMessage = "";
       let expected = view?.task.updated_at == null ? null : String(view.task.updated_at);
       const extra = { feedback, expected_updated_at: expected };
       if (action === "start") await taskStart(id, expected);
-      else if (action === "save") { await taskSaveDraft(id, record, extra); dirty.current = false; }
+      else if (action === "save") {
+        const result = await taskSaveDraft(id, record, extra);
+        saved.current = { record, feedback }; markDirty(false);
+        setView(v => v ? { ...v, task: { ...v.task, learning_record: record, feedback, updated_at: result.updated_at } } : v);
+      }
       else {
-        const submitted = await taskSubmit(id, record, feedback, expected); dirty.current = false;
+        const submitted = await taskSubmit(id, record, feedback, expected);
+        saved.current = { record, feedback }; markDirty(false);
         notificationMessage = notificationText(submitted.notification);
       }
       setMsg(action === "submit" ? `已提交，等待人工复核；评分不会因此自动改变。${notificationMessage}` : action === "save" ? "草稿与反馈已保存。" : "已开始学习。");
       reload(); await load();
+      return true;
     } catch (e) {
       const code = e instanceof ApiError ? e.code : "network";
-      if (code === "task_version_conflict") setConflict(true);
-      setMsg(code === "task_version_conflict" ? "任务已被其他操作更新，请刷新任务后再保存。你的输入仍保留。" : `操作未完成（${code}），输入已保留。`);
-    } finally { setBusy(false); }
+      if (code === "task_version_conflict") { setConflict(true); setConflictRead(false); }
+      setMsg(code === "task_version_conflict" ? "任务已被其他操作更新，请刷新任务后再保存。你的输入仍保留。" : `操作结果未确认（${code}），输入已保留，请读取最新状态后再决定是否重试。`);
+      return false;
+    } finally { busyRef.current = false; setBusy(false); }
   }
   return <article className="task-card">
     <div className="t">{String(row.goal || id)} {row.mandatory ? <Tag tone="red">强制</Tag> : null} {overdue ? <Tag tone="red">逾期</Tag> : null}</div>
-    <div className="meta">任务 {id} · 截止 {String(row.due_at || "—")} · <Tag tone={row.status === "reviewed" ? "green" : "blue"}>{statusNames[String(row.status)] || String(row.status)}</Tag></div>
+    <div className="meta">任务 {id} · 截止 {String(row.due_at || "—")} · <Tag tone={row.status === "reviewed" ? "green" : "blue"}>{trainingStatusNames[String(row.status)] || String(row.status)}</Tag></div>
     {row.review_note ? <p>复核意见：{String(row.review_note)} · {String(row.reviewed_at || "—")}</p> : null}
+    <p className="meta" role="status">{busy ? "正在处理，请等待回执。" : unsaved ? "有未保存修改；离开前请保存。" : "当前没有未保存修改。"}</p>
     <button className="btn" aria-expanded={open} onClick={() => setOpen(v => !v)}>{open ? "收起课程与记录" : "打开课程与记录"}</button>
     {open && <div className="stack">
-      {error ? <DriverReadError error={error} retry={load} /> : !view ? <EmptyState kind="loading" /> : <>
+      {error ? <DriverReadError error={error} retry={() => void load()} /> : !view ? <EmptyState kind="loading" /> : <>
         <h4>{String(view.course?.title || "课程未取得")}</h4>
-        <p className="meta">课程 {String(row.course_id)} · 版本 {String(view.course?.version_no || "未取得")} · {view.course_basis === "assignment" ? "分配时留存的版本" : view.course_basis === "first_learning_save" ? "首次保存学习时留存的版本" : "当前课程版本，尚未留存学习快照"} · 状态 {String(view.course?.content_status || "未取得")}</p>
+        <p className="meta">课程 {String(row.course_id)} · 版本 {String(view.course?.version_no ?? "未取得")} · {view.course_basis === "assignment" ? "分配时留存的版本" : view.course_basis === "first_learning_save" ? "首次保存学习时留存的版本" : "当前课程版本，尚未留存学习快照"} · 状态 {String(view.course?.content_status || "未取得")}</p>
         {view.course_basis !== "current_version" && view.current_course_status !== "approved" && <p className="alert warn">当前课程状态：{view.current_course_status || "未取得"}。这里展示任务留存版本，请按安全员要求继续或调整学习安排。</p>}
         <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.8 }}>{String(view.course?.content || "课程正文不可用。未批准或已停用且无留存版本的课程不会提供正文，请联系安全员。")}</div>
         <p>完成要求：{String(view.course?.completion_requirement || "未取得，请联系安全员")}</p>
         {view.alert ? <div className="alert info">关联告警 {String(view.alert.alert_id)} · 证据 {String(view.alert.evidence_id || "未关联")} · {String(view.alert.occurred_at)}。告警关联不代表已确认违规。<DriverEvidence kind="alert" id={String(view.alert.alert_id)} label="查看任务关联证据" /></div> : <p className="meta">本任务未关联告警，按通用培训处理。</p>}
         {view.reassess && <div className="alert info">复评：{view.reassess.note}{view.reassess.date ? ` 数据截止 ${view.reassess.date}，安全分 ${numberText(view.reassess.row?.safety_score)}。` : ""}</div>}
       </>}
-      <label>学习记录<textarea aria-label={`学习记录 ${id}`} value={record} disabled={!editable || busy} maxLength={6000} onChange={e => { dirty.current = true; setRecord(e.target.value); }} style={{ width: "100%", minHeight: 90 }} /></label>
+      <label>学习记录<textarea aria-label={`学习记录 ${id}`} value={record} disabled={!editable || busy || !view} maxLength={6000} onChange={e => { markDirty(e.target.value !== saved.current.record || feedback !== saved.current.feedback); setRecord(e.target.value); }} style={{ width: "100%", minHeight: 90 }} /></label>
+      <p className="meta">学习记录 {record.length}/6000 字；服务器最多保存6000字。刷新或关闭前请先保存，未保存内容只在当前页面保留。</p>
       <LearningReportPanel taskId={id} onLoaded={() => { reload(); load(); }} />
-      <label>反馈<textarea aria-label={`学习反馈 ${id}`} value={feedback} disabled={!editable || busy} maxLength={3000} onChange={e => { dirty.current = true; setFeedback(e.target.value); }} style={{ width: "100%", minHeight: 50 }} /></label>
-      {conflict && <div className="alert warn">请先读取最新状态并核对两份内容。<button className="btn" onClick={load}>重新读取任务状态（保留输入）</button></div>}
+      <label>反馈<textarea aria-label={`学习反馈 ${id}`} value={feedback} disabled={!editable || busy || !view} maxLength={3000} onChange={e => { markDirty(record !== saved.current.record || e.target.value !== saved.current.feedback); setFeedback(e.target.value); }} style={{ width: "100%", minHeight: 50 }} /></label>
+      <p className="meta">反馈 {feedback.length}/3000 字；服务器最多保存3000字。</p>
+      {conflict && <div className="alert warn">请先读取最新状态并核对两份内容，重新读取不会自动解决内容冲突。
+        <button className="btn" onClick={() => void load(true)}>重新读取任务状态（保留输入）</button>
+        {conflictRead && !error && <div className="row"><button className="btn" disabled={!editable} onClick={() => { setConflict(false); setConflictRead(false); }}>已核对，使用我的输入继续编辑</button><button className="btn" onClick={() => { discard(); setConflict(false); setConflictRead(false); }}>采用服务器已保存内容</button></div>}
+      </div>}
       {dirty.current && view && <details><summary>查看服务器已保存内容</summary><p style={{ whiteSpace: "pre-wrap" }}>{String(view.task.learning_record || "（空）")}</p><p>反馈：{String(view.task.feedback || "（空）")}</p></details>}
       {editable && <div className="row">{["assigned", "returned"].includes(status) && <button className="btn" disabled={busy || conflict || !view || !!error} onClick={() => act("start")}>开始学习</button>}<button className="btn" disabled={busy || conflict || !view || !!error} onClick={() => act("save")}>保存草稿与反馈</button><button className="btn primary" disabled={busy || conflict || !view || !!error || !record.trim()} onClick={() => { if (window.confirm("提交后等待安全员复核，学习记录暂不能编辑。确认提交？")) act("submit"); }}>提交学习记录</button></div>}
     </div>}

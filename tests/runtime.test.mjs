@@ -85,6 +85,7 @@ test("build emits a standalone dynamic QW Page and serves healthy root", async (
     access(new URL("package.json", publishRoot)),
     access(new URL("package-lock.json", publishRoot)),
     access(new URL("server.mjs", publishRoot)),
+    access(new URL("server/driver-actions.mjs", publishRoot)),
     access(new URL("dist/index.html", publishRoot)),
   ]);
 
@@ -93,8 +94,10 @@ test("build emits a standalone dynamic QW Page and serves healthy root", async (
     "dist",
     "package-lock.json",
     "package.json",
+    "server",
     "server.mjs",
   ]);
+  assert.deepEqual(await readdir(new URL("server/", publishRoot)), ["driver-actions.mjs"]);
 
   // Copy the publish artifact out of the source tree so the server cannot
   // resolve packages from the project's dev node_modules, install only

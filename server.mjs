@@ -6,6 +6,7 @@ import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes, createHash, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
+import { actionCenter, scoreComparison, fleetStatistics, readAll } from "./server/driver-actions.mjs";
 
 const scrypt = promisify(scryptCb);
 
@@ -118,7 +119,7 @@ const SAFE_DATABASE_OPERATIONS = new Set([
   "get_binding_by_platform_user", "insert_audit", "list_audit",
   "list_resource", "count_resource", "insert_resource",
   "get_user_by_id", "user_edit", "drv_exists", "bind_active_check", "bind_rows", "bind_insert", "bind_close", "bind_patch_row", "bind_delete_row", "bind_conflict_q", "search_read", "erd_list",
-  "course_list", "audits_q", "audits_get", "course_insert", "course_patch", "ops_insert", "ops_list", "ts_course", "ts_facts", "pp_rows", "tpl_probe", "tpl_list", "tpl_insert", "tpl_patch",, "erd_get", "erd_insert", "erd_patch", "er_current", "kn_list", "kn_get", "kn_insert", "kn_patch",
+  "course_list", "audits_q", "audits_get", "course_insert", "course_patch", "ops_insert", "ops_list", "ts_course", "ts_facts", "pp_rows", "tpl_probe", "tpl_list", "tpl_insert", "tpl_patch", "erd_get", "erd_insert", "erd_patch", "er_current", "kn_list", "kn_get", "kn_insert", "kn_patch",
   "insert_import_run", "get_import_run", "update_import_run", "upsert_resource",
   "get_task_row", "patch_task_row", "insert_task_notify", "count_task_notifs",
   "get_rr_row", "patch_rr_row", "insert_rr_row", "get_own_score_row", "get_own_ledger_row",
@@ -444,8 +445,8 @@ async function assertInScope(principal, keys) {
   const u = principal?.user || {}; const scope = String(u.fleet_scope || "*");
   if (!["safety_admin", "team_leader"].includes(u.role) || scope === "*") return;
   const s = await fleetScopeSets(scope);
-  if (keys.alertId) { const al = await listRows("get_alert_row", "alerts", { query: { alert_id: `eq.${keys.alertId}`, select: "gpsno,driver_id", limit: 1 } }); const a = al[0]; if (!a || (!s.gps.includes(String(a.gpsno)) && !s.drv.includes(String(a.driver_id || "")))) { try { await appendAudit(principal, "scope_refused.write", "fleet_object", String(keys.alertId), null, "refused_scope_404", principal.requestId); } catch {} throw new HttpError(404, "not_found"); } return; }
-  if (keys.taskId) { const tk = await listRows("get_task_row", "training_tasks", { query: { task_id: `eq.${keys.taskId}`, select: "driver_id", limit: 1 } }); const x = tk[0]; if (!x || !s.drv.includes(String(x.driver_id))) { try { await appendAudit(principal, "scope_refused.write", "fleet_object", String(keys.taskId), null, "refused_scope_404", principal.requestId); } catch {} throw new HttpError(404, "not_found"); } return; }
+  if (keys.alertId) { const al = await listRows("get_alert_row", "alerts", { alert_id: `eq.${keys.alertId}`, select: "gpsno,driver_id", limit: 1 }); const a = al[0]; if (!a || (!s.gps.includes(String(a.gpsno)) && !s.drv.includes(String(a.driver_id || "")))) { try { await appendAudit(principal, "scope_refused.write", "fleet_object", String(keys.alertId), null, "refused_scope_404", principal.requestId); } catch {} throw new HttpError(404, "not_found"); } return; }
+  if (keys.taskId) { const tk = await listRows("get_task_row", "training_tasks", { task_id: `eq.${keys.taskId}`, select: "driver_id", limit: 1 }); const x = tk[0]; if (!x || !s.drv.includes(String(x.driver_id))) { try { await appendAudit(principal, "scope_refused.write", "fleet_object", String(keys.taskId), null, "refused_scope_404", principal.requestId); } catch {} throw new HttpError(404, "not_found"); } return; }
   if (keys.gpsno && !s.gps.includes(String(keys.gpsno))) { try { await appendAudit(principal, "scope_refused.write", "fleet_object", String(keys.alertId || keys.gpsno), null, "refused_scope", principal.requestId); } catch {} throw new HttpError(404, "not_found_or_stale"); }
   if (keys.driverId && !s.drv.includes(String(keys.driverId))) { try { await appendAudit(principal, "scope_refused.write", "fleet_object", String(keys.taskId || keys.driverId), null, "refused_scope", principal.requestId); } catch {} throw new HttpError(404, "not_found_or_stale"); }
 }
@@ -463,13 +464,11 @@ async function listResource(principal, resName, url) {
   const query = { select: def.cols, order: def.order };
   // 行级权限：司机仅本人；注入优先于任何客户端过滤参数
   if (def.injectDriver) {
-    if (!user.driver_id) throw new HttpError(409, "binding_required");
-    if (!user.binding_verified) throw new HttpError(403, "binding_not_verified");
-    if (!user.driver_id) throw new HttpError(409, "binding_required");
-    if (!user.binding_verified) throw new HttpError(403, "binding_not_verified");
+    requireVerifiedDriver(principal);
     query.driver_id = `eq.${user.driver_id}`;
   }
   if (def.injectUser) query[def.injectUser] = `eq.${user.user_id}`;
+  if (def.injectUser && user.role === "driver") requireVerifiedDriver(principal);
   const limit = Math.min(Number(url.searchParams.get("limit")) || DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
   const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
   query.limit = limit;
@@ -580,7 +579,7 @@ function publicUser(u, authKind) {
     userId: u.user_id, username: u.username || null, displayName: u.display_name || "", role: u.role,
     localSourceOnly: process.env.IE_LOCAL_SOURCE_ONLY === "1",
     fleetScope: u.fleet_scope || null, driverId: u.driver_id || null, binding_verified: Boolean(u.binding_verified), bindingVerified: Boolean(u.binding_verified),
-    bindingVerified: Boolean(u.binding_verified), bindingNote: u.binding_note || null, accountStatus: u.account_status || "active",
+    bindingNote: u.binding_note || null, accountStatus: u.account_status || "active",
     authKind,
     capabilities: [...(ROLE_CAPABILITIES[u.role] || [])],
     allowedResources: Object.entries(RESOURCE_DEFS).filter(([, d]) => d.roles.includes(u.role)).map(([k]) => k),
@@ -698,40 +697,14 @@ async function handleDrop7(request, response, url, ctx) {
   }
 }
 async function handleDriverFleetSummary(request, response, url, ctx) {
-  const u = requireUser(ctx.principal);
-  if (u.role !== "driver") throw new HttpError(403, "forbidden");
-  const myDriver = String(u.driver_id || "");
-  if (!myDriver || !u.binding_verified) throw new HttpError(403, "unverified_binding_no_stats"); // 未绑定/未核实：不返回个人与车队统计
-  try {
-    const drows = await dbRequest("list_resource", "GET", "drivers", { query: { driver_id: `eq.${myDriver}`, select: "fleet_id", limit: 10 } });
-    const fleets = [...new Set((drows.data || []).map((x) => x.fleet_id).filter(Boolean))];
-    if (!fleets.length) return sendJson(response, 200, { data_status: "no_data", as_of_date: null, valid_count: null, average: null, distribution: null, note: "绑定司机暂无车辆档案" });
-    const fleet = fleets[0];
-    const drows0 = await dbRequest("list_resource", "GET", "score_snapshots", { query: { driver_id: `eq.${myDriver}`, select: "as_of_date", order: "as_of_date.desc", limit: 1 } });
-    const asOf = drows0.data?.[0]?.as_of_date || (await dbRequest("list_resource", "GET", "score_snapshots", { query: { select: "as_of_date", order: "as_of_date.desc", limit: 1 } })).data?.[0]?.as_of_date || null;
-    if (!asOf) return sendJson(response, 200, { data_status: "no_data", as_of_date: null, valid_count: null, average: null, distribution: null, note: "暂无评分快照" });
-    const fr2 = await dbRequest("list_resource", "GET", "drivers", { query: { select: "gpsno", fleet_id: `eq.${fleet}`, limit: 2000 } });
-    const inFleet = new Set((fr2.data || []).map((x) => x.gpsno));
-    const rows = await dbRequest("list_resource", "GET", "score_snapshots", { query: { select: "gpsno,risk_level,score_status,safety_score,source_version", as_of_date: `eq.${asOf}`, limit: 2000 } });
-    const mine = (rows.data || []).filter((x) => inFleet.has(x.gpsno));
-    if (!mine.length) return sendJson(response, 200, { data_status: "no_data", as_of_date: asOf, valid_count: null, average: null, distribution: null, note: "该车队当日无评分记录（空值不写成 0）" });
-    const usable = mine.filter((x) => ["usable", "usable_with_review", "manual_review"].includes(String(x.score_status)));
-    const sv = mine[0]?.source_version || null;
-    if (usable.length < 10) return sendJson(response, 200, { data_status: "insufficient_sample", as_of_date: asOf, source_version: sv, valid_count: null, average: null, distribution: null, note: "有效评分人数不足 10，出于隐私保护不展示均值与分布（不返回 0 或空壳）" });
-    const avg = usable.reduce((a, x) => a + Number(x.safety_score), 0) / usable.length;
-    const dist = {}; for (const x of usable) dist[String(x.risk_level)] = (dist[String(x.risk_level)] || 0) + 1;
-    const cells = Object.values(dist);
-    const derivable = cells.length <= 1 || cells.some((c) => c === 1) || cells.some((c) => c >= usable.length - 1);
-    return sendJson(response, 200, {
-      data_status: "ok", as_of_date: asOf, source_version: sv, valid_count: usable.length,
-      average: Math.round(avg * 10) / 10,
-      distribution: derivable ? null : { A: dist.A || 0, B: dist.B || 0, C: dist.C || 0, D: dist.D || 0 },
-      note: derivable ? "样本或等级类别过细，可能反推个人：本次不展示分布（人数与均值保留）" : "匿名车队统计：仅聚合值，无任何个人明细",
-    });
-  } catch (e) {
-    if (e instanceof HttpError) throw e;
-    return sendJson(response, 200, { data_status: "query_failed", as_of_date: null, valid_count: null, average: null, distribution: null, note: "统计查询失败，稍后重试（不以空值冒充 0）" });
-  }
+  const user = requireVerifiedDriver(ctx.principal);
+  const driver = (await driverProjectionRead("drivers", { driver_id: `eq.${user.driver_id}`, select: "driver_id,fleet_id", limit: 1 })).data?.[0];
+  const score = (await driverProjectionRead("score_snapshots", { driver_id: `eq.${user.driver_id}`, select: "as_of_date", order: "as_of_date.desc,score_id.desc", limit: 1 })).data?.[0];
+  if (!driver?.fleet_id || !score?.as_of_date) return sendJson(response, 200, { data_status: "no_data", as_of_date: null, valid_count: null, average: null, distribution: null, note: "缺少本人评分日期或车队档案，不替换成其他日期或车队统计。" });
+  const members = await readAll(driverProjectionRead, projectionFail, "drivers", { fleet_id: `eq.${driver.fleet_id}`, select: "driver_id" }, "driver_id");
+  const rows = [];
+  for (let i=0;i<members.length;i+=100) rows.push(...await readAll(driverProjectionRead, projectionFail, "score_snapshots", { driver_id: `in.(${members.slice(i,i+100).map(x=>x.driver_id).join(",")})`, as_of_date: `eq.${score.as_of_date}`, select: "score_id,driver_id,risk_level,score_status,safety_score,source_version,score_method" }, "score_id"));
+  sendJson(response, 200, { ...fleetStatistics(rows), as_of_date: score.as_of_date });
 }
 async function handleOverview(request, response, url, ctx) {
   const user = requireUser(ctx.principal);
@@ -1333,7 +1306,6 @@ const RULE_VERSION = "queue_rules_v1";
 const DUAL_RULE = "dual_signal_priority";
 const DATA_RULE = "data_verification";
 const ALERT_FSM = { pending_review: ["confirmed", "duplicate", "supplement_data", "closed"], confirmed: ["closed"], closed: [], duplicate: [], supplement_data: ["pending_review"] };
-const INTER_FSM = { draft: ["sent"], sent: ["read", "replied"], read: ["replied"], replied: ["closed"], closed: [] };
 
 async function fetchQueueEvidence(gpsno, evidenceId, occurredAt) {
   const { data } = await dbRequest("get_alert_evidence", "GET", "review_queue", {
@@ -1443,8 +1415,9 @@ async function handleInterventionDraft(request, response, url, ctx, alertId) {
 }
 
 async function handleDraftEdit(request, response, url, ctx, interventionId) {
-  requireUser(ctx.principal);
+  requireUser(ctx.principal, "send.intervention");
   const row = await loadIntervention(interventionId, null);
+  await assertInScope(ctx.principal, { driverId: row.driver_id });
   if (row.status !== "draft") throw new HttpError(409, `intervention_state_${row.status}_not_editable`);
   const body = await readBody(request);
   const draft = String(body.draft_text || "").slice(0, 2000);
@@ -1465,8 +1438,9 @@ async function loadIntervention(id, asDriverId) {
 }
 
 async function handleInterventionSend(request, response, url, ctx, interventionId) {
-  requireUser(ctx.principal);
+  requireUser(ctx.principal, "send.intervention");
   const row = await loadIntervention(interventionId, null);
+  await assertInScope(ctx.principal, { driverId: row.driver_id });
   if (row.status !== "draft") {
     // 双击重复发送：返回既有状态与既有通知，不新增记录
     const n = await dbRequest("get_notification_by_key", "GET", "notification_events", { query: { idempotency_key: `eq.notif:${interventionId}`, select: "notification_id,created_at", limit: 1 } });
@@ -1497,26 +1471,30 @@ async function handleInterventionSend(request, response, url, ctx, interventionI
 }
 
 async function handleInterventionRead(request, response, url, ctx, interventionId) {
-  const user = requireUser(ctx.principal);
-  if (user.role !== "driver" || !user.driver_id) throw new HttpError(403, "forbidden");
+  const user = requireVerifiedDriver(ctx.principal);
   const row = await loadIntervention(interventionId, user.driver_id);
   if (!["sent", "read", "replied"].includes(row.status)) throw new HttpError(409, "intervention_not_readable_state");
   if (row.read_at) {
     await dbRequest("patch_intervention", "PATCH", "notification_events", {
-      query: { source_entity_id: `eq.${interventionId}`, read_at: "is.null" },
+      query: { source_entity_id: `eq.${interventionId}`, target_user_id: `eq.${user.user_id}`, read_at: "is.null" },
       body: { read_at: row.read_at },
       headers: { Prefer: "return=minimal" },
     }).catch(() => {});
     return sendJson(response, 200, { ok: true, idempotent_replay: true, intervention_id: interventionId, read_at: row.read_at, status: row.status });
   }
   const at = nowIso();
-  await dbRequest("read_own_intervention", "PATCH", "interventions", {
-    query: { intervention_id: `eq.${interventionId}`, driver_id: `eq.${user.driver_id}`, read_at: "is.null" },
+  const changed = await dbRequest("read_own_intervention", "PATCH", "interventions", {
+    query: { intervention_id: `eq.${interventionId}`, driver_id: `eq.${user.driver_id}`, status: `eq.${row.status}`, read_at: "is.null" },
     body: { status: row.status === "sent" ? "read" : row.status, read_at: at, updated_at: at },
-    headers: { Prefer: "return=minimal" },
+    headers: { Prefer: "return=representation" },
   });
+  if (!changed.data?.length) {
+    const current = await loadIntervention(interventionId, user.driver_id);
+    if (!current.read_at) throw new HttpError(409, "intervention_version_conflict");
+    return sendJson(response, 200, { ok: true, idempotent_replay: true, intervention_id: interventionId, read_at: current.read_at, status: current.status });
+  }
   await dbRequest("patch_intervention", "PATCH", "notification_events", {
-    query: { source_entity_id: `eq.${interventionId}`, read_at: "is.null" },
+    query: { source_entity_id: `eq.${interventionId}`, target_user_id: `eq.${user.user_id}`, read_at: "is.null" },
     body: { read_at: at },
     headers: { Prefer: "return=minimal" },
   }).catch(() => {}); // 站内通知与案卷已读同步
@@ -1525,8 +1503,7 @@ async function handleInterventionRead(request, response, url, ctx, interventionI
 }
 
 async function handleInterventionReply(request, response, url, ctx, interventionId) {
-  const user = requireUser(ctx.principal);
-  if (user.role !== "driver" || !user.driver_id) throw new HttpError(403, "forbidden");
+  const user = requireVerifiedDriver(ctx.principal);
   const row = await loadIntervention(interventionId, user.driver_id);
   if (row.status === "replied") return sendJson(response, 200, { ok: true, idempotent_replay: true, intervention_id: interventionId, replied_at: row.replied_at, reply_text: row.reply_text });
   if (!["sent", "read"].includes(row.status)) throw new HttpError(409, "intervention_state_invalid");
@@ -1534,13 +1511,18 @@ async function handleInterventionReply(request, response, url, ctx, intervention
   const reply = String(body.reply_text || "").slice(0, 2000);
   if (!reply.trim()) throw new HttpError(400, "bad_request");
   const at = nowIso();
-  await dbRequest("reply_own_intervention", "PATCH", "interventions", {
+  const changed = await dbRequest("reply_own_intervention", "PATCH", "interventions", {
     query: { intervention_id: `eq.${interventionId}`, driver_id: `eq.${user.driver_id}`, status: `in.(sent,read)` },
     body: { status: "replied", reply_text: reply, replied_at: at, read_at: row.read_at || at, updated_at: at },
-    headers: { Prefer: "return=minimal" },
+    headers: { Prefer: "return=representation" },
   });
+  if (!changed.data?.length) {
+    const current = await loadIntervention(interventionId, user.driver_id);
+    if (current.status !== "replied") throw new HttpError(409, "intervention_version_conflict");
+    return sendJson(response, 200, { ok: true, idempotent_replay: true, intervention_id: interventionId, status: current.status, replied_at: current.replied_at, reply_text: current.reply_text });
+  }
   const auditId = await appendAudit(ctx.principal, "intervention.reply", "intervention", interventionId, row.status, "replied", ctx.requestId);
-  sendJson(response, 200, { ok: true, intervention_id: interventionId, status: "replied", replied_at: at, audit_id: auditId });
+  sendJson(response, 200, { ok: true, intervention_id: interventionId, status: "replied", replied_at: at, reply_text: reply, audit_id: auditId });
 }
 
 async function handleCaseView(request, response, url, ctx, alertId) {
@@ -1582,6 +1564,27 @@ function requireVerifiedDriver(principal) {
   if (!user.driver_id) throw new HttpError(409, "binding_required");
   if (!user.binding_verified) throw new HttpError(403, "binding_not_verified");
   return user;
+}
+
+const driverProjectionRead = (table, query) => dbRequest("list_resource", "GET", table, { query, headers: { Prefer: "count=exact" } });
+const projectionFail = (status, code) => { throw new HttpError(status, code); };
+async function handleDriverActionCenter(request, response, url, ctx) {
+  const user = requireVerifiedDriver(ctx.principal);
+  sendJson(response, 200, await actionCenter({ driverId: user.driver_id, read: driverProjectionRead, fail: projectionFail, params: url.searchParams }));
+}
+async function handleDriverScoreComparison(request, response, url, ctx) {
+  const user = requireVerifiedDriver(ctx.principal);
+  sendJson(response, 200, await scoreComparison({ driverId: user.driver_id, read: driverProjectionRead, fail: projectionFail, params: url.searchParams }));
+}
+async function handleDriverInterventionView(request, response, url, ctx) {
+  const user = requireVerifiedDriver(ctx.principal), id = url.searchParams.get("id") || "";
+  if (!/^[\w:.,-]{1,100}$/.test(id)) throw new HttpError(400, "invalid_intervention_id");
+  const row = await loadIntervention(id, user.driver_id);
+  if (!["sent", "read", "replied", "closed"].includes(row.status) || !row.sent_at) throw new HttpError(404, "not_found");
+  let alert = null;
+  if (row.alert_id) alert = (await dbRequest("list_resource", "GET", "alerts", { query: { alert_id: `eq.${row.alert_id}`, driver_id: `eq.${user.driver_id}`, select: "alert_id", limit: 1 } })).data?.[0] || null;
+  const safe = Object.fromEntries(["intervention_id", "sent_text", "sent_at", "read_at", "reply_text", "replied_at", "status"].map(k => [k, row[k] ?? null]));
+  sendJson(response, 200, { ...safe, alert_id: alert?.alert_id || null });
 }
 
 async function handleDriverRiskCenter(request, response, url, ctx) {
@@ -2052,7 +2055,7 @@ async function handleTaskView(request, response, url, ctx, taskId) {
   const row = await loadTask(taskId, user.role === "driver" ? user.driver_id : null);
   if (!isDriver) await assertInScope(ctx.principal, { driverId: row.driver_id });
   const [al, co] = await Promise.all([
-    row.alert_id ? dbRequest("get_alert_row", "GET", "alerts", { query: { alert_id: `eq.${row.alert_id}`, select: "alert_id,gpsno,rule_code,evidence_id,occurred_at,status" } }) : { data: [] },
+    row.alert_id ? dbRequest("get_alert_row", "GET", "alerts", { query: { alert_id: `eq.${row.alert_id}`, driver_id: `eq.${row.driver_id}`, select: "alert_id,gpsno,rule_code,evidence_id,occurred_at,status" } }) : { data: [] },
     dbRequest("get_course_row", "GET", "training_courses", { query: { course_id: `eq.${row.course_id}`, select: "course_id,title,content,completion_requirement,content_status,version_no,source_version" } }),
   ]);
   const t2 = isDriver ? { data: [] } : await dbRequest("list_audit", "GET", "audit_logs", { query: { entity_id: `eq.${taskId}`, select: "audit_id,action,old_status,new_status,actor_id,actor_role,occurred_at", order: "occurred_at.asc", limit: 40 } });
@@ -2102,8 +2105,7 @@ const RR_FLOW = { submitted: ["checking", "answered"], checking: ["awaiting_data
 const RR_NOTE_REQUIRED = ["awaiting_data_owner", "answered", "closed"];
 
 async function handleRRCreate(request, response, url, ctx) {
-  const user = requireUser(ctx.principal);
-  if (user.role !== "driver" || !user.driver_id) throw new HttpError(403, "forbidden");
+  const user = requireVerifiedDriver(ctx.principal);
   const body = await readBody(request);
   const scoreId = String(body.score_id || "").slice(0, 80);
   const evidenceId = String(body.evidence_id || "").slice(0, 80);
@@ -2121,26 +2123,57 @@ async function handleRRCreate(request, response, url, ctx) {
     const meGps = await dbRequest("get_own_score_row", "GET", "drivers", { query: { driver_id: `eq.${user.driver_id}`, select: "gpsno", limit: 1 } });
     const gps = meGps.data?.[0]?.gpsno;
     const l = await dbRequest("get_own_ledger_row", "GET", "deduction_ledger", { query: { ledger_id: `eq.${evidenceId}`, select: "ledger_id,gpsno,source_version", limit: 1 } });
-    if (!l.data?.[0] || (gps && l.data[0].gpsno !== gps)) throw new HttpError(404, "not_found");
+    if (!gps || !l.data?.[0] || l.data[0].gpsno !== gps) throw new HttpError(404, "not_found");
     sourceVersion = sourceVersion || l.data[0].source_version;
   }
   const idem = String(body.idempotency_key || `rr:${user.driver_id}:${scoreId || evidenceId}:${reason}:${sha256hex(desc).slice(0, 12)}`).slice(0, 140);
-  const dup = await dbRequest("get_rr_row", "GET", "review_requests", { query: { idempotency_key: `eq.${idem}`, select: "request_id,status,created_at", limit: 1 } });
-  if (dup.data?.[0]) {
-    await appendAudit(ctx.principal, "review_request.create.replay", "review_request", dup.data[0].request_id, dup.data[0].status, dup.data[0].status, ctx.requestId);
-    return sendJson(response, 200, { ok: true, idempotent_replay: true, request_id: dup.data[0].request_id, status: dup.data[0].status, created_at: dup.data[0].created_at });
-  }
+  const findDuplicate = async () => (await dbRequest("get_rr_row", "GET", "review_requests", { query: { idempotency_key: `eq.${idem}`, select: "request_id,driver_id,score_id,evidence_id,reason_code,description,status,created_at", limit: 1 } })).data?.[0];
+  const replay = async row => {
+    if (row.driver_id !== user.driver_id || (row.score_id || "") !== scoreId || (row.evidence_id || "") !== evidenceId || row.reason_code !== reason || row.description !== desc) throw new HttpError(409, "review_request_idempotency_conflict");
+    const notification = await reviewRequestNotification(row, "submitted");
+    return sendJson(response, 200, { ok: true, idempotent_replay: true, request_id: row.request_id, status: row.status, created_at: row.created_at, notification, admin_notified: notification.notification_id || null });
+  };
+  const dup = await findDuplicate();
+  if (dup) return replay(dup);
   const requestId = newId("rr");
   const at = nowIso();
-  await dbRequest("insert_rr_row", "POST", "review_requests", {
-    body: [{ request_id: requestId, driver_id: user.driver_id, score_id: scoreId || null, evidence_id: evidenceId || null, reason_code: reason, description: desc, status: "submitted", review_note: null, reviewer_id: null, source_version: sourceVersion, created_by: user.user_id, created_at: at, updated_at: at, idempotency_key: idem }],
+  const target = await reviewRecipient(user.driver_id);
+  const row = { request_id: requestId, driver_id: user.driver_id, score_id: scoreId || null, evidence_id: evidenceId || null, reason_code: reason, description: desc, status: "submitted", review_note: null, reviewer_id: null, source_version: sourceVersion, created_by: user.user_id, created_at: at, updated_at: at, idempotency_key: idem,
+    ...(process.env.IE_LOCAL_SOURCE_ONLY === "1" ? { reminder_target_user_id: target } : {}) };
+  try { await dbRequest("insert_rr_row", "POST", "review_requests", {
+    body: [row],
     headers: { Prefer: "return=minimal" },
-  });
-  let notif = null;
-  const adm = await adminAccountId();
-  if (adm && typeof notify === "function") notif = await notify(adm, "rr_submitted", requestId, `司机 ${user.driver_id} 提交复核申请（${reason}），请在 EV05 处理。站内演示通知。`, `notif:rr:${requestId}`, "review_request", "复核申请待处理");
+  }); } catch (e) {
+    if (e instanceof HttpError && e.status === 409) { const existing = await findDuplicate(); if (existing) return replay(existing); }
+    throw e;
+  }
+  const notification = await reviewRequestNotification(row, "submitted");
   const auditId = await appendAudit(ctx.principal, "review_request.create", "review_request", requestId, null, "submitted", ctx.requestId);
-  sendJson(response, 201, { ok: true, request_id: requestId, status: "submitted", audit_id: auditId, admin_notified: notif, note: "不修改任何评分事实值；由安全员核查答复" });
+  sendJson(response, 201, { ok: true, request_id: requestId, status: "submitted", audit_id: auditId, notification, admin_notified: notification.notification_id || null, note: "申请已保存；提醒结果单独返回。不修改任何评分事实值；由安全员核查答复" });
+}
+
+async function reviewRecipient(driverId) {
+  const d = await dbRequest("get_own_score_row", "GET", "drivers", { query: { driver_id: `eq.${driverId}`, select: "fleet_id", limit: 1 } });
+  const fleet = d.data?.[0]?.fleet_id;
+  if (!fleet) return null;
+  const a = await dbRequest("get_task_row", "GET", "app_users", { query: { role: "eq.safety_admin", account_status: "eq.active", select: "user_id,fleet_scope", order: "user_id.asc", limit: 2000 } });
+  return a.data?.find(x => x.fleet_scope === "*" || x.fleet_scope === fleet)?.user_id || null;
+}
+
+async function reviewRequestNotification(row, kind, text = null) {
+  const submitted = kind === "submitted", key = submitted ? `notif:rr:${row.request_id}` : `notif:rra:${row.request_id}:${kind}`;
+  try {
+    const existing = await dbRequest("count_task_notifs", "GET", "notification_events", { query: { idempotency_key: `eq.${key}`, select: "notification_id", limit: 1 } });
+    if (existing.data?.[0]) return { state: "recorded", notification_id: existing.data[0].notification_id };
+    if (submitted && !["submitted", "checking", "awaiting_data_owner"].includes(row.status)) return { state: "not_needed" };
+    if (process.env.IE_LOCAL_SOURCE_ONLY === "1") return { state: "pending", note: "业务已保存，提醒由持久发件箱处理。" };
+    let target = null;
+    if (submitted) target = await reviewRecipient(row.driver_id);
+    else target = (await dbRequest("get_binding_target", "GET", "app_users", { query: { driver_id: `eq.${row.driver_id}`, role: "eq.driver", account_status: "eq.active", binding_verified: "eq.true", select: "user_id", limit: 1 } })).data?.[0]?.user_id;
+    if (!target) return { state: "no_recipient" };
+    const id = await notify(target, submitted ? "rr_submitted" : "rr_answered", row.request_id, text || `复核申请 ${row.request_id} 待处理。`, key, "review_request", "复核申请进展");
+    return { state: "recorded", notification_id: id };
+  } catch { return { state: "pending", note: "业务已保存，提醒尚未记录；非本地环境不保证后台自动恢复。" }; }
 }
 
 async function loadRR(id, asDriverId) {
@@ -2164,6 +2197,7 @@ async function assembleRR(row, adminView) {
 async function handleRRView(request, response, url, ctx, id) {
   const user = requireUser(ctx.principal);
   if (user.role === "driver") {
+    requireVerifiedDriver(ctx.principal);
     const row = await loadRR(id, user.driver_id);
     const view = await assembleRR(row, false);
     view.timeline = null; view.ledger = null;
@@ -2171,32 +2205,39 @@ async function handleRRView(request, response, url, ctx, id) {
   }
   if (!(ROLE_CAPABILITIES[user.role] || new Set()).has("review.score_challenge")) throw new HttpError(403, "forbidden");
   const row = await loadRR(id, null);
+  await assertInScope(ctx.principal, { driverId: row.driver_id });
   sendJson(response, 200, await assembleRR(row, true));
 }
 async function handleRRAdvance(request, response, url, ctx, id) {
   const user = requireUser(ctx.principal);
   if (!(ROLE_CAPABILITIES[user.role] || new Set()).has("review.score_challenge")) throw new HttpError(403, "forbidden");
   const row = await loadRR(id, null);
+  await assertInScope(ctx.principal, { driverId: row.driver_id });
   const body = await readBody(request);
   const next = String(body.status || "");
   const note = String(body.response_note || "").slice(0, 3000);
   if (!(RR_FLOW[row.status] || []).includes(next)) throw new HttpError(409, `rr_transition_${row.status}_to_${next}_invalid`);
   if (RR_NOTE_REQUIRED.includes(next) && !note.trim()) throw new HttpError(409, "response_note_required");
-  const at = nowIso();
-  await dbRequest("patch_rr_row", "PATCH", "review_requests", {
-    query: { request_id: `eq.${id}`, status: `eq.${row.status}` },
-    body: { status: next, review_note: note || row.review_note, reviewer_id: user.user_id, updated_at: at },
-    headers: { Prefer: "return=minimal" },
-  });
-  let notif = null;
-  if (next === "answered" || next === "closed") {
-    const acct = await dbRequest("get_binding_target", "GET", "app_users", { query: { driver_id: `eq.${row.driver_id}`, account_status: "eq.active", select: "user_id", limit: 1 } });
-    { let rrMsg = `复核申请 ${id} 状态：${next}。答复见“复核申请”页（站内演示通知）。`;
-      if (body.template_ref) { try { const tr = await resolveTemplateForSend(body.template_ref, "review_answer", { driver_id: String(row.driver_id || ""), alert_id: String(row.alert_id || ""), event_date: null, evidence_type: String(row.reason_code || ""), review_note: String(body.response_note || "").slice(0, 300) }); rrMsg = tr.body + "\n（模板 " + tr.template_key + ":v" + tr.version + "；站内演示通知）"; } catch (e) { if (String(e && e.message) === "template_not_usable") throw new HttpError(409, "template_not_approved_or_disabled"); throw e; } }
-      if (acct.data?.[0] && typeof notify === "function") notif = await notify(acct.data[0].user_id, "rr_answered", id, rrMsg, `notif:rra:${id}:${next}`, "review_request", "复核申请有进展"); }
+  const needsNotice = next === "answered" || next === "closed";
+  let rrMsg = `复核申请 ${id} 状态：${next}。答复见“复核申请”页（站内演示通知）。`;
+  if (needsNotice && body.template_ref) {
+    try {
+      const tr = await resolveTemplateForSend(body.template_ref, "review_answer", { driver_id: String(row.driver_id || ""), alert_id: "", event_date: null, evidence_type: String(row.reason_code || ""), review_note: note.slice(0, 300) });
+      rrMsg = tr.body + "\n（模板 " + tr.template_key + ":v" + tr.version + "；站内演示通知）";
+    } catch (e) { if (String(e?.message) === "template_not_usable") throw new HttpError(409, "template_not_approved_or_disabled"); throw e; }
   }
+  const acct = needsNotice ? (await dbRequest("get_binding_target", "GET", "app_users", { query: { driver_id: `eq.${row.driver_id}`, role: "eq.driver", account_status: "eq.active", binding_verified: "eq.true", select: "user_id", limit: 1 } })).data?.[0] : null;
+  const at = nowIso();
+  const changed = await dbRequest("patch_rr_row", "PATCH", "review_requests", {
+    query: { request_id: `eq.${id}`, status: `eq.${row.status}`, updated_at: row.updated_at ? `eq.${row.updated_at}` : "is.null" },
+    body: { status: next, review_note: note || row.review_note, reviewer_id: user.user_id, updated_at: at,
+      ...(process.env.IE_LOCAL_SOURCE_ONLY === "1" && needsNotice ? { reminder_target_user_id: acct?.user_id || null, reminder_text: rrMsg } : {}) },
+    headers: { Prefer: "return=representation" },
+  });
+  if (!changed.data?.length) throw new HttpError(409, "review_request_version_conflict");
+  const notification = needsNotice ? await reviewRequestNotification({ ...row, status: next }, next, rrMsg) : { state: "not_needed" };
   const auditId = await appendAudit(ctx.principal, `review_request.${next}`, "review_request", id, row.status, next, ctx.requestId);
-  sendJson(response, 200, { ok: true, request_id: id, old_status: row.status, new_status: next, reviewer_id: user.user_id, at, audit_id: auditId, driver_notified: notif, note: "源数据问题→仅 awaiting_data_owner 并注明转数据负责人；本接口无评分写路径" });
+  sendJson(response, 200, { ok: true, request_id: id, old_status: row.status, new_status: next, reviewer_id: user.user_id, at, audit_id: auditId, notification, driver_notified: notification.notification_id || null, note: "源数据问题→仅 awaiting_data_owner 并注明转数据负责人；本接口无评分写路径" });
 }
 
 
@@ -2309,6 +2350,7 @@ async function handleAdminUserStatus(request, response, url, ctx, userId) {
 
 async function handleNotesSummary(request, response, url, ctx) {
   const user = requireUser(ctx.principal);
+  if (user.role === "driver") requireVerifiedDriver(ctx.principal);
   const unread = await dbRequest("count_my_notes", "GET", "notification_events", { query: { target_user_id: `eq.${user.user_id}`, read_at: "is.null", limit: 1 }, headers: { Prefer: "count=exact,return=minimal" } });
   const notes = parseCount(unread.rangeHeader) ?? (unread.data || []).length;
   let todo = 0; let todoKey = null;
@@ -2329,17 +2371,21 @@ async function handleNotesSummary(request, response, url, ctx) {
 
 async function handleNoteRead(request, response, url, ctx, notifId) {
   const user = requireUser(ctx.principal);
+  if (user.role === "driver") requireVerifiedDriver(ctx.principal);
   const { data } = await dbRequest("count_my_notes", "GET", "notification_events", { query: { notification_id: `eq.${notifId}`, target_user_id: `eq.${user.user_id}`, select: "notification_id,read_at" } });
   const row = data?.[0];
   if (!row) throw new HttpError(404, "not_found");
   if (row.read_at) return sendJson(response, 200, { ok: true, idempotent_replay: true, read_at: row.read_at });
   const at = nowIso();
-  await dbRequest("patch_rr_row", "PATCH", "notification_events", { query: { notification_id: `eq.${notifId}`, read_at: "is.null" }, body: { read_at: at }, headers: { Prefer: "return=minimal" } });
-  sendJson(response, 200, { ok: true, notification_id: notifId, read_at: at });
+  const changed = await dbRequest("patch_rr_row", "PATCH", "notification_events", { query: { notification_id: `eq.${notifId}`, target_user_id: `eq.${user.user_id}`, read_at: "is.null" }, body: { read_at: at }, headers: { Prefer: "return=representation" } });
+  const saved = changed.data?.[0] || (await dbRequest("count_my_notes", "GET", "notification_events", { query: { notification_id: `eq.${notifId}`, target_user_id: `eq.${user.user_id}`, select: "notification_id,read_at" } })).data?.[0];
+  if (!saved?.read_at) throw new HttpError(409, "notification_version_conflict");
+  sendJson(response, 200, { ok: true, notification_id: notifId, read_at: saved.read_at, idempotent_replay: !changed.data?.length });
 }
 
 async function handleMyNotes(request, response, url, ctx) {
   const user = requireUser(ctx.principal);
+  if (user.role === "driver") requireVerifiedDriver(ctx.principal);
   const r = await dbRequest("count_my_notes", "GET", "notification_events", { query: { target_user_id: `eq.${user.user_id}`, select: "notification_id,source_entity_type,source_entity_id,type,title,content,read_at,created_at", order: "created_at.desc", limit: 50 } });
   sendJson(response, 200, { rows: r.data || [] });
 }
@@ -3370,6 +3416,9 @@ const API_ROUTES = [
   { method: "POST", path: "/api/me/profile", needAuth: true, handler: handleOwnProfile },
   { method: "GET", path: "/api/analysis/root-causes", needAuth: true, handler: handleRootCauses },
   { method: "GET", path: "/api/driver/fleet-summary", needAuth: true, handler: handleDriverFleetSummary },
+  { method: "GET", path: "/api/driver/action-center", needAuth: true, handler: handleDriverActionCenter },
+  { method: "GET", path: "/api/driver/score-comparison", needAuth: true, handler: handleDriverScoreComparison },
+  { method: "GET", path: "/api/driver/intervention", needAuth: true, handler: handleDriverInterventionView },
   { method: "GET", path: "/api/driver/risk-center", needAuth: true, handler: handleDriverRiskCenter },
   { method: "GET", path: "/api/driver/evidence", needAuth: true, handler: handleDriverEvidence },
   { method: "GET", path: "/api/driver/learning-report", needAuth: true, handler: handleLearningReport },
@@ -3460,6 +3509,7 @@ const CASE_ROUTES = [
   { method: "GET", re: /^\/api\/notes$/, h: handleMyNotes },
 ];
 function crOf(pn) {
+  if (pn.startsWith("/api/interventions/") && pn.endsWith("/draft")) return "send.intervention";
   if (pn.endsWith("/retry-notification")) return "assign.training";
   if (pn.endsWith("/review")) return "review.training_feedback";
   if (pn.endsWith("/start") || pn.endsWith("/submit") || pn.endsWith("/draft")) return "view.my_training";

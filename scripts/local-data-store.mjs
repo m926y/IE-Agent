@@ -75,6 +75,25 @@ export async function openLocalStore({ directory, sourceRoot = allowedRoot } = {
   }
   const previous = db.prepare("SELECT value FROM metadata WHERE key='source_hash'").get()?.value;
   if (previous && previous !== sourceHash) { db.close(); throw new Error("Source files changed. Use a new local database directory; existing state was not overwritten."); }
+  // Additive local upgrade: existing business rows and the training outbox remain intact.
+  db.exec(`CREATE TABLE IF NOT EXISTS review_outbox (
+    request_id TEXT NOT NULL,kind TEXT NOT NULL,target_user_id TEXT,content TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,
+    PRIMARY KEY(request_id,kind));
+    CREATE TRIGGER IF NOT EXISTS enqueue_review_request AFTER INSERT ON objects WHEN NEW.table_name='review_requests' BEGIN
+      INSERT OR IGNORE INTO review_outbox(request_id,kind,target_user_id) VALUES(NEW.record_id,'submitted',json_extract(NEW.payload,'$.reminder_target_user_id'));
+      INSERT INTO objects(table_name,record_id,payload) VALUES('audit_logs','sqlite-review-'||NEW.record_id,json_object('audit_id','sqlite-review-'||NEW.record_id,'actor_id','local_sqlite_transaction','actor_role','system','action','local.review.insert','entity_type','review_request','entity_id',NEW.record_id,'new_status',json_extract(NEW.payload,'$.status'),'occurred_at',strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+    END;
+    CREATE TRIGGER IF NOT EXISTS enqueue_review_answer AFTER UPDATE ON objects WHEN NEW.table_name='review_requests' AND json_extract(NEW.payload,'$.status') IN ('answered','closed') AND json_extract(OLD.payload,'$.status') IS NOT json_extract(NEW.payload,'$.status') BEGIN
+      INSERT OR IGNORE INTO review_outbox(request_id,kind,target_user_id,content) VALUES(NEW.record_id,json_extract(NEW.payload,'$.status'),json_extract(NEW.payload,'$.reminder_target_user_id'),json_extract(NEW.payload,'$.reminder_text'));
+    END;
+    CREATE TRIGGER IF NOT EXISTS local_review_update_audit AFTER UPDATE ON objects WHEN NEW.table_name='review_requests' AND json_extract(NEW.payload,'$.status') IS NOT json_extract(OLD.payload,'$.status') BEGIN
+      INSERT INTO objects(table_name,record_id,payload) SELECT 'audit_logs',audit_id,json_object('audit_id',audit_id,'actor_id','local_sqlite_transaction','actor_role','system','action','local.review.transition','entity_type','review_request','entity_id',NEW.record_id,'old_status',json_extract(OLD.payload,'$.status'),'new_status',json_extract(NEW.payload,'$.status'),'occurred_at',strftime('%Y-%m-%dT%H:%M:%fZ','now')) FROM (SELECT 'sqlite-review-transition-'||lower(hex(randomblob(16))) AS audit_id);
+    END;`);
+  // Restore reminders for pre-upgrade open requests, without rewriting requests or approvals.
+  db.exec(`INSERT OR IGNORE INTO review_outbox(request_id,kind,target_user_id)
+    SELECT record_id,'submitted',json_extract(payload,'$.reminder_target_user_id') FROM objects
+    WHERE table_name='review_requests' AND json_extract(payload,'$.status') IN ('submitted','checking','awaiting_data_owner');`);
   let accounts;
   if (!previous) {
     const drivers = datasets.find(x => x.table === "drivers").rows;
@@ -95,7 +114,8 @@ export async function openLocalStore({ directory, sourceRoot = allowedRoot } = {
   await writeFile(join(directory, "source-manifest.json"), JSON.stringify({ source_root: allowed, source_hash: sourceHash, imported: provenance, technical_accounts: "Generated locally; driver mappings come from IE亮剑 drivers.csv. No invented risk/score/course records." }, null, 2));
   function drainOutbox({ force = false } = {}) {
     const due = db.prepare("SELECT * FROM outbox WHERE status='pending' AND next_at<=? ORDER BY task_id,kind LIMIT 100").all(force ? Number.MAX_SAFE_INTEGER : Date.now());
-    for (const item of due) transaction(() => {
+    let failure;
+    for (const item of due) { try { transaction(() => {
       const task = get("training_tasks", item.task_id);
       if (!task || (item.kind === "assigned" ? task.status !== "assigned" : task.status !== "submitted")) { db.prepare("UPDATE outbox SET status='not_needed' WHERE task_id=? AND kind=?").run(item.task_id, item.kind); return; }
       const users = rows("app_users").filter(x => x.account_status === "active");
@@ -111,8 +131,56 @@ export async function openLocalStore({ directory, sourceRoot = allowedRoot } = {
       }
       put("audit_logs", { audit_id: "local-outbox-"+randomBytes(8).toString("hex"), actor_id: "local_outbox_worker", actor_role: "system", action: "local.notification_recorded", entity_type: "training_task", entity_id: task.task_id, occurred_at: new Date().toISOString() });
       db.prepare("UPDATE outbox SET status='recorded',attempts=attempts+1,last_error=NULL WHERE task_id=? AND kind=?").run(item.task_id,item.kind);
-    });
+    }); } catch (error) {
+      db.prepare("UPDATE outbox SET attempts=attempts+1,next_at=?,last_error='delivery_failed' WHERE task_id=? AND kind=?").run(Date.now()+30000,item.task_id,item.kind);
+      failure ||= error;
+    } }
+    try { drainReviewOutbox(force); } catch (error) { failure ||= error; }
+    if (failure) throw failure;
     return db.prepare("SELECT * FROM outbox ORDER BY task_id,kind").all();
+  }
+  function drainReviewOutbox(force) {
+    const due = db.prepare("SELECT * FROM review_outbox WHERE status='pending' AND next_at<=? ORDER BY request_id,kind LIMIT 100").all(force ? Number.MAX_SAFE_INTEGER : Date.now());
+    let failure;
+    for (const item of due) {
+      // Resolve an initially missing recipient once, then persist that identity before delivery.
+      // Later account/scope changes leave the reminder pending rather than redirecting it.
+      const request = get("review_requests", item.request_id), fleet = request && get("drivers", request.driver_id)?.fleet_id;
+      const eligible = x => x.account_status === "active" && (item.kind === "submitted"
+        ? x.role === "safety_admin" && fleet && ["*",fleet].includes(x.fleet_scope)
+        : x.role === "driver" && x.driver_id === request?.driver_id && x.binding_verified);
+      if (!item.target_user_id) {
+        const candidate = rows("app_users").find(eligible);
+        if (candidate) {
+          db.prepare("UPDATE review_outbox SET target_user_id=? WHERE request_id=? AND kind=? AND target_user_id IS NULL").run(candidate.user_id,item.request_id,item.kind);
+          item.target_user_id = candidate.user_id;
+        }
+      }
+      try { transaction(() => {
+        const row = get("review_requests",item.request_id);
+        const valid = row && (item.kind === "submitted" ? ["submitted","checking","awaiting_data_owner"].includes(row.status) : row.status === item.kind);
+        if (!valid) { db.prepare("UPDATE review_outbox SET status='not_needed' WHERE request_id=? AND kind=?").run(item.request_id,item.kind); return; }
+        const target = item.target_user_id && get("app_users",item.target_user_id);
+        if (!target || !eligible(target)) {
+          db.prepare("UPDATE review_outbox SET attempts=attempts+1,next_at=?,last_error=? WHERE request_id=? AND kind=?").run(Date.now()+30000,target ? 'recipient_unavailable' : 'no_recipient',item.request_id,item.kind); return;
+        }
+        const idem = item.kind === "submitted" ? `notif:rr:${item.request_id}` : `notif:rra:${item.request_id}:${item.kind}`;
+        const existing = rows("notification_events").find(x=>x.idempotency_key===idem);
+        if (existing && existing.target_user_id !== target.user_id) {
+          db.prepare("UPDATE review_outbox SET attempts=attempts+1,next_at=?,last_error='recipient_changed' WHERE request_id=? AND kind=?").run(Date.now()+30000,item.request_id,item.kind); return;
+        }
+        if (!existing) {
+          const text = item.content || (item.kind === "submitted" ? `复核申请 ${item.request_id} 待处理，请查看申请原文。` : `复核申请 ${item.request_id} 状态：${item.kind}，请查看已保存答复。`);
+          put("notification_events",{notification_id:'local-review-noti-'+randomBytes(8).toString('hex'),target_user_id:target.user_id,target_role:target.role,source_entity_type:'review_request',source_entity_id:item.request_id,type:item.kind==='submitted'?'rr_submitted':'rr_answered',title:'复核申请进展',body:text.slice(0,500),content:text.slice(0,500),idempotency_key:idem,read_at:null,created_at:new Date().toISOString()});
+        }
+        put("audit_logs",{audit_id:'local-review-outbox-'+randomBytes(8).toString('hex'),actor_id:'local_outbox_worker',actor_role:'system',action:'local.review.notification_recorded',entity_type:'review_request',entity_id:item.request_id,occurred_at:new Date().toISOString()});
+        db.prepare("UPDATE review_outbox SET status='recorded',attempts=attempts+1,last_error=NULL WHERE request_id=? AND kind=?").run(item.request_id,item.kind);
+      }); } catch (error) {
+        db.prepare("UPDATE review_outbox SET attempts=attempts+1,next_at=?,last_error='delivery_failed' WHERE request_id=? AND kind=?").run(Date.now()+30000,item.request_id,item.kind);
+        failure ||= error;
+      }
+    }
+    if (failure) throw failure;
   }
   return { db, get, rows, put, transaction, drainOutbox, accounts, provenance, directory, sourceHash, immutable, pk, close: () => db.close() };
 }

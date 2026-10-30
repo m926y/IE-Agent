@@ -25,12 +25,16 @@ export function createLocalBroker(store, key, faults) {
         return Object.fromEntries(cols.map(c => [c, row[c] ?? null]));
       };
       if (["GET","HEAD"].includes(req.method)) {
+        if (faults.beforeRead) await faults.beforeRead({ table, query: url.searchParams });
         const count = store.db.prepare(`SELECT COUNT(*) n FROM objects WHERE ${where}`).get(...parameters).n;
         const rows = store.db.prepare(`SELECT payload FROM objects WHERE ${where} ORDER BY ${order} LIMIT ? OFFSET ?`).all(...parameters,limit,offset).map(x=>project(JSON.parse(x.payload)));
         return send(200, rows, { "content-range": `${offset}-${offset+Math.max(0,rows.length-1)}/${count}` });
       }
       let text = ""; for await (const c of req) { text += c; if (text.length > 5*1024*1024) return send(413,{code:"body_too_large"}); }
       const body = text ? JSON.parse(text) : {};
+      // In-process isolated tests can hold a write to exercise a precise race.
+      // No HTTP parameter enables this hook.
+      if (faults.beforeMutation) await faults.beforeMutation({ table, method: req.method, body });
       const affected = store.transaction(() => {
         if (req.method === "POST") {
           const incoming = Array.isArray(body) ? body : [body];

@@ -1,0 +1,64 @@
+{
+  "status": "technical_pass_human_pending",
+  "created_at": "2026-10-30T06:18:10.218Z",
+  "code_hash": "1e706d934aa0adc1469d6dcef8226dde8eabb7b8a56924f6fa246067495c995f",
+  "source_hash": "258cb8bd9f8d20715a0f603c3e183a2699d00d8f7ee095587444e02dee3aaac9",
+  "node": "v24.16.0",
+  "case_count": 14,
+  "repeats_per_arm": 3,
+  "case_strata": {
+    "low": 2,
+    "medium": 6,
+    "high": 6
+  },
+  "critical_fields": {
+    "checked": 504,
+    "matched": 504,
+    "match_rate": 1,
+    "definition": "score_id、安全分、截止日、来源版本逐字段对照原始来源；不代表自然语言建议的人工评分。"
+  },
+  "privacy": {
+    "foreign_record_attempts": 14,
+    "foreign_records_returned": 0,
+    "unverified_business_writes": 0
+  },
+  "quality_routing": {
+    "low_confidence_checks": 6,
+    "correct": 6
+  },
+  "interface_collection": {
+    "A": {
+      "label": "现有分散页面的数据入口",
+      "samples": 42,
+      "p50_ms": 47.77,
+      "p95_ms": 51.689
+    },
+    "B": {
+      "label": "本人来源证据与历史核对入口",
+      "samples": 42,
+      "p50_ms": 56.624,
+      "p95_ms": 59.937
+    },
+    "C": {
+      "label": "行动摘要加来源证据与质量分流入口",
+      "samples": 42,
+      "p50_ms": 91.874,
+      "p95_ms": 95.448
+    }
+  },
+  "human_review": {
+    "reviewer_count": 0,
+    "status": "pending",
+    "ratings_completed": 0,
+    "completion_time": null,
+    "understanding_improvement": null
+  },
+  "limits": [
+    "A/B/C为当前产品的三种信息采集入口，不是历史版本回退或等负载性能竞赛。",
+    "耗时是本机接口并行采集耗时，不是司机查找时间或认知收益。",
+    "人工表格留空；没有真实评审者参与，不宣称可用性提升。",
+    "案例初始无培训任务；完整培训/干预流程由独立浏览器验收覆盖。",
+    "来源只读，未触及现有.local，未联网获取业务数据。"
+  ],
+  "evidence_directory": ".source-tests/value-audit-2vpt0P"
+}

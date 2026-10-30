@@ -55,6 +55,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   try { json = text ? JSON.parse(text) : null; } catch { /* fallthrough */ }
   if (!res.ok) {
     const code = (json as { error?: string } | null)?.error || `http_${res.status}`;
+    if (res.status === 401 && path !== "/api/auth/login") window.dispatchEvent(new Event("claw:auth-lost"));
     throw new ApiError(res.status, code);
   }
   return json as T;
@@ -134,9 +135,10 @@ export const taskSubmit = (id: string, learning_record: string, feedback = "", e
 export const taskReview = (id: string, decision: string, reason: string) => api<{ ok: true; new_status: string; audit_id: string | null; task_id?: string; idempotent_replay?: boolean }>(`/api/training-tasks/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify({ decision, reason }) });
 
 export type RRView = { request: Record<string, unknown>; snapshot: Record<string, unknown> | null; ledger: Record<string, unknown>[] | null; timeline: Record<string, unknown>[] | null };
-export const rrCreate = (p2: { score_id?: string; evidence_id?: string; reason_code: string; description: string }) => api<{ ok: true; request_id: string; status: string; audit_id?: string | null; admin_notified?: string | null; idempotent_replay?: boolean }>("/api/review-requests", { method: "POST", body: JSON.stringify(p2) });
+export type ReviewNotificationReceipt = { state: "recorded" | "pending" | "no_recipient" | "not_needed"; notification_id?: string | null; note?: string };
+export const rrCreate = (p2: { score_id?: string; evidence_id?: string; reason_code: string; description: string; idempotency_key?: string }) => api<{ ok: true; request_id: string; status: string; audit_id?: string | null; admin_notified?: string | null; idempotent_replay?: boolean; notification?: ReviewNotificationReceipt }>("/api/review-requests", { method: "POST", body: JSON.stringify(p2) });
 export const rrView = (id: string) => api<RRView>(`/api/review-requests/${encodeURIComponent(id)}`);
-export const rrAdvance = (id: string, status: string, response_note: string, template_ref?: string | null) => api<{ ok: true; new_status: string; audit_id: string | null; driver_notified?: string | null }>(`/api/review-requests/${encodeURIComponent(id)}/advance`, { method: "POST", body: JSON.stringify({ status, response_note, template_ref }) });
+export const rrAdvance = (id: string, status: string, response_note: string, template_ref?: string | null) => api<{ ok: true; new_status: string; audit_id: string | null; driver_notified?: string | null; notification?: ReviewNotificationReceipt }>(`/api/review-requests/${encodeURIComponent(id)}/advance`, { method: "POST", body: JSON.stringify({ status, response_note, template_ref }) });
 
 export type NotesSummary = { unread_notes: number; todo_count: number; todo_label: string };
 export type NoteRow = { notification_id: string; source_entity_type: string; source_entity_id: string; type: string; title?: string | null; content: string; read_at: string | null; created_at: string };
@@ -184,8 +186,22 @@ export const opsSet = (config_id: string, value: string) => api<{ ok: true; old_
 export const opsList = () => api<{ ok: true; rows: Record<string, string | number | null>[] }>("/api/admin/ops");
 
 // R21：司机端匿名车队统计（服务端按可信会话，无可调参数）
-export type FleetSummary = { data_status: "ok" | "insufficient_sample" | "no_data" | "query_failed"; as_of_date: string | null; source_version?: string | null; valid_count: number | null; average: number | null; distribution: { A: number; B: number; C: number; D: number } | null; note: string };
+export type FleetSummary = { data_status: "ok" | "insufficient_sample" | "no_data" | "query_failed" | "mixed_versions" | "missing_basis"; as_of_date: string | null; source_version?: string | null; valid_count: number | null; average: number | null; distribution: { A: number; B: number; C: number; D: number } | null; note: string; sample_definition?: string };
 export const fleetSummary = () => api<FleetSummary>("/api/driver/fleet-summary");
+
+export type DriverSourceKind = "training_task" | "intervention" | "review_request" | "score" | "score_history" | "alert" | "event";
+export type DriverSourceRef = { source_kind: DriverSourceKind; source_id: string };
+export type DriverTimelineNode = DriverSourceRef & { event_id: string; event_type: string; event_at: string; date_precision: "day" | "instant"; status: string; source_version: string | null; related: DriverSourceRef[] };
+export type DriverActionCenter = {
+  counts: { training_pending: number; training_awaiting_review: number; training_follow_up: number; messages_awaiting_reply: number; review_open: number; review_answered: number };
+  as_of_date: string | null; source_version: string | null; next_step: { code: string; note: string };
+  timeline: DriverTimelineNode[]; pagination: { limit: number; has_more: boolean; next_cursor: string | null }; queried_at: string; limitations: string;
+};
+export const driverActionCenter = (cursor?: string) => api<DriverActionCenter>("/api/driver/action-center" + (cursor ? "?cursor=" + encodeURIComponent(cursor) : ""));
+export type DriverScoreComparison = { before: Record<string, unknown> | null; after: Record<string, unknown> | null; status: string; note: string; difference: number | null; dimensions: Record<string, number | null>; options: { score_id: string; as_of_date: string }[]; options_truncated: boolean; limitations: string };
+export const driverScoreComparison = (before?: string, after?: string) => api<DriverScoreComparison>("/api/driver/score-comparison" + (before && after ? "?" + new URLSearchParams({ before_id: before, after_id: after }) : ""));
+export type DriverInterventionView = { intervention_id: string; status: string; sent_text: string | null; sent_at: string | null; read_at: string | null; replied_at: string | null; reply_text: string | null; alert_id: string | null };
+export const driverInterventionView = (id: string) => api<DriverInterventionView>("/api/driver/intervention?id=" + encodeURIComponent(id));
 
 export type Drop7 = { data_status: string; date_pair?: [string, string] | null; threshold: number; threshold_version: string; comparable?: number; drop_count: number; not_comparable_count?: number; not_comparable?: { gpsno: string; driver_id: string | null; reason: string }[]; rows?: { gpsno: string; driver_id: string | null; early_date: string; late_date: string; early_score: number; late_score: number; drop: number; threshold: number; threshold_version: string; early_score_id: string; late_score_id: string; confidence: string | null; base_tags: string[]; owner: string; next_step: string; route: string }[]; note?: string; scope_note?: string; generated?: string };
 export const drop7 = () => api<Drop7>("/api/rm/drop7");
