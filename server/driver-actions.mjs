@@ -41,7 +41,7 @@ export async function actionCenter({ driverId, read, fail, params }) {
   const limit = Number(rawLimit);
   const own = { driver_id: `eq.${driverId}` };
   const [tasks, messages, reviews, scores, alerts, events, snapshots] = await Promise.all([
-    readAll(read, fail, "training_tasks", { ...own, select: "task_id,alert_id,status,created_at,started_at,submitted_at,reviewed_at,course_snapshot,updated_at" }, "task_id"),
+    readAll(read, fail, "training_tasks", { ...own, select: "task_id,alert_id,status,started_at,submitted_at,reviewed_at,course_snapshot,updated_at" }, "task_id"),
     readAll(read, fail, "interventions", { ...own, status: "in.(sent,read,replied,closed)", select: "intervention_id,alert_id,status,sent_at,read_at,replied_at" }, "intervention_id"),
     readAll(read, fail, "review_requests", { ...own, select: "request_id,score_id,evidence_id,status,created_at,updated_at,source_version" }, "request_id"),
     readAll(read, fail, "score_history", { ...own, select: SCORE_COLUMNS }, "score_id"),
@@ -59,7 +59,8 @@ export async function actionCenter({ driverId, read, fail, params }) {
   const relatedAlert = id => id && alertMap.has(id) ? [{ source_kind: "alert", source_id: id }] : [];
   for (const row of tasks) {
     const related = relatedAlert(row.alert_id), version = row.course_snapshot?.source_version;
-    const assigned = row.course_snapshot?.captured_stage === "assignment" ? row.course_snapshot.captured_at : row.created_at;
+    // 宿主 PostgreSQL 的 training_tasks 无 created_at 列（本地 SQLite 才有）：回退 updated_at（分配行的初始时间戳）。
+    const assigned = row.course_snapshot?.captured_stage === "assignment" ? row.course_snapshot.captured_at : (row.created_at || row.updated_at);
     add("training_task", row.task_id, "assigned", assigned, row.status, version, related);
     add("training_task", row.task_id, "started", row.started_at, row.status, version, related);
     add("training_task", row.task_id, "submitted", row.submitted_at, row.status, version, related);
