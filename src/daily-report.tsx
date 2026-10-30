@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, adminDailyReportJobs, adminDailyReportRun, dailyGoalFeedback, dailyReportDetail, dailyReportHistory, dailyReportNotifications, dailyReportToday, dailySafetyGoals, noteRead } from './api';
-import type { DailyGoal, DailyHistory, DailyReportJobs, DailySafetyReport, NoteRow, PublishedDailyReport } from './api';
+import type { DailyGoal, DailyHistory, DailyReportJobs, DailyRisk, DailySafetyReport, NoteRow, PublishedDailyReport } from './api';
 import { DriverEvidence } from './driver-evidence';
 import { Banner, EmptyState } from './ui';
 
@@ -16,20 +16,64 @@ export function DailyReportEntry({onOpen}:{onOpen:()=>void}){
   return <div className="panel"><h3>今日安全简报</h3><p>{title}</p><p className="meta">{unread===null?'通知状态读取中':`未读简报通知 ${unread} 条`} · 历史数据分析</p><button className="btn" onClick={onOpen}>查看简报与安全动态</button></div>;
 }
 
-function ReportView({published,goal,onFeedback}:{published:PublishedDailyReport;goal:DailyGoal|null;onFeedback:(code:'will_review'|'need_help'|'dismissed')=>void}){
-  const r:DailySafetyReport=published.report, main=r.risks[0];
+function TrendChart({trend}:{trend:NonNullable<DailySafetyReport['scoreTrend']>}){
+  const dates=trend.dates||[]; if(!dates.length) return <p className="meta">无可呈现的观测日。</p>;
+  const vals=[...trend.personal,...(trend.fleet||[])].filter(v=>typeof v==='number') as number[];
+  if(!vals.length) return <div className="dr-chart"><div className="dr-chart-title">评分趋势对比</div><p className="meta">与当期口径一致的观测分值不足，图表留白不插值。</p><p className="meta">{trend.note}</p></div>;
+  const min=Math.min(...vals)-6, max=Math.max(...vals)+4, W=320,H=120,P=12;
+  const x=(i:number)=>P+(W-2*P)*(dates.length===1?0.5:i/(dates.length-1));
+  const y=(v:number)=>H-P-((v-min)/((max-min)||1))*(H-2*P);
+  const seg=(arr:(number|null)[])=>{const parts:string[]=[];let cur='';arr.forEach((v,i)=>{if(v==null){if(cur)parts.push(cur);cur='';return;}cur+=(cur?' L':'M')+x(i).toFixed(1)+','+y(v).toFixed(1);if(i===arr.length-1||arr[i+1]==null){parts.push(cur);cur='';}});return parts;};
+  return <div className="dr-chart"><div className="dr-chart-title">评分趋势对比 <span className="meta">近 {dates.length} 个观测日</span></div>
+    <svg viewBox={`0 0 ${W} ${H+16}`} role="img" aria-label={`个人评分 ${trend.personal.filter(v=>v!=null).join('、')||'未取得'}；车队均分 ${trend.fleet.filter(v=>v!=null).join('、')||'未取得'}`}>
+      {[0.25,0.5,0.75].map(f=><line key={f} x1={P} x2={W-P} y1={H-P-(H-2*P)*f} y2={H-P-(H-2*P)*f} stroke="#eee" strokeDasharray="3 3"/>)}
+      {seg(trend.fleet||[]).map((dd,i)=><path key={'f'+i} d={dd} fill="none" stroke="#67a86b" strokeWidth="1.6"/>)}
+      {seg(trend.personal).map((dd,i)=><path key={'p'+i} d={dd} fill="none" stroke="#5b8def" strokeWidth="2"/>)}
+      {trend.personal.map((v,i)=>v!=null?<circle key={'pc'+i} cx={x(i)} cy={y(v)} r="2.6" fill="#5b8def"/>:null)}
+      {dates.map((d,i)=><text key={d} x={x(i)} y={H+2} fontSize="8" textAnchor="middle" fill="#888">{d.slice(5).replace('-','/')}</text>)}
+    </svg>
+    <div className="dr-legend"><span><i className="dot" style={{background:'#5b8def'}}/>个人评分</span><span><i className="dot" style={{background:'#67a86b'}}/>车队均分</span></div>
+    <p className="meta">{trend.note}</p></div>;
+}
+function ReportView({published,goal,onFeedback,onRead,readDone}:{published:PublishedDailyReport;goal:DailyGoal|null;onFeedback:(code:'will_review'|'need_help'|'dismissed')=>void;onRead:()=>void;readDone:boolean}){
+  const r:DailySafetyReport=published.report, main=r.risks[0], n=r.narrative, nm=r.narrativeMeta;
+  const adviceFor=(risk:DailyRisk)=> (r.cards.find(c=>c.type==='action')?.description) || '查看对应历史回放证据，并与安全员核对记录。';
+  const items=(n?.items||[]).length?n!.items:(r.risks||[]).slice(0,2).map(rk=>({title:`${rk.eventName||rk.eventType} 值得关注`,observation:`已记录 ${rk.observedCount} 条同类回放事件（${(rk.firstObservedAt||'').slice(0,10)} 至 ${(rk.lastObservedAt||'').slice(0,10)}）。`,advice:adviceFor(rk),evidenceRefs:rk.evidenceRefs}));
   return <div className="stack">
-    <div className="panel score-hero"><div className="l">历史数据分析 · 报告日期 {r.reportDate} · 版本 {published.reportVersion}</div><h2>{r.title}</h2><div className="n">{num(r.metrics.personalScore)}</div><div className="l">个人安全分 · 数据截至 {r.metrics.personalScoreDate||'未取得'} · 可信度 {confidenceLabel(r.metrics.scoreConfidence)}</div></div>
-    <div className="panel"><h3>评分与车队对照</h3><p>车队同期均分：<b>{num(r.metrics.fleetAverage)}</b>{r.metrics.fleetScoredDrivers!==null?`（可比司机 ${r.metrics.fleetScoredDrivers} 人）`:''}</p><p>车队截点：{r.metrics.fleetDate||'未取得'} · 两期差值：{num(r.metrics.scoreChange)}（{comparisonLabel(r.metrics.scoreComparisonStatus)}）</p>{r.metrics.scoreEvidenceId&&<DriverEvidence kind="score_history" id={r.metrics.scoreEvidenceId} label="查看本人评分依据" />}</div>
-    <div className="panel"><h3>评分趋势</h3><p>{r.metrics.scoreComparisonStatus==='comparable'?`可比两期评分变化：${num(r.metrics.scoreChange)}`:'可比数据不足：现有评分窗口或可信度不支持独立趋势判断。'}</p></div>
-    <div className="panel"><h3>回放事件与本期建议</h3>{main?<><p>{main.eventName||main.eventType}：已记录 {main.observedCount} 条。按已观察同类计数排序；不是事故预测或完整近 7 日风险率。</p><p>记录时间：{main.firstObservedAt} 至 {main.lastObservedAt}</p>{r.dailyGoal&&<Banner tone="info">行动建议：{r.dailyGoal.description}</Banner>}<details><summary>为什么推荐这项核对</summary><p>{r.dailyGoal?.recommendationBasis==='source_score_action'?'建议取自本人评分快照的原始推荐动作，且与回放事件维度一致。':'建议依据本人已记录的同类历史回放事件；没有独立的事故预测评分。'}</p><p>按已观察同类事件数排序：{main.observedCount} 条；来源覆盖 {r.coverage.observedDates.join('、')||'未取得'}。</p>{r.dailyGoal?.scoreEvidenceRef&&r.metrics.scoreEvidenceId&&<DriverEvidence kind="score_history" id={r.metrics.scoreEvidenceId} label="核对评分建议来源" />}{main.evidenceRefs.map(ref=>{const id=evidenceId(ref);return id?<DriverEvidence key={ref} kind="event" id={id} label={`核对回放证据 ${id}`} />:null;})}</details></>:<p>目前没有可引用的本人回放事件，暂不作个人风险判断。</p>}{r.cards.filter(card=>card.type==='learning_tip').map(card=><p className="meta" key={card.title}>{card.title}：{card.description}</p>)}</div>
-    {r.goalTracking&&<div className="panel"><h3>上一期目标跟踪</h3><p>{r.goalTracking.previousReportDate} 的目标：{goalStatusLabel(r.goalTracking.previousStatus)}{r.goalTracking.previousFeedbackCode?' · 已记录司机反馈':''}</p><p>{r.goalTracking.note}</p><p className="meta">本期评估：待新证据；{r.goalTracking.newEvidence?'有新增来源证据':'没有新增个人证据'}。阅读或反馈不等于行为改善。</p></div>}
-    <div className="panel"><h3>数据限制</h3><p>统计截至 {r.dataAsOf} · 来源覆盖 {r.coverage.observedDates.join('、')||'未取得'}</p><ul>{r.dataLimitations.map(item=><li key={item}>{item}</li>)}</ul></div>
-    {goal&&<div className="panel"><h3>目标反馈</h3><p>{goal.description}</p><p className="meta">当前状态：{goalStatusLabel(goal.status)}；反馈只记录意向，不代表驾驶行为已改善。</p><div className="row"><button className="btn" onClick={()=>onFeedback('will_review')}>计划核对</button><button className="btn" onClick={()=>onFeedback('need_help')}>需要协助</button><button className="btn" onClick={()=>onFeedback('dismissed')}>暂不跟进</button></div></div>}
+    <div className="dr-hero panel">
+      <div className="dr-hero-top"><span>{r.reportDate} · 数据截至 {r.metrics.personalScoreDate||'未取得'}</span><span className="dr-badge">{published.reportVersion>1?`第 ${published.reportVersion} 版`:'已生成'}</span></div>
+      <h2 className="dr-greeting">{n?.greeting || (main?`今日简报：${main.eventName||main.eventType}值得关注`:'本期待人工核对数据覆盖')}</h2>
+      <p className="dr-analysis">{n?.analysis || r.summary}</p>
+      <div className="dr-stats">
+        <div className="dr-stat"><span>个人安全评分</span><b>{num(r.metrics.personalScore)}</b><small>{r.metrics.personalScoreDate||'日期未取得'} · 可信度 {confidenceLabel(r.metrics.scoreConfidence)}</small></div>
+        <div className="dr-stat"><span>车队平均评分</span><b>{num(r.metrics.fleetAverage)}</b><small>{r.metrics.fleetScoredDrivers!==null?`可比司机 ${r.metrics.fleetScoredDrivers} 人`:'fleet 未取得'} · {r.metrics.fleetDate||'—'}</small></div>
+      </div>
+      <p className="dr-metabadge">{nm?.generatedBy==='ai'?`AI 生成叙述 · 模型 ${nm.model||'—'} · 数字与证据均取自冻结快照${(nm.attempts||1)>1?'（修复 1 次后通过校验）':''}`:(nm?`规则模板叙述（AI 叙述暂不可用：${nm.ai_status}）`:'规则模板叙述 (未标注来源)')}</p>
+    </div>
+    {r.scoreTrend&&<TrendChart trend={r.scoreTrend}/>}
+    <div className="panel dr-risk"><div className="dr-panel-title"><i aria-hidden="true">⚠</i><h3>本期最值得关注的风险</h3></div>
+      {items.length===0&&<p>没有可引用的本人回放事件，暂不作个人风险判断（不等于零风险）。</p>}
+      {items.map((it,ix)=><div className="dr-risk-item" key={ix}>
+        <b>{it.title}</b><p>{it.observation}</p><p className="dr-advice">建议：{it.advice}</p>
+        <details className="meta"><summary>为什么推荐这项核对 · 证据 {it.evidenceRefs.length} 条</summary>
+          <p>{r.dailyGoal?.recommendationBasis==='source_score_action'?'建议来源=本人评分快照的推荐动作，且与回放事件维度一致。':'建议依据本人已记录的同类历史回放事件；不是事故预测。'}</p>
+          {main&&main.evidenceRefs.length>0&&<DriverEvidence kind="event" id={String(main.evidenceRefs[0]).slice(6)} label="核对首条事件证据"/>}
+        </details></div>)}
+      {r.cards.filter(c=>c.type==='learning_tip').map(card=><p className="meta" key={card.title}>{card.title}：{card.description}</p>)}
+    </div>
+    <div className="panel dr-goal">
+      <div className="dr-panel-title"><i aria-hidden="true">◎</i><h3>今日改善目标</h3></div>
+      <p>{n?.goal || r.dailyGoal?.description || '本期无个人目标：等待新的观测数据或安全员指派。'}</p>
+      {r.goalTracking&&<p className="meta">上一期（{r.goalTracking.previousReportDate}）目标：{goalStatusLabel(r.goalTracking.previousStatus)} · {r.goalTracking.newEvidence?'出现新的来源证据，尚不能判断成效':'暂无新的个人证据可判断成效'}。已阅读≠行为改善。</p>}
+      <button className="dr-cta" onClick={onRead} disabled={readDone}>{readDone?'今日建议已阅读':'我已阅读今日建议'}</button>
+      {goal&&<div className="dr-feedback"><span className="meta">目标反馈（只记录意向）：</span><div className="row"><button className="btn" onClick={()=>onFeedback('will_review')}>计划核对</button><button className="btn" onClick={()=>onFeedback('need_help')}>需要协助</button><button className="btn" onClick={()=>onFeedback('dismissed')}>暂不跟进</button></div></div>}
+    </div>
+    <div className="panel"><h3>数据限制</h3><p className="meta">统计截至 {r.dataAsOf} · 两期对比 {r.metrics.scoreComparisonStatus==='comparable'?'可比':comparisonLabel(r.metrics.scoreComparisonStatus)} · 覆盖 {r.coverage.observedDates.join('、')||'未取得'}</p><ul>{r.dataLimitations.map(item=><li key={item}>{item}</li>)}</ul></div>
   </div>;
 }
 
 export function DailyReportPage({enabled}:{enabled:boolean}){
+  const [readDone,setReadDone]=useState(false);
   const [today,setToday]=useState<PublishedDailyReport|null>(null),[selected,setSelected]=useState<PublishedDailyReport|null>(null);
   const [history,setHistory]=useState<DailyHistory|null>(null),[notes,setNotes]=useState<NoteRow[]>([]),[goals,setGoals]=useState<DailyGoal[]>([]);
   const [mode,setMode]=useState<'report'|'feed'|'history'>('report'),[offset,setOffset]=useState(0),[error,setError]=useState<unknown>(null),[loading,setLoading]=useState(true),[message,setMessage]=useState('');
@@ -45,14 +89,15 @@ export function DailyReportPage({enabled}:{enabled:boolean}){
   async function feedback(code:'will_review'|'need_help'|'dismissed'){const goal=goals.find(g=>g.reportId===selected?.id);if(!goal)return;try{await dailyGoalFeedback(goal.id,code);setMessage('反馈已保存；不代表安全行为已改善。');setGoals((await dailySafetyGoals()).rows);}catch(e){setError(e);}}
   if(!enabled)return <EmptyState kind="noperm" hint="请先完成已核实的司机绑定。" />;
   const shown=selected||today;
-  return <div className="stack"><h2>今日安全简报</h2><p className="page-desc">停车或休息时阅读。报告来自 IE亮剑 历史资料，不是实时监测。</p>
-    <div className="row"><button className="btn" onClick={()=>{setSelected(today);setMode('report');}}>今日简报</button><button className="btn" onClick={()=>setMode('feed')}>安全动态</button><button className="btn" onClick={()=>setMode('history')}>历史简报</button><button className="btn" onClick={()=>void load()}>刷新</button></div>
+  return <div className="stack"><div className="dr-head"><div><h2>每日安全简报</h2><p>今日驾驶表现与风险提示 · 历史回放口径</p></div><span className="dr-bell" aria-label={"未读 " + notes.filter(n => !n.read_at).length + " 条"}>{"\u{1F514}"}{notes.filter(n => !n.read_at).length ? " " + notes.filter(n => !n.read_at).length : ""}</span></div>
+    <p className="page-desc">停车或休息时阅读。报告由分析智能体基于本人冻结评分与回放事实生成，不是实时监测。</p>
+    <div className="dr-tabs" role="tablist"><button role="tab" aria-selected={mode==='report'} className={mode==='report'?'active':''} onClick={()=>{setSelected(today);setMode('report');}}>今日简报</button><button role="tab" aria-selected={mode==='feed'} className={mode==='feed'?'active':''} onClick={()=>setMode('feed')}>安全动态</button><button role="tab" aria-selected={mode==='history'} className={mode==='history'?'active':''} onClick={()=>setMode('history')}>历史简报</button><button className="dr-refresh" onClick={()=>void load()} aria-label="刷新简报">↻</button></div>
     {error?<Banner tone="warn">读取或保存失败：{error instanceof ApiError?error.code:'network'}。请重试。</Banner>:null}
     {message&&<Banner tone="info">{message}</Banner>}
     {loading&&!history?<EmptyState kind="loading" />:null}
     {!today&&history&&<Banner tone="info">今日尚无已发布简报。历史报告可在“历史简报”中查看。</Banner>}
     {notes.some(n=>!n.read_at)&&<div className="panel"><h3>未读简报通知</h3>{notes.filter(n=>!n.read_at).map(n=><div key={n.notification_id} className="task-card"><b>{n.title||'简报已生成'}</b><p>{n.content}</p><button className="btn" onClick={()=>void readNote(n)}>标记已读并查看简报</button></div>)}</div>}
-    {mode==='report'&&shown&&<ReportView published={shown} goal={goals.find(g=>g.reportId===shown.id)||null} onFeedback={code=>void feedback(code)} />}
+    {mode==='report'&&shown&&<ReportView published={shown} goal={goals.find(g=>g.reportId===shown.id)||null} onFeedback={code=>void feedback(code)} readDone={readDone} onRead={async()=>{const un=notes.find(x=>!x.read_at&&x.source_entity_id===String(shown.id));if(un){try{await noteRead(un.notification_id);setNotes(prev=>prev.map(row=>row.notification_id===un.notification_id?{...row,read_at:new Date().toISOString()}:row));}catch{}}setReadDone(true);}}/>}
     {mode==='feed'&&<div className="panel"><h3>安全动态</h3>{shown?shown.report.cards.length?shown.report.cards.map(card=><div className="task-card" key={`${shown.id}:${card.priority}`}><b>{card.title}</b><p>{card.description}</p><button className="btn" onClick={()=>setMode('report')}>查看简报与证据</button></div>):<p>当前报告没有可引用的个性化动态。</p>:<p>暂无已发布报告。</p>}</div>}
     {mode==='history'&&<div className="panel"><h3>历史简报</h3>{history?.rows.map(row=><div className="task-card" key={row.id}><b>{row.reportDate} · 版本 {row.reportVersion}</b><p>{row.title}</p><p className="meta">发布于 {row.publishedAt}{row.isCurrent?' · 当日当前版本':''}</p><button className="btn" onClick={()=>void open(row.id)}>查看详情</button></div>)}{history?.rows.length===0&&<p>暂无已发布简报。</p>}<div className="row"><button className="btn" disabled={offset===0} onClick={()=>setOffset(v=>Math.max(0,v-20))}>上一页</button><button className="btn" disabled={!history||offset+history.rows.length>=history.total} onClick={()=>setOffset(v=>v+20)}>下一页</button></div></div>}
   </div>;

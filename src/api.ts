@@ -155,6 +155,9 @@ export type DailySafetyReport = {
   goalTracking?:{previousGoalId:number;previousReportDate:string;previousStatus:string;previousFeedbackCode:string|null;newEvidence:boolean;assessment:string;note:string}|null;
   approvedCourseRefs:string[];
   coverage:{source:string;observedDates:string[];firstOwnedEventAt:string|null;complete7d:boolean;complete30d:boolean;exposureAvailable:boolean};dataLimitations:string[];
+  scoreTrend?:{basis:string;dates:string[];personal:(number|null)[];fleet:(number|null)[];fleetComparableCount?:(number|null)[];note:string};
+  narrative?:{greeting:string;analysis:string;items:{title:string;observation:string;advice:string;evidenceRefs:string[]}[];goal:string}|null;
+  narrativeMeta?:{generatedBy:string;ai_status:string;model?:string;prompt_version?:string;attempts?:number;reason?:string}|null;
 };
 export type PublishedDailyReport = {id:number;reportVersion:number;publishedAt:string;report:DailySafetyReport};
 export type DailyHistory = {rows:{id:number;reportDate:string;reportVersion:number;isCurrent:boolean;publishedAt:string;title:string}[];total:number;limit:number;offset:number};

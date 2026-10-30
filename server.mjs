@@ -11,6 +11,7 @@ import { readDriverFacts, validDay } from "./server/daily-report/data-reader.mjs
 import { computeDriverSnapshot } from "./server/daily-report/safety-analyzer.mjs";
 import { organizeDailyReport } from "./server/daily-report/report-agent.mjs";
 import { validateDailySafetyReport } from "./server/daily-report/report-validator.mjs";
+import { allowedNumberStrings, verifyNarrative, personalizerMessages } from "./server/daily-report/report-personalizer.mjs";
 
 const scrypt = promisify(scryptCb);
 
@@ -1630,7 +1631,28 @@ async function previousGoalContextHost(driverId, reportDate) {
   return { id: goal?Number(goal.id):null, reportDate: prev.report_date, status: goal?.status || "active", feedbackCode: goal?.feedback_code || null,
     scoreEvidenceId: parsed?.metrics?.scoreEvidenceId || null, eventType: parsed?.risks?.[0]?.eventType || null, evidenceRefs: parsed?.risks?.[0]?.evidenceRefs || [] };
 }
-async function generateDailyReportHost(driverId, reportDate) {
+const DAILY_NARRATIVE_PROMPT_VERSION = sha256hex("daily-report-personalizer-v1").slice(0, 12);
+function dailyGreeting() { const h = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false }).format(new Date())); return h < 5 ? '凌晨好' : h < 11 ? '早上好' : h < 14 ? '中午好' : h < 18 ? '下午好' : '晚上好'; }
+async function dailyNarrate(report, snapshot, actorHint) {
+  const allow = allowedNumberStrings(report, snapshot);
+  const hint = { greeting: dailyGreeting(), feedbackCode: report.goalTracking?.previousFeedbackCode || null };
+  let repair = null; const diag = [];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let narrative = null;
+    try {
+      const j = await aiUpstream({ model: aiModel(), messages: personalizerMessages(report, snapshot, hint, repair), temperature: 0.4, max_tokens: 1100 });
+      const content = String(j?.choices?.[0]?.message?.content || '').trim().replace(/^```(json)?/i, '').replace(/```$/i, '').trim();
+      narrative = JSON.parse(content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1));
+    } catch (e) { diag.push('parse_or_call:' + String((e && e.code) || e?.message || 'network').slice(0, 60)); repair = '上一稿无效 JSON/调用失败。只输出纯 JSON。'; continue; }
+    const verdict = verifyNarrative(narrative, report, allow);
+    if (verdict.ok) return { narrative, meta: { generatedBy: 'ai', model: aiModel(), prompt_version: DAILY_NARRATIVE_PROMPT_VERSION, attempts: attempt + 1, ai_status: attempt ? 'ok_after_repair' : 'ok', ...actorHint }, allowSize: allow.size };
+    diag.push('verify:' + verdict.errors.slice(0, 8).join('|'));
+    if (verdict.errors.some(x => String(x).startsWith('number:'))) diag.push('sample:' + JSON.stringify(narrative).slice(0, 240));
+    repair = '数字/证据/措辞校验失败：' + verdict.errors.slice(0, 6).join('、') + '。数字只能用输入中出现过的原值，禁止百分比与实时措辞，证据引用必须原样来自 facts。';
+  }
+  return { narrative: null, meta: { generatedBy: 'fallback_template', model: aiModel(), prompt_version: DAILY_NARRATIVE_PROMPT_VERSION, ai_status: 'fallback_template', diag, ...actorHint } };
+}
+async function generateDailyReportCore(driverId, reportDate) {
   const data = await dailyFactsStore();
   const store = hostDailyStoreAdapter(data);
   const asOf = new Date(Date.parse(reportDate+'T00:00:00Z')-86400000).toISOString().slice(0,10);
@@ -1639,12 +1661,16 @@ async function generateDailyReportHost(driverId, reportDate) {
   return validateDailySafetyReport(organizeDailyReport(snapshot, reportDate), snapshot);
 }
 async function hostPublishDailyReport({driverId,reportDate,actorId,actorRole='safety_admin',revise=false,jobClaim=null}) {
-  const report = await generateDailyReportHost(driverId, reportDate);
+  const report = await generateDailyReportCore(driverId, reportDate); // 确定性核心：不调模型
   const finishJob = async () => { if (jobClaim) { try { await dbRequest("drj_u","PATCH","daily_report_jobs",{ query:{ id:`eq.${jobClaim.id}`, lease_token:`eq.${jobClaim.leaseToken}` }, body:{ status:'succeeded', finished_at: nowIso(), lease_token:null, lease_until:null, next_at:0, error_message:null }, headers:{ Prefer:'return=minimal' } }); } catch {} } };
   const cur = await dbRequest("dsr_q","GET","daily_safety_reports",{ query:{ driver_id:`eq.${driverId}`, report_date:`eq.${reportDate}`, is_current:'eq.true', status:'eq.published', select:"id,report_version,report_json,published_at,source_fingerprint,is_current", limit:1 } });
   const current = cur.data?.[0] || null;
   if (current && current.source_fingerprint === report.sourceFingerprint) { await finishJob(); return { ...dailyParse({ ...current, report_version:current.report_version }), idempotentReplay:true, notificationCount:0 }; }
   if (current && !revise) throw new HttpError(409, "report_revision_required");
+  if (aiAvailable()) { // 仅确需发布新版本时才调用模型（幂等/409 路径零模型消耗）；数字/证据/措辞三重守门，不过关回落规则模板并在 meta 如实标注
+    try { const { narrative, meta } = await dailyNarrate(report, null, {}); if (narrative) report.narrative = narrative; report.narrativeMeta = meta; }
+    catch (e) { report.narrativeMeta = { generatedBy: 'fallback_template', ai_status: 'fallback_error', reason: String((e && e.code) || e?.message || 'e').slice(0, 60) }; }
+  }
   const maxv = await dbRequest("dsr_q","GET","daily_safety_reports",{ query:{ driver_id:`eq.${driverId}`, report_date:`eq.${reportDate}`, select:"report_version", order:"report_version.desc", limit:1 } });
   const version = (Number(maxv.data?.[0]?.report_version) || 0) + 1;
   const at = nowIso();

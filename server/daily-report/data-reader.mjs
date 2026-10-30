@@ -22,10 +22,14 @@ export function readDriverFacts(store, driverId, asOf) {
   const fleetIds = new Set(drivers.filter(row => row.fleet_id === driver.fleet_id && (!latestDate || ((!row.mapping_start || row.mapping_start <= latestDate) && (!row.mapping_end || latestDate <= row.mapping_end)))).map(row => row.driver_id));
   const fleetScores = latestDate ? store.rows('score_history').filter(row => row.as_of_date === latestDate && fleetIds.has(row.driver_id)) : [];
   const latestSnapshot = snapshots.sort((a,b) => b.as_of_date.localeCompare(a.as_of_date) || b.score_id.localeCompare(a.score_id))[0] || null;
+  // 趋势序列用的车队按日成员评分（成员集与 fleetScores 同基准日口径；不并入 fingerprint 之外的新表查询）
+  const ownDates = [...new Set([...history, ...snapshots].filter(row => row.safety_score !== null && row.safety_score !== undefined && String(row.safety_score).trim() !== '').map(row => row.as_of_date))].sort();
+  const trendDates = ownDates.slice(-7);
+  const fleetScoresByDate = store.rows('score_history').filter(row => trendDates.includes(row.as_of_date) && fleetIds.has(row.driver_id) && row.gpsno);
   const ledger = latestSnapshot ? store.rows('deduction_ledger').filter(row => row.gpsno === driver.gpsno && row.as_of_date === latestSnapshot.as_of_date && row.source_version === latestSnapshot.source_version) : [];
   const cutoff=`${asOf}T23:59:59+08:00`;
   const approvedCourses = store.rows('training_courses').filter(row => row.content_status === 'approved' && typeof row.updated_at==='string' && !Number.isNaN(Date.parse(row.updated_at)) && Date.parse(row.updated_at)<=Date.parse(cutoff));
   const replayDates = [...new Set(allEvents.map(row => row.replay_date))].sort();
-  const facts = { driver: { driver_id: driver.driver_id, gpsno: driver.gpsno, fleet_id: driver.fleet_id, mapping_start: driver.mapping_start, mapping_end: driver.mapping_end }, history, snapshots, events, fleetScores, ledger, approvedCourses, replayDates, sourceHash: store.sourceHash, asOf };
+  const facts = { driver: { driver_id: driver.driver_id, gpsno: driver.gpsno, fleet_id: driver.fleet_id, mapping_start: driver.mapping_start, mapping_end: driver.mapping_end }, history, snapshots, events, fleetScores, fleetScoresByDate, trendDates, ledger, approvedCourses, replayDates, sourceHash: store.sourceHash, asOf };
   return { ...facts, fingerprint: digest(facts) };
 }

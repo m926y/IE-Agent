@@ -46,6 +46,7 @@ export function organizeDailyReport(snapshot, reportDate) {
     goalTracking,
     approvedCourseRefs:course?[course.id]:[],
     coverage:snapshot.coverage,
+    scoreTrend:{ basis:(snapshot.score.sourceVersion||'未取得版本')+' / '+(snapshot.score.method||'未取得方法'), dates:(snapshot.series||[]).map(x=>x.date), personal:(snapshot.series||[]).map(x=>x.personal), fleet:(snapshot.series||[]).map(x=>x.fleet), fleetComparableCount:(snapshot.series||[]).map(x=>x.fleetCount??null), note:'趋势仅呈现与当期口径一致且可信度中/高的观测日；缺日=无有效观测不插值；历史回放口径，不代表实时驾驶数据流。' },
     dataLimitations:limitations,
   };
 }
