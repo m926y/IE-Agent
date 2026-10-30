@@ -20,16 +20,24 @@ function TrendChart({trend}:{trend:NonNullable<DailySafetyReport['scoreTrend']>}
   const dates=trend.dates||[]; if(!dates.length) return <p className="meta">无可呈现的观测日。</p>;
   const vals=[...trend.personal,...(trend.fleet||[])].filter(v=>typeof v==='number') as number[];
   if(!vals.length) return <div className="dr-chart"><div className="dr-chart-title">评分趋势对比</div><p className="meta">与当期口径一致的观测分值不足，图表留白不插值。</p><p className="meta">{trend.note}</p></div>;
-  const min=Math.min(...vals)-6, max=Math.max(...vals)+4, W=320,H=120,P=12;
+  // 紧凑自适应：优先以个人分值带为中心 ±8 展开，不足再并入车队线；避免 0-100 全量坐标把平稳曲线压成水平线
+  const pOnly=trend.personal.filter(v=>typeof v==='number') as number[];
+  const lo0=pOnly.length?Math.min(...pOnly):Math.min(...vals), hi0=pOnly.length?Math.max(...pOnly):Math.max(...vals);
+  let min=lo0-8, max=hi0+8;
+  if(Math.min(...vals)<min) min=Math.min(...vals)-3; if(Math.max(...vals)>max) max=Math.max(...vals)+3;
+  min=Math.max(0,min); max=Math.min(100,max); if(max-min<10){min=Math.max(0,min-5);max=Math.min(100,max+5);}
+  const W=320,H=120,P=12;
+  const ticks=[min,(min+max)/2,max];
   const x=(i:number)=>P+(W-2*P)*(dates.length===1?0.5:i/(dates.length-1));
   const y=(v:number)=>H-P-((v-min)/((max-min)||1))*(H-2*P);
   const seg=(arr:(number|null)[])=>{const parts:string[]=[];let cur='';arr.forEach((v,i)=>{if(v==null){if(cur)parts.push(cur);cur='';return;}cur+=(cur?' L':'M')+x(i).toFixed(1)+','+y(v).toFixed(1);if(i===arr.length-1||arr[i+1]==null){parts.push(cur);cur='';}});return parts;};
   return <div className="dr-chart"><div className="dr-chart-title">评分趋势对比 <span className="meta">近 {dates.length} 个观测日</span></div>
     <svg viewBox={`0 0 ${W} ${H+16}`} role="img" aria-label={`个人评分 ${trend.personal.filter(v=>v!=null).join('、')||'未取得'}；车队均分 ${trend.fleet.filter(v=>v!=null).join('、')||'未取得'}`}>
-      {[0.25,0.5,0.75].map(f=><line key={f} x1={P} x2={W-P} y1={H-P-(H-2*P)*f} y2={H-P-(H-2*P)*f} stroke="#eee" strokeDasharray="3 3"/>)}
+      {ticks.map((tv,i)=><g key={i}><line x1={P} x2={W-P} y1={y(tv)} y2={y(tv)} stroke="#eee" strokeDasharray={i===1?"3 3":"0"}/><text x={P} y={y(tv)-3} fontSize="7.5" fill="#9a9a9a">{tv.toFixed(1)}</text></g>)}
       {seg(trend.fleet||[]).map((dd,i)=><path key={'f'+i} d={dd} fill="none" stroke="#67a86b" strokeWidth="1.6"/>)}
       {seg(trend.personal).map((dd,i)=><path key={'p'+i} d={dd} fill="none" stroke="#5b8def" strokeWidth="2"/>)}
-      {trend.personal.map((v,i)=>v!=null?<circle key={'pc'+i} cx={x(i)} cy={y(v)} r="2.6" fill="#5b8def"/>:null)}
+      {trend.personal.map((v,i)=>v!=null?<g key={'pc'+i}><circle cx={x(i)} cy={y(v)} r="7" fill="transparent"><title>{`${dates[i]} 个人评分 ${v.toFixed(4)}`}</title></circle><circle cx={x(i)} cy={y(v)} r="2.6" fill="#5b8def"/></g>:null)}
+      {(trend.fleet||[]).map((v,i)=>v!=null?<circle key={'fc'+i} cx={x(i)} cy={y(v)} r="5" fill="transparent"><title>{`${dates[i]} 车队均分 ${v.toFixed(1)}（可比 ${trend.fleetComparableCount?.[i]??'—'} 人）`}</title></circle>:null)}
       {dates.map((d,i)=><text key={d} x={x(i)} y={H+2} fontSize="8" textAnchor="middle" fill="#888">{d.slice(5).replace('-','/')}</text>)}
     </svg>
     <div className="dr-legend"><span><i className="dot" style={{background:'#5b8def'}}/>个人评分</span><span><i className="dot" style={{background:'#67a86b'}}/>车队均分</span></div>
