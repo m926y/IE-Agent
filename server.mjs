@@ -7,6 +7,10 @@ import { fileURLToPath } from "node:url";
 import { randomBytes, createHash, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 import { actionCenter, scoreComparison, fleetStatistics, readAll } from "./server/driver-actions.mjs";
+import { readDriverFacts, validDay } from "./server/daily-report/data-reader.mjs";
+import { computeDriverSnapshot } from "./server/daily-report/safety-analyzer.mjs";
+import { organizeDailyReport } from "./server/daily-report/report-agent.mjs";
+import { validateDailySafetyReport } from "./server/daily-report/report-validator.mjs";
 
 const scrypt = promisify(scryptCb);
 
@@ -127,7 +131,9 @@ const SAFE_DATABASE_OPERATIONS = new Set([
   "patch_alert_fields", "count_alerts", "count_notes", "count_tasks", "count_my_notes",
   "get_course_row", "patch_course_status", "get_config_row", "patch_config_row", "count_ops_rows", "get_binding_target",
   // R37 新增四功能的数据库操作标签（司机资料/根因聚合/规则生效链/等级映射）
-  "dp_get", "dp_patch", "dp_insert", "rc_led", "rc_er", "er_dims", "er_current2", "er_patch_effect", "erd_get2", "erd_get3", "ma_lvl", "get_binding_target", "insert_task_row",
+  "dp_get", "dp_patch", "dp_insert", "rc_led", "rc_er", "er_dims", "er_current2", "er_patch_effect", "erd_get2", "erd_get3", "ma_lvl",
+  // R40 每日简报（宿主 PostgreSQL 版）
+  "dsr_q", "dsr_i", "dsr_u", "drj_q", "drj_i", "drj_u", "dsg_q", "dsg_i", "dsg_u", "dau_q", "dne_q", "get_binding_target", "insert_task_row",
   "get_alert_row", "patch_alert_status", "insert_alert_row", "get_alert_evidence", "count_risk_rows", "create_intervention", "patch_intervention", "get_intervention_row", "insert_notification", "get_notification_by_key", "read_own_intervention", "reply_own_intervention", "send_intervention",
   "list_import_by_key", "get_binding_user", "count_driver_conflict", "insert_binding_row", "close_binding_rows", "patch_binding_fields", "get_driver_profile",
 ]);
@@ -1569,17 +1575,183 @@ function requireVerifiedDriver(principal) {
 const dailyBusinessDate = () => new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 const validDailyDate = value => typeof value==='string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString().slice(0,10)===value;
 async function dailyReportStore(method,params={}) {
-  if (process.env.IE_LOCAL_SOURCE_ONLY!=='1') throw new HttpError(503,'daily_reports_local_only');
-  const target=resolveDbTarget();
-  let result;
-  try {
-    const query=method==='GET'?'?'+new URLSearchParams(params):'';
-    result=await fetch(`${target.url}/internal/daily-reports${query}`,{method,headers:{apikey:target.key,'content-type':'application/json'},body:method==='POST'?JSON.stringify(params):undefined});
-  } catch { throw new HttpError(503,'daily_report_store_unavailable'); }
-  let payload;try{payload=await result.json();}catch{throw new HttpError(503,'daily_report_store_unavailable');}
-  if (!result.ok) throw new HttpError(result.status===404?404:result.status===409?409:result.status===400?400:503,payload.code||'daily_report_store_unavailable');
-  return payload;
+  if (process.env.IE_LOCAL_SOURCE_ONLY === '1') {
+    const target=resolveDbTarget();
+    let result;
+    try {
+      const query=method==='GET'?'?'+new URLSearchParams(params):'';
+      result=await fetch(`${target.url}/internal/daily-reports${query}`,{method,headers:{apikey:target.key,'content-type':'application/json'},body:method==='POST'?JSON.stringify(params):undefined});
+    } catch { throw new HttpError(503,'daily_report_store_unavailable'); }
+    let payload;try{payload=await result.json();}catch{throw new HttpError(503,'daily_report_store_unavailable');}
+    if (!result.ok) throw new HttpError(result.status===404?404:result.status===409?409:result.status===400?400:503,payload.code||'daily_report_store_unavailable');
+    return payload;
+  }
+  return hostDailyStore(method, params);
 }
+// ===== R40 宿主每日简报：与本地 report-store 同协议的 PostgreSQL 实现（引擎模块 server/daily-report/* 两边共用） =====
+let dailyPreload=null, dailyPreloadAt=0, dailyPreloadPromise=null;
+async function grabAll(op, table, select, order) {
+  const out=[];
+  for (let off=0; off<60000; off+=2000) {
+    const r = await dbRequest(op, "GET", table, { query: { select, order: order || undefined, limit: 2000, offset: off } });
+    const rows = r.data || []; out.push(...rows); if (rows.length<2000) break;
+  }
+  return out;
+}
+async function dailyFactsStore() {
+  if (dailyPreload && Date.now()-dailyPreloadAt < 90000) return dailyPreload;
+  if (dailyPreloadPromise) return dailyPreloadPromise;
+  dailyPreloadPromise = (async () => {
+    const [drivers, history, snapshots, events, courses, ledger] = await Promise.all([
+      grabAll("dsr_q","drivers","driver_id,gpsno,fleet_id,mapping_start,mapping_end","driver_id.asc"),
+      grabAll("dsr_q","score_history","score_id,driver_id,gpsno,as_of_date,safety_score,risk_level,confidence_level,score_status,score_method,source_version,window_start","score_id.asc"),
+      grabAll("dsr_q","score_snapshots","score_id,driver_id,gpsno,as_of_date,safety_score,risk_level,confidence_level,score_status,score_method,source_version,window_start,recommended_action,primary_risk_dimension","score_id.asc"),
+      grabAll("dsr_q","replay_events","event_id,gpsno,driver_id,event_time,event_type,event_name,dimension,replay_date,is_replay,source_version","event_id.asc"),
+      grabAll("dsr_q","training_courses","course_id,title,dimension,content_status,version_no,source_version,updated_at","course_id.asc"),
+      grabAll("dsr_q","deduction_ledger","ledger_id,gpsno,dimension,event_type,event_count,allocated_points,dimension_points,as_of_date,source_version","ledger_id.asc"),
+    ]);
+    dailyPreload = { drivers, score_history: history, score_snapshots: snapshots, replay_events: events, training_courses: courses, deduction_ledger: ledger };
+    dailyPreloadAt = Date.now(); dailyPreloadPromise = null; return dailyPreload;
+  })().catch(e => { dailyPreloadPromise = null; throw e; });
+  return dailyPreloadPromise;
+}
+function hostDailyStoreAdapter(data) {
+  const map = { drivers: data.drivers, score_history: data.score_history, score_snapshots: data.score_snapshots, replay_events: data.replay_events, training_courses: data.training_courses, deduction_ledger: data.deduction_ledger };
+  return { rows: name => map[name] || [], sourceHash: "hosted_postgres" };
+}
+const dailyParse = row => row ? { id:Number(row.id), reportVersion:Number(row.report_version), publishedAt:row.published_at, report:JSON.parse(row.report_json) } : null;
+function dailyReportRows(rows){ return rows.map(row=>({id:Number(row.id),reportDate:row.report_date,reportVersion:Number(row.report_version),isCurrent:row.is_current===true||row.is_current==='true',publishedAt:row.published_at,title:(()=>{try{return JSON.parse(row.report_json).title;}catch{return '';}})()})); }
+function dailyGoalRows(rows){ return rows.map(row=>({id:Number(row.id),reportId:Number(row.report_id),previousGoalId:row.previous_goal_id?Number(row.previous_goal_id):null,type:row.goal_type,description:row.goal_text,status:row.status,feedbackCode:row.feedback_code||null,feedbackText:row.feedback_text||null,updatedAt:row.updated_at||null,createdAt:row.created_at})); }
+async function previousGoalContextHost(driverId, reportDate) {
+  const rs = await dbRequest("dsr_q","GET","daily_safety_reports",{ query:{ driver_id:`eq.${driverId}`, report_date:`lt.${reportDate}`, status:'eq.published', is_current:'eq.true', select:"id,report_date,report_json", order:"report_date.desc", limit:1 } });
+  const prev = rs.data?.[0]; if (!prev) return null;
+  const g = await dbRequest("dsg_q","GET","driver_safety_goals",{ query:{ report_id:`eq.${prev.id}`, select:"id,status,feedback_code", limit:1 } });
+  const goal = g.data?.[0] || null; let parsed = {}; try { parsed = JSON.parse(prev.report_json); } catch {}
+  return { id: goal?Number(goal.id):null, reportDate: prev.report_date, status: goal?.status || "active", feedbackCode: goal?.feedback_code || null,
+    scoreEvidenceId: parsed?.metrics?.scoreEvidenceId || null, eventType: parsed?.risks?.[0]?.eventType || null, evidenceRefs: parsed?.risks?.[0]?.evidenceRefs || [] };
+}
+async function generateDailyReportHost(driverId, reportDate) {
+  const data = await dailyFactsStore();
+  const store = hostDailyStoreAdapter(data);
+  const asOf = new Date(Date.parse(reportDate+'T00:00:00Z')-86400000).toISOString().slice(0,10);
+  const facts = readDriverFacts(store, driverId, asOf);
+  const snapshot = { ...computeDriverSnapshot(facts), previousGoal: await previousGoalContextHost(driverId, reportDate) };
+  return validateDailySafetyReport(organizeDailyReport(snapshot, reportDate), snapshot);
+}
+async function hostPublishDailyReport({driverId,reportDate,actorId,actorRole='safety_admin',revise=false,jobClaim=null}) {
+  const report = await generateDailyReportHost(driverId, reportDate);
+  const finishJob = async () => { if (jobClaim) { try { await dbRequest("drj_u","PATCH","daily_report_jobs",{ query:{ id:`eq.${jobClaim.id}`, lease_token:`eq.${jobClaim.leaseToken}` }, body:{ status:'succeeded', finished_at: nowIso(), lease_token:null, lease_until:null, next_at:0, error_message:null }, headers:{ Prefer:'return=minimal' } }); } catch {} } };
+  const cur = await dbRequest("dsr_q","GET","daily_safety_reports",{ query:{ driver_id:`eq.${driverId}`, report_date:`eq.${reportDate}`, is_current:'eq.true', status:'eq.published', select:"id,report_version,report_json,published_at,source_fingerprint,is_current", limit:1 } });
+  const current = cur.data?.[0] || null;
+  if (current && current.source_fingerprint === report.sourceFingerprint) { await finishJob(); return { ...dailyParse({ ...current, report_version:current.report_version }), idempotentReplay:true, notificationCount:0 }; }
+  if (current && !revise) throw new HttpError(409, "report_revision_required");
+  const maxv = await dbRequest("dsr_q","GET","daily_safety_reports",{ query:{ driver_id:`eq.${driverId}`, report_date:`eq.${reportDate}`, select:"report_version", order:"report_version.desc", limit:1 } });
+  const version = (Number(maxv.data?.[0]?.report_version) || 0) + 1;
+  const at = nowIso();
+  if (current) { const flip = await dbRequest("dsr_u","PATCH","daily_safety_reports",{ query:{ id:`eq.${current.id}`, is_current:'eq.true' }, body:{ is_current:false }, headers:{ Prefer:'return=minimal' } }); if (flip.status && flip.status>=400) throw new HttpError(409,"report_revision_conflict"); }
+  const ins = await dbRequest("dsr_i","POST","daily_safety_reports",{ body:[{ driver_id:driverId, report_date:reportDate, report_version:version, status:'published', is_current:true, data_as_of:report.dataAsOf, source_fingerprint:report.sourceFingerprint, report_json:JSON.stringify(report), published_at:at }], headers:{ Prefer:'return=representation' } }).catch(async e => {
+    if (e instanceof HttpError && (e.status===409||String(e.code).includes('duplicate'))) { const re = await dbRequest("dsr_q","GET","daily_safety_reports",{ query:{ driver_id:`eq.${driverId}`, report_date:`eq.${reportDate}`, is_current:'eq.true', select:"id,report_version,report_json,published_at", limit:1 } }); if (re.data?.[0]) { await finishJob(); return { __replay: re.data[0] }; } }
+    throw e;
+  });
+  if (ins?.__replay) return { ...dailyParse(ins.__replay), idempotentReplay:true, notificationCount:0 };
+  const inserted = ins.data?.[0] || null;
+  const reportId = inserted ? Number(inserted.id) : (await dbRequest("dsr_q","GET","daily_safety_reports",{ query:{ driver_id:`eq.${driverId}`, report_date:`eq.${reportDate}`, report_version:`eq.${version}`, select:"id", limit:1 } })).data?.[0]?.id;
+  const reportView = { id:reportId, reportVersion:version, publishedAt:at, report };
+  if (report.dailyGoal) {
+    const exg = await dbRequest("dsg_q","GET","driver_safety_goals",{ query:{ report_id:`eq.${reportId}`, select:"id", limit:1 } });
+    if (!exg.data?.length) await dbRequest("dsg_i","POST","driver_safety_goals",{ body:[{ driver_id:driverId, report_id:reportId, previous_goal_id:report.goalTracking?.previousGoalId || null, goal_type:report.dailyGoal.type, goal_text:report.dailyGoal.description, status:'active', created_at:at }], headers:{ Prefer:'resolution=ignore,return=minimal' } }).catch(()=>{});
+  }
+  const recips = (await dbRequest("dau_q","GET","app_users",{ query:{ driver_id:`eq.${driverId}`, role:'eq.driver', account_status:'eq.active', binding_verified:'eq.true', select:"user_id", limit:10 } })).data || [];
+  let notes = 0;
+  for (const acct of recips) { try { await notify(acct.user_id, "daily_report_ready", String(reportId), `${reportDate} 的历史安全简报已可查看。`, `daily_report_ready:${driverId}:${reportDate}:${version}:${acct.user_id}`, "daily_safety_report", "每日安全简报已生成"); notes++; } catch {} }
+  await appendAudit({ user:{ user_id:actorId, role:actorRole } }, "daily_report.publish", "daily_safety_report", String(reportId), current?"published":null, "published", null, [], { driver_id:driverId, report_date:reportDate, report_version:version, source_fingerprint:report.sourceFingerprint });
+  await finishJob();
+  return { ...reportView, idempotentReplay:false, notificationCount:notes };
+}
+async function hostListJobs({date,limit,offset,fleetId,status}) {
+  const q = { report_date:`eq.${date}`, select:"id,driver_id,report_date,status,attempts,started_at,finished_at,error_message", order:"id.asc", limit:Number(limit)||50, offset:Number(offset)||0 };
+  if (status) q.status = `eq.${status}`;
+  const sumQ = { report_date:`eq.${date}`, select:"id,status,driver_id", order:"id.asc", limit:2000 };
+  const [page, all] = await Promise.all([
+    dbRequest("drj_q","GET","daily_report_jobs",{ query:q }),
+    dbRequest("drj_q","GET","daily_report_jobs",{ query:sumQ }),
+  ]);
+  let rows = (all.data||[]);
+  if (fleetId && fleetId !== "*") { const data = await dailyFactsStore(); const inFleet = new Set(data.drivers.filter(d=>String(d.fleet_id)===String(fleetId)).map(d=>String(d.driver_id))); rows = rows.filter(r=>inFleet.has(String(r.driver_id))); }
+  const byStatus = {}; for (const r of rows) byStatus[r.status]=(byStatus[r.status]||0)+1;
+  const pageRows = status ? rows.slice(Number(offset)||0,(Number(offset)||0)+(Number(limit)||50)) : (page.data||[]).slice(0, Number(limit)||50);
+  return { date, total: rows.length, byStatus, rows: pageRows.map(r=>({ id:Number(r.id), driver_id:r.driver_id, report_date:r.report_date, status:r.status, attempts:Number(r.attempts)||0, started_at:r.started_at||null, finished_at:r.finished_at||null, error_message:r.error_message||null })), limit:Number(limit)||50, offset:Number(offset)||0 };
+}
+async function hostDailyStore(method, params={}) {
+  if (method==='POST' && params.action==='publish') return hostPublishDailyReport({ driverId: String(params.driverId||''), reportDate: params.reportDate, actorId: String(params.actorId||''), revise: params.revise===true });
+  if (method==='POST' && params.action==='feedback') {
+    const gid = Number(params.goalId); if (!Number.isSafeInteger(gid)||gid<1) throw new HttpError(400,"invalid_goal_id");
+    const code = String(params.code||''), text = String(params.text??'').slice(0,500);
+    if (!['will_review','need_help','dismissed'].includes(code)) throw new HttpError(400,"invalid_goal_feedback");
+    const row = (await dbRequest("dsg_q","GET","driver_safety_goals",{ query:{ id:`eq.${gid}`, driver_id:`eq.${params.driverId}`, select:"id,status,feedback_code,feedback_text,updated_at", limit:1 } })).data?.[0];
+    if (!row) throw new HttpError(404,"not_found");
+    if (row.feedback_code===code && (row.feedback_text||'')===text) return { id:gid, status:row.status, feedbackCode:code, updatedAt:row.updated_at, idempotentReplay:true };
+    const at = nowIso(), status = code==='dismissed' ? 'dismissed' : 'active';
+    await dbRequest("dsg_u","PATCH","driver_safety_goals",{ query:{ id:`eq.${gid}`, driver_id:`eq.${params.driverId}` }, body:{ status, feedback_code:code, feedback_text:text, updated_at:at }, headers:{ Prefer:'return=minimal' } });
+    await appendAudit({ user:{ user_id:String(params.actorId||params.driverId), role:'driver' } }, "daily_goal.feedback", "driver_safety_goal", String(gid), row.status, status, null, [], { feedback_code:code });
+    return { id:gid, status, feedbackCode:code, updatedAt:at, idempotentReplay:false };
+  }
+  if (method==='GET') {
+    const kind = params.kind;
+    if (kind==='jobs') return hostListJobs({ date:params.date, limit:params.limit, offset:params.offset, fleetId:params.fleet_id, status:params.status });
+    const driverId = String(params.driver_id||'');
+    if (!/^([\w.-]{1,100})$/.test(driverId)) throw new HttpError(400,"invalid_driver_id");
+    if (kind==='today') { const row = (await dbRequest("dsr_q","GET","daily_safety_reports",{ query:{ driver_id:`eq.${driverId}`, report_date:`eq.${params.date}`, is_current:'eq.true', status:'eq.published', select:"id,report_version,report_json,published_at", limit:1 } })).data?.[0]; if (!row) throw new HttpError(404,"not_found"); return dailyParse(row); }
+    if (kind==='detail') { const row = (await dbRequest("dsr_q","GET","daily_safety_reports",{ query:{ id:`eq.${params.id}`, driver_id:`eq.${driverId}`, status:'eq.published', select:"id,report_version,report_json,published_at", limit:1 } })).data?.[0]; if (!row) throw new HttpError(404,"not_found"); return dailyParse(row); }
+    if (kind==='history') {
+      const limit = Math.min(Math.max(Number(params.limit)||20,1),50), offset = Math.max(Number(params.offset)||0,0);
+      const r = await dbRequest("dsr_q","GET","daily_safety_reports",{ query:{ driver_id:`eq.${driverId}`, status:'eq.published', select:"id,report_date,report_version,is_current,published_at,report_json", order:"report_date.desc,report_version.desc", limit, offset }, headers:{ Prefer:"count=exact" } });
+      return { rows: dailyReportRows(r.data||[]), total: (r.rangeHeader ? Number(String(r.rangeHeader).split('/')[1]) : (r.data||[]).length) || (r.data||[]).length, limit, offset };
+    }
+    if (kind==='goals') { const rows = (await dbRequest("dsg_q","GET","driver_safety_goals",{ query:{ driver_id:`eq.${driverId}`, select:"id,report_id,previous_goal_id,goal_type,goal_text,status,feedback_code,feedback_text,updated_at,created_at", order:"created_at.desc,id.desc", limit:100 } })).data||[]; return { rows: dailyGoalRows(rows) }; }
+    if (kind==='notifications') {
+      const reports = (await dbRequest("dsr_q","GET","daily_safety_reports",{ query:{ driver_id:`eq.${driverId}`, status:'eq.published', select:"id", order:"id.desc", limit:100 } })).data||[];
+      const ids = new Set(reports.map(x=>String(x.id)));
+      const rows = (await dbRequest("dne_q","GET","notification_events",{ query:{ target_user_id:`eq.${params.user_id}`, type:'eq.daily_report_ready', select:"notification_id,source_entity_type,source_entity_id,type,title,content,created_at,read_at", order:"created_at.desc", limit:50 } })).data||[];
+      return { rows: rows.filter(r=>r.source_entity_type==='daily_safety_report' && ids.has(String(r.source_entity_id))).map(r=>({ notification_id:r.notification_id, source_entity_id:r.source_entity_id, type:r.type, title:r.title||'每日安全简报已生成', content:r.content, created_at:r.created_at, read_at:r.read_at||null })) };
+    }
+  }
+  throw new HttpError(400,"invalid_daily_report_request");
+}
+const dailyLazyAt=new Map();
+let dailyTickBusy=false;
+const dailyPublishDue = () => { const hm=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date()); return hm >= (process.env.IE_DAILY_REPORT_AT || "07:00"); };
+async function ensureDailyJobsForDate(date, driverIds) {
+  for (const id of driverIds) { if (!id) continue;
+    const ex = await dbRequest("drj_q","GET","daily_report_jobs",{ query:{ driver_id:`eq.${id}`, report_date:`eq.${date}`, select:"id", limit:1 } });
+    if (!ex.data?.length) { try { await dbRequest("drj_i","POST","daily_report_jobs",{ body:[{ driver_id:id, report_date:date, status:'pending', attempts:0, next_at:0 }], headers:{ Prefer:'resolution=ignore,return=minimal' } }); } catch {} }
+  }
+}
+async function dailyTick(force=false) {
+  if (process.env.IE_LOCAL_SOURCE_ONLY==='1') return; // 本地工作台由自身 scheduler 驱动
+  if (dailyTickBusy) return; if (!force && !dailyPublishDue()) return; dailyTickBusy=true;
+  try {
+    const date=dailyBusinessDate();
+    const accts=(await dbRequest("dau_q","GET","app_users",{ query:{ role:'eq.driver', account_status:'eq.active', binding_verified:'eq.true', driver_id:'not.is.null', select:"driver_id", limit:500 } })).data||[];
+    const targets=[...new Set(accts.map(x=>x.driver_id).filter(Boolean))];
+    await ensureDailyJobsForDate(date, targets);
+    const stale=(await dbRequest("drj_q","GET","daily_report_jobs",{ query:{ report_date:'eq.'+date, status:'eq.running', select:"id,lease_until", limit:200 } })).data||[];
+    for (const j of stale) { if (Number(j.lease_until) && Number(j.lease_until) < Date.now()-30000) { await dbRequest("drj_u","PATCH","daily_report_jobs",{ query:{ id:'eq.'+j.id, status:'eq.running' }, body:{ status:'pending', lease_token:null, lease_until:null, next_at:Date.now()+60000 }, headers:{ Prefer:'return=minimal' } }).catch(()=>{}); } }
+    const pend=(await dbRequest("drj_q","GET","daily_report_jobs",{ query:{ report_date:'eq.'+date, status:'eq.pending', next_at:'lte.'+Date.now(), select:"id,driver_id,report_date,attempts", order:"id.asc", limit:25 } })).data||[];
+    const leaseTok=newId('lease');
+    for (const j of pend) {
+      if (Number(j.attempts)>=5) { await dbRequest("drj_u","PATCH","daily_report_jobs",{ query:{ id:'eq.'+j.id, status:'eq.pending' }, body:{ status:'failed', error_message:'max_attempts', finished_at:nowIso() }, headers:{ Prefer:'return=minimal' } }).catch(()=>{}); continue; }
+      const cl=await dbRequest("drj_u","PATCH","daily_report_jobs",{ query:{ id:'eq.'+j.id, status:'eq.pending', attempts:'eq.'+j.attempts }, body:{ status:'running', attempts:Number(j.attempts)+1, lease_token:leaseTok, lease_until:Date.now()+600000, started_at:nowIso(), next_at:0, error_message:null }, headers:{ Prefer:'return=representation' } });
+      if (!cl.data?.length) continue;
+      try { await hostPublishDailyReport({ driverId:j.driver_id, reportDate:j.report_date, actorId:'system:scheduler', actorRole:'system', revise:false, jobClaim:{ id:j.id, leaseToken:leaseTok } }); }
+      catch (e) { const code=String(e?.code||e?.message||'publish_error').slice(0,80);
+        const terminal = code==='report_revision_required' || code==='driver_not_found_or_ambiguous' || code==='not_found';
+        await dbRequest("drj_u","PATCH","daily_report_jobs",{ query:{ id:'eq.'+j.id, lease_token:'eq.'+leaseTok }, body: terminal ? { status:'failed', error_message:code, finished_at:nowIso(), lease_token:null, lease_until:null, next_at:0 } : { status:'pending', error_message:code, lease_token:null, lease_until:null, next_at:Date.now()+300000*(Number(j.attempts)+1) }, headers:{ Prefer:'return=minimal' } }).catch(()=>{});
+      }
+    }
+  } catch (e) { console.error("daily_tick_error", String(e?.code||e).slice(0,120)); } finally { dailyTickBusy=false; }
+}
+
 async function handleDailyReportRun(request,response,url,ctx) {
   const user=requireUser(ctx.principal);
   if (user.role!=='safety_admin') throw new HttpError(403,'forbidden');
@@ -1602,7 +1774,16 @@ async function handleDailyReportJobs(request,response,url,ctx) {
 }
 async function handleDailyReportToday(request,response,url,ctx) {
   const user=requireVerifiedDriver(ctx.principal);
-  let report=null;try{report=await dailyReportStore('GET',{kind:'today',driver_id:user.driver_id,date:dailyBusinessDate()});}catch(error){if(!(error instanceof HttpError&&error.status===404))throw error;}
+  const date=dailyBusinessDate();
+  let report=null;
+  try{report=await dailyReportStore('GET',{kind:'today',driver_id:user.driver_id,date});}catch(error){if(!(error instanceof HttpError&&error.status===404))throw error;}
+  if (!report && process.env.IE_LOCAL_SOURCE_ONLY!=='1' && dailyPublishDue()) { // 宿主惰性补偿：到点后首次访问即生成（每司机+日期 30s 节流；无人访问/实例冷启动时由定时器补）
+    const key=user.driver_id+":"+date; const last=dailyLazyAt.get(key)||0;
+    if (Date.now()-last>30000) { dailyLazyAt.set(key,Date.now());
+      try { await ensureDailyJobsForDate(date, [user.driver_id]); await hostPublishDailyReport({driverId:user.driver_id,reportDate:date,actorId:'system:scheduler',actorRole:'system',revise:false});
+        await dbRequest("drj_u","PATCH","daily_report_jobs",{ query:{ driver_id:`eq.${user.driver_id}`, report_date:`eq.${date}`, status:'in.(pending,running)' }, body:{ status:'succeeded', finished_at:nowIso(), error_message:null }, headers:{ Prefer:'return=minimal' } }).catch(()=>{}); report=(await dbRequest("dsr_q","GET","daily_safety_reports",{ query:{ driver_id:`eq.${user.driver_id}`, report_date:`eq.${date}`, is_current:'eq.true', status:'eq.published', select:"id,report_version,report_json,published_at", limit:1 } })).data?.[0]||null; if(report) report=dailyParse(report); } catch (e) { if (!(e instanceof HttpError && ["report_revision_required"].includes(e.code))) console.error("daily_lazy_error", user.driver_id, String(e?.code||e).slice(0,60)); }
+    }
+  }
   sendJson(response,200,report);
 }
 async function handleDailyReportHistory(request,response,url,ctx) {
@@ -3660,3 +3841,5 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(port, host, () => { console.log(`Crazy Logi-AI workbench server on http://${host}:${port}`); });
+setInterval(() => { void dailyTick(); }, 60000).unref?.();
+setTimeout(() => { void dailyTick(); }, 4000).unref?.();
