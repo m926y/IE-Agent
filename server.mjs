@@ -122,7 +122,7 @@ function readBodyRaw(request, limitBytes = 64 * 1024) {
 const BROKER_URL = "http://127.0.0.1:9001";
 const BROKER_PLACEHOLDER_KEY = "qwenwork-runtime-broker";
 const SAFE_DATABASE_OPERATIONS = new Set([
-  "ofl_r", "ofl_w", "hvo_r", "hvo_w", "hon_r", "hon_w", "hnd_r",
+  "ofl_r", "ofl_w", "hvo_r", "hvo_w", "hon_r", "hon_w", "hnd_r", "cen_r", "cen_w",
   "dsr_q", "dsr_i", "dsr_u", "drj_q", "drj_i", "drj_u", "dsg_q", "dsg_i", "dsg_u", "dau_q", "dne_q",
   "list_users", "get_user_by_name", "get_user_by_id", "touch_login",
   "create_session", "get_session", "delete_session",
@@ -4312,9 +4312,133 @@ async function caseTraining(p,case_id,adviceOnly=false){agentStaff(p,true);const
 }
 async function handleCaseTraining(request,response,url,ctx){requireUser(ctx.principal);const b=await readBody(request);sendJson(response,200,await caseTraining(ctx.principal,b.case_id,b.advice_only===true));}
 async function handleOfflineTraining(request,response,url,ctx){if(process.env.APP_DATA_MODE!=='full')return handleOfflineHost(request,response,url,ctx);const u=requireUser(ctx.principal);const action=url.pathname.split('/').at(-1),input=request.method==='GET'?Object.fromEntries(url.searchParams):await readBody(request),t=resolveDbTarget(),r=await fetch(t.url+'/internal/offline/'+action,{method:'POST',headers:{apikey:t.key,'content-type':'application/json'},body:JSON.stringify({...input,actor:{id:u.user_id}})}),data=await r.json();if(!r.ok)throw new HttpError(r.status,data.error||'offline_service_failed');sendJson(response,200,data);}
-async function handleActionCenter(request,response,url,ctx){
- const u=requireUser(ctx.principal);if(process.env.APP_DATA_MODE!=='full')throw new HttpError(503,'center_local_data_required');const action=url.pathname.split('/').at(-1),body=request.method==='GET'?{}:await readBody(request),t=resolveDbTarget();const r=await fetch(t.url+'/internal/center/'+action,{method:'POST',headers:{apikey:t.key,'content-type':'application/json'},body:JSON.stringify({...body,actor:{id:u.user_id}})}),data=await r.json();if(!r.ok)throw new HttpError(r.status,data.error||'center_service_failed');sendJson(response,200,data);
+// —— R49：动作中心云端宿主实现（/api/center/{data,read,remove,restore}；APP_DATA_MODE 非 full 时启用）——
+// 语义镜像 server/action-center.mjs（本地 SQLite 同步版）。本地专属数据源如实缺席：risk_cases/risk_replay_sessions/
+// risk_action_followups（实时风险案卷三表）与 agent_artifacts（车队周报文件族）——告警案卷段仍由云端 alerts 承载。
+function cDeadline(value){if(!value)return Infinity;const sv=String(value);const t=Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(sv)?sv+'T23:59:59+08:00':sv);return Number.isFinite(t)?t:Infinity;}
+function cRoute(type,id,r,staff){
+ if(type==='daily_safety_report'||type==='driver_safety_goal'){const report=type==='daily_safety_report'?Number(id):((r&&r.report_id)||id);return staff?'#/daily-reports?report='+report:'driver:report?report='+report;}
+ if(type==='offline_training')return staff?'#/tr-offline?booking='+encodeURIComponent(id):'driver:training';
+ if(!r)return null;
+ if(!staff)return /training|task/.test(type)?'driver:training':/review/.test(type)?'driver:safety':'driver:risk';
+ if(/alert|intervention/.test(type))return '#/rm-alerts?alert_id='+encodeURIComponent(String((r&&(r.alert_id||r.intervention_id))||id));
+ if(/training|task/.test(type))return '#/tr-ledger?task_id='+encodeURIComponent(id);
+ if(/review/.test(type))return '#/ev-review?request='+encodeURIComponent(id);
+ return null;
 }
+async function hostCenterData(a){
+ const staff=a.role!=='driver',scope=String(a.fleet_scope||'*');
+ const dAll=await qRows('cen_r','drivers',{select:'driver_id,fleet_id,gpsno',limit:5000});
+ const drivers=staff?dAll.filter(d=>scope==='*'||String(d.fleet_id)===scope):dAll.filter(d=>a.binding_verified&&String(d.driver_id)===String(a.driver_id));
+ const ids=new Set(drivers.map(d=>String(d.driver_id))),gps=new Set(drivers.map(d=>String(d.gpsno)));
+ const allowed=r=>ids.has(String(r.driver_id))||gps.has(String(r.gpsno));
+ const labels=new Map((await qRows('cen_r','vehicle_labels',{select:'gpsno,display_no',limit:5000})).map(v=>[String(v.gpsno),'车辆'+v.display_no]));
+ const dMap=new Map(drivers.map(d=>[String(d.driver_id),d]));
+ const label=r=>labels.get(String(r.gpsno||dMap.get(String(r.driver_id))&&dMap.get(String(r.driver_id)).gpsno))||'待绑定车辆';
+ const alerts=await qRows('cen_r','alerts',{select:'alert_id,driver_id,gpsno,status,is_replay,occurred_at,updated_at,due_at',order:'occurred_at.desc',limit:5000});
+ const tasks=await qRows('cen_r','training_tasks',{select:'task_id,driver_id,status,due_at,updated_at,submitted_at',order:'updated_at.desc',limit:5000});
+ const reviews=await qRows('cen_r','review_requests',{select:'request_id,driver_id,status,created_at',order:'created_at.desc',limit:5000});
+ const ints=await qRows('cen_r','interventions',{select:'intervention_id,alert_id,driver_id,status,sent_at,updated_at',order:'updated_at.desc',limit:2000});
+ const goals=await qRows('cen_r','driver_safety_goals',{select:'id,driver_id,report_id,feedback_code,status,created_at',order:'created_at.desc',limit:5000});
+ const snaps=staff?await qRows('cen_r','score_snapshots',{select:'score_id,driver_id,gpsno,confidence_level',confidence_level:'eq.low',limit:2000}):[];
+ const todos=[];
+ const add=(kind,id,title,r,route,urgent=false,due=null)=>todos.push({id:kind+':'+id,kind,title,vehicle:label(r),route,urgent,due_at:due,created_at:r.created_at||r.updated_at||r.submitted_at||r.occurred_at||r.sent_at||null,is_replay:Boolean(r.is_replay)});
+ for(const r of alerts.filter(allowed))if(['pending_review','confirmed','sent','read','supplement_data'].includes(r.status)&&staff)add('risk',r.alert_id,r.due_at?'风险处置与回访':'待处理风险案卷',r,'#/rm-alerts?alert_id='+encodeURIComponent(r.alert_id),false,r.due_at);
+ for(const t of tasks.filter(allowed)){
+  if(staff&&t.status==='submitted')add('training',t.task_id,'培训反馈待审核',t,'#/tr-ledger?task_id='+encodeURIComponent(t.task_id));
+  else if(['assigned','in_progress','returned'].includes(t.status)&&(!staff||cDeadline(t.due_at)<Date.now()))add('training',t.task_id,t.status==='returned'?'培训已退回，请补充':'待完成培训',t,staff?'#/tr-ledger?task_id='+encodeURIComponent(t.task_id):'driver:training',false,t.due_at);
+ }
+ if(staff){
+  for(const r of reviews.filter(allowed))if(['submitted','checking','awaiting_data_owner'].includes(r.status))add('review',r.request_id,'评分异议待处理',r,'#/ev-review?request='+encodeURIComponent(r.request_id));
+  for(const s of snaps.filter(allowed))add('quality',s.score_id,'核验设备与数据覆盖',s,'#/ev-actions?driver_id='+encodeURIComponent(s.driver_id));
+  for(const g of goals.filter(allowed))if(g.feedback_code==='need_help'&&(g.status==='active'||!g.status))add('goal',g.id,'司机安全目标需要协助',g,'#/daily-reports?report='+g.report_id);
+ } else for(const r of ints.filter(allowed))if(['sent','read'].includes(r.status))add('response',r.intervention_id,'安全提醒待回应',r,'driver:risk');
+ if(a.role==='driver'&&a.binding_verified){
+  const att=await qRows('cen_r','offline_training_attendees',{user_id:`eq.${a.user_id}`,driver_id:`eq.${a.driver_id||'__none__'}`,limit:2000});
+  if(att.length){const bk=att.map(x=>String(x.booking_id));
+   for(const b of (await qRows('cen_r','offline_trainings',{id:`in.(${bk.join(',')})`,status:'eq.scheduled',limit:200})).filter(x=>cDeadline(String(x.end_at)+'+08:00')>Date.now()))add('offline',b.id,b.title+' · '+b.room,{driver_id:a.driver_id,created_at:b.start_at},'driver:training',false,String(b.start_at)+'+08:00');
+  }
+ }
+ let hovers=[];
+ if(staff&&['safety_admin','safety_officer'].includes(a.role))hovers=await qRows('cen_r','handover_reports',{select:'id,owner_id,scope,report_date,cutoff_at,captured_at,recipient_id,status',order:'report_date.desc',limit:500});
+ hovers=hovers.filter(r=>(scope==='*'||String(scope)===String(r.scope))&&(r.owner_id===a.user_id||r.recipient_id===a.user_id||a.role==='safety_admin'));
+ const handoverIds=new Set(hovers.map(r=>String(r.id)));
+ for(const h of hovers)if(h.recipient_id===a.user_id&&h.status==='pending')todos.push({id:'handover:'+h.id,kind:'handover',title:h.report_date+'交接单待接收',vehicle:'交接班',route:'#/handover?id='+encodeURIComponent(h.id),urgent:false,due_at:null,created_at:h.captured_at,is_replay:false});
+ const todayCN=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(new Date());
+ for(const t of todos){const at=cDeadline(t.due_at);t.bucket=t.urgent?'urgent':at<Date.now()?'overdue':Number.isFinite(at)&&new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(new Date(at))===todayCN?'today':'other';}
+ const buckets=['urgent','overdue','today','other'];todos.sort((x,y)=>buckets.indexOf(x.bucket)-buckets.indexOf(y.bucket)||(cDeadline(x.due_at)-cDeadline(y.due_at)||String(y.created_at||'').localeCompare(String(x.created_at||''))));
+ // —— notes：notification_events + 审计合成 + 交接/周报边界 ——
+ const notif=await qRows('cen_r','notification_events',{target_user_id:`eq.${a.user_id}`,select:'notification_id,title,body,content,created_at,read_at,source_entity_type,source_entity_id',order:'created_at.desc',limit:800});
+ const drIds=[...new Set(notif.filter(n=>n.source_entity_type==='daily_safety_report').map(n=>String(n.source_entity_id)))];
+ const drMap=new Map((drIds.length?await qRows('cen_r','daily_safety_reports',{id:`in.(${drIds.join(',')})`,select:'id,driver_id',limit:400}):[]).map(x=>[String(x.id),x]));
+ const goalMap=new Map(goals.map(g=>[String(g.id),g]));
+ const taskMap=new Map(tasks.map(t=>[String(t.task_id),t]));
+ const reviewMap=new Map(reviews.map(r=>[String(r.request_id),r]));
+ const intMap=new Map(ints.map(r=>[String(r.intervention_id),r]));
+ const alertMap=new Map(alerts.map(r=>[String(r.alert_id),r]));
+ const offIds=[...new Set(notif.filter(n=>n.source_entity_type==='offline_training').map(n=>String(n.source_entity_id)))];
+ const offAtt=new Set((offIds.length?await qRows('cen_r','offline_training_attendees',{booking_id:`in.(${offIds.join(',')})`,user_id:`eq.${a.user_id}`,limit:400}):[]).map(x=>String(x.booking_id)));
+ const notes=[];
+ for(const n of notif){
+  const t=String(n.source_entity_type||''),id=String(n.source_entity_id??'');
+  let r=null;
+  if(t==='handover'||t==='handover_report'){if(!handoverIds.has(id))continue;}
+  else if(t==='daily_safety_report')r=drMap.get(id)||null;
+  else if(t==='driver_safety_goal')r=goalMap.get(id)||null;
+  else if(t==='offline_training'){r=offAtt.has(id)?{driver_id:a.driver_id||null}:{driver_id:'__unavailable__'};}
+  else {r=taskMap.get(id)||reviewMap.get(id)||intMap.get(id)||alertMap.get(id)||null;}
+  if(r&&!allowed(r))continue;
+  const rt=(t==='handover'||t==='handover_report')?'#/handover?id='+encodeURIComponent(id):cRoute(t,id,r,staff);
+  notes.push({id:'note:'+n.notification_id,title:n.title||'系统通知',content:n.content||n.body||'',created_at:n.created_at,read_at:n.read_at,route:rt,vehicle:r?label(r):null});
+ }
+ if(staff){
+  for(const r of await qRows('cen_r','audit_logs',{action:'eq.scoring.weights_apply',select:'audit_id,occurred_at',order:'occurred_at.desc',limit:30}))notes.push({id:'audit:'+r.audit_id,title:'评分权重版本已生效',content:'安全评分与历史趋势已按新权重重算，可查看车辆评分及变化。',created_at:r.occurred_at,route:'#/ev-fleet',vehicle:null,read_at:null});
+  for(const r of await qRows('cen_r','audit_logs',{action:'in.(import.commit,import.commit.partial_failed)',actor_id:`eq.${a.user_id}`,select:'audit_id,action,occurred_at',order:'occurred_at.desc',limit:30}))notes.push({id:'audit:'+r.audit_id,title:r.action.endsWith('partial_failed')?'数据导入存在失败项':'数据导入已完成',content:'请查看数据版本与审计中的导入结果。',created_at:r.occurred_at,route:'#/sm-audit',vehicle:null,read_at:null});
+ }
+ const hidden=new Set((await qRows('cen_r','action_center_hidden',{user_id:`eq.${a.user_id}`,select:'item_id',limit:2000})).map(x=>x.item_id));
+ for(let k=notes.length-1;k>=0;k--)if(hidden.has(notes[k].id))notes.splice(k,1);
+ for(let k=todos.length-1;k>=0;k--)if(hidden.has(todos[k].id))todos.splice(k,1);
+ const reads=new Map((await qRows('cen_r','action_center_reads',{user_id:`eq.${a.user_id}`,select:'notification_id,read_at',limit:2000})).map(x=>[x.notification_id,x.read_at]));
+ for(const n of notes)n.read_at=n.read_at||reads.get(n.id)||null;
+ notes.sort((x,y)=>String(y.created_at||'').localeCompare(String(x.created_at||''))||x.id.localeCompare(y.id));
+ return {notes,todos,unread_notes:notes.filter(n=>!n.read_at).length,todo_count:todos.length,todo_label:'风险处置、培训审核、评分异议与到期跟进'};
+}
+async function hostCenterRead(a,body,feed){
+ const ids=body.all===true?feed.notes.filter(n=>!n.read_at).map(n=>n.id):[body.id];
+ if(ids.some(id=>!feed.notes.some(n=>n.id===id)))throw new HttpError(404,'center_note_not_found');
+ const at=new Date().toISOString();
+ for(const id of ids){if(!id)continue;
+ if(id.startsWith('note:'))await dbRequest('cen_w','PATCH','notification_events',{query:{notification_id:`eq.${id.slice(5)}`,target_user_id:`eq.${a.user_id}`,read_at:'is.null'},body:{read_at:at}});
+ else await dbRequest('cen_w','POST','action_center_reads',{body:[{user_id:a.user_id,notification_id:id,read_at:at}],headers:{Prefer:'resolution=ignore-duplicates,return=minimal'}});
+ }
+ return {ok:true};
+}
+async function hostCenterRemove(a,body,feed){
+ const ids=body.ids;
+ if(!Array.isArray(ids)||!ids.length||ids.some(id=>!feed.notes.some(n=>n.id===id)&&!feed.todos.some(t=>t.id===id)))throw new HttpError(400,'center_item_invalid');
+ for(const id of ids)await dbRequest('cen_w','POST','action_center_hidden',{body:[{user_id:a.user_id,item_id:String(id),hidden_at:new Date().toISOString()}],headers:{Prefer:'resolution=ignore-duplicates,return=minimal'}});
+ return {ok:true};
+}
+async function hostCenterRestore(a,body){
+ if(!Array.isArray(body.ids))throw new HttpError(400,'center_item_invalid');
+ for(const id of body.ids)await dbRequest('cen_w','DELETE','action_center_hidden',{query:{user_id:`eq.${a.user_id}`,item_id:`eq.${String(id)}`}});
+ return {ok:true};
+}
+
+async function handleActionCenter(request,response,url,ctx){
+ const u=requireUser(ctx.principal);
+ if(process.env.APP_DATA_MODE==='full'){const action=url.pathname.split('/').at(-1),body=request.method==='GET'?{}:await readBody(request),t=resolveDbTarget();const r=await fetch(t.url+'/internal/center/'+action,{method:'POST',headers:{apikey:t.key,'content-type':'application/json'},body:JSON.stringify({...body,actor:{id:u.user_id}})});const data=await r.json();if(!r.ok)throw new HttpError(r.status,data.error||'center_service_failed');sendJson(response,200,data);return;}
+ const action=url.pathname.split('/').at(-1);
+ if(!['driver','safety_admin','safety_officer','team_leader'].includes(u.role))throw new HttpError(403,'center_forbidden');
+ if(action==='data'){sendJson(response,200,await hostCenterData(u));return;}
+ const body=request.method==='GET'?{}:await readBody(request);
+ const feed=await hostCenterData(u); // 与本地模块一致：写操作前重建 feed 校验 ids 归属
+ if(action==='read')sendJson(response,200,await hostCenterRead(u,body,feed));
+ else if(action==='remove')sendJson(response,200,await hostCenterRemove(u,body,feed));
+ else if(action==='restore')sendJson(response,200,await hostCenterRestore(u,body));
+ else throw new HttpError(404,'center_action_not_found');
+}
+
 async function handleEvaluationActions(request,response,url,ctx){
  const u=requireUser(ctx.principal);if(process.env.APP_DATA_MODE!=='full')throw new HttpError(503,'evaluation_local_data_required');const action=url.pathname.split('/').at(-1),body=request.method==='GET'?{}:await readBody(request),t=resolveDbTarget();const r=await fetch(t.url+'/internal/evaluation/'+action,{method:'POST',headers:{apikey:t.key,'content-type':'application/json'},body:JSON.stringify({...body,actor:{id:u.user_id}})}),data=await r.json();if(!r.ok)throw new HttpError(r.status,data.error||'evaluation_service_failed');sendJson(response,200,data);
 }
