@@ -1,3 +1,4 @@
+import { vehicleLabel, vehicleId } from "./vehicles";
 // R26 AI04 管理动作并排预演页（只读；复用 ai.preplan 组装端点与对话侧 action_preplan；进入草稿≠写入）
 import { useEffect, useState } from "react";
 import { aiEvidenceCheck } from "./api";
@@ -28,9 +29,9 @@ export function AiPreplanPage() {
     <div className="alert warn" style={{ fontWeight: 700 }}>操作预演，未写入 —— 本页所有判断不创建/修改 alerts、interventions、training_tasks、notification_events；AI 建议与已核实事实分列，不预测事故概率或安全分变化。</div>
     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
       <input className="btn" style={{ width: 170 }} placeholder="driver_id（如 DEMO_D0149）" value={draftQ.driver_id || crit.driver_id || ""} onChange={(e) => setDraftQ({ ...draftQ, driver_id: e.target.value })} aria-label="预演对象 driver_id" />
-      <input className="btn" style={{ width: 150 }} placeholder="或 gpsno" value={draftQ.gpsno || crit.gpsno || ""} onChange={(e) => setDraftQ({ ...draftQ, gpsno: e.target.value })} aria-label="预演对象 gpsno" />
+      <input className="btn" style={{ width: 150 }} placeholder="或车辆编号" value={draftQ.gpsno ?? (crit.gpsno ? vehicleLabel(crit.gpsno) : "")} onChange={(e) => setDraftQ({ ...draftQ, gpsno: e.target.value })} aria-label="预演对象 gpsno" />
       <input className="btn" style={{ width: 140 }} placeholder="as_of_date（空=最新）" value={draftQ.as_of_date || crit.as_of_date || ""} onChange={(e) => setDraftQ({ ...draftQ, as_of_date: e.target.value })} aria-label="预演日期" />
-      <button className="btn primary" style={{ width: "auto" }} onClick={() => { const c: Record<string, string> = {}; if (draftQ.driver_id) c.driver_id = draftQ.driver_id; else if (draftQ.gpsno) c.gpsno = draftQ.gpsno; else if (crit.gpsno) c.gpsno = crit.gpsno; if (draftQ.as_of_date) c.as_of_date = draftQ.as_of_date; setCrit(c); }}>切换对象/日期并重新验权（清空旧证据）</button>
+      <button className="btn primary" style={{ width: "auto" }} onClick={() => { const c: Record<string, string> = {}; if (draftQ.driver_id) c.driver_id = draftQ.driver_id; else if (draftQ.gpsno) c.gpsno = vehicleId(draftQ.gpsno); else if (crit.gpsno) c.gpsno = crit.gpsno; if (draftQ.as_of_date) c.as_of_date = draftQ.as_of_date; setCrit(c); }}>切换对象/日期并重新验权（清空旧证据）</button>
       <button className="btn" onClick={backToEv03}>← 返回 EV03（保留对象与管理动作为主标签）</button>
       <button className="btn" onClick={() => { const sub = data && typeof data === "object" && data.subject ? data.subject : null; window.dispatchEvent(new CustomEvent("claw:ai-preset", { detail: { prompt: "AI04 三种管理路径并排预演：" + (sub ? `${sub.driver_id}（${sub.gpsno}，as_of ${sub.as_of_date}，版本 ${sub.source_version}）` : "当前对象") + "，调用 action_preplan，只预演不写入" } })); }}>让 AI 预演三路径（对话侧栏，走既有工具与审计）</button>
     </div>
@@ -38,7 +39,7 @@ export function AiPreplanPage() {
     {data === "fail" && <div className="alert warn">预演组装失败：会话或查询异常（不展示旧数据冒充）</div>}
     {data && data !== "fail" && typeof data === "object" && data.data_status !== "ok" && <div className="alert info">{data.data_status === "no_data_for_date" ? String(data.note) : data.data_status === "not_found" ? "对象不存在或不在你的授权范围（与不存在同语义，不泄漏）" : String(data.note || "无数据")}</div>}
     {data && data !== "loading" && typeof data === "object" && data.data_status === "ok" && <>
-      <div className="meta" style={{ marginBottom: 6 }}>对象：{String(data.subject?.driver_id)} · 车辆 {String(data.subject?.gpsno)} · as_of {String(data.subject?.as_of_date)} · {String(data.subject?.source_version)} · {String(data.facts_status)}</div>
+      <div className="meta" style={{ marginBottom: 6 }}>对象：{String(data.subject?.driver_id)} · {vehicleLabel(data.subject?.gpsno)} · as_of {String(data.subject?.as_of_date)} · {String(data.subject?.source_version)} · {String(data.facts_status)}</div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, alignItems: "start" }}>
         {data.cards.map((c) => <div key={c.key} className="task-card" style={{ padding: 10, borderColor: c.highlight ? "#d48806" : c.actionable ? "#2f5496" : "#ddd", background: c.highlight ? "#fffbe6" : c.actionable ? undefined : "#fafafa" }}>
           <div className="t">{c.title}{c.highlight ? <span className="tag amber" style={{ marginLeft: 6 }}>优先</span> : null} <span className="meta" style={{ fontWeight: 400 }}>方案预演 · 未写入</span></div>
@@ -65,4 +66,3 @@ export function AiPreplanPage() {
     </>}
   </div>;
 }
-

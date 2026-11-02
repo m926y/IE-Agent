@@ -1,8 +1,10 @@
+import {KnowledgeUpload,KnowledgeMap,KnowledgeAttachments,AuthoritativeKnowledge} from './knowledge-library';
 // R17 SM05 规则草案双栏 + SM06 知识内容管理（服务端强制门禁；草案/待审永不成为正式依据）
 import React, { useEffect, useState } from "react";
 import { knowledgeAction, knowledgeCreate, knowledgeList, ruleDraftAction, ruleDraftCreate, rulesBoard } from "./api";
 
 
+const dimName=(v:unknown)=>({history:"历史事故与未遂",driving_stability:"驾驶稳定性",fatigue_distraction:"疲劳与分心",management:"管理配合度",imu_evidence:"车辆传感器风险",gps_coverage:"定位数据覆盖"} as Record<string,string>)[String(v)]||String(v||"—");
 const DIMS = ["history", "driving_stability", "fatigue_distraction", "management", "imu_evidence", "gps_coverage"];
 type Row = Record<string, string | number | boolean | null | undefined>;
 function PageHead({ code, title, desc }: { code: string; title: string; desc: string }) {
@@ -54,13 +56,13 @@ export function SmDraftsPage() {
     {msg && <div className="alert info">{msg}</div>}
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, alignItems: "start" }}>
       <div className="task-card"><div className="t">现行评分规则（生效口径 · 只读展示）</div>
-        {!board ? <div className="meta">读取中…</div> : <table className="tbl"><thead><tr><th>维度</th><th>权重</th><th>窗口</th><th>source_version</th></tr></thead>
-          <tbody>{board.current.map((c) => <tr key={String(c.dimension)}><td>{String(c.dimension_name || c.dimension)}</td><td>{Number(c.weight).toFixed(4)}</td><td>{String(c.window_days)}天</td><td><span className="meta">{String(c.source_version)}</span></td></tr>)}</tbody></table>}
-        <div className="meta">对 risk/score/ledger 及 evaluation_rules 的旁路直改：无路径（410 frozen_rules_not_writable）——评分标准变更只能走右侧草案链路</div></div>
+        {!board ? <div className="meta">读取中…</div> : <table className="tbl"><thead><tr><th>维度</th><th>权重</th><th>窗口</th><th>规则版本</th></tr></thead>
+          <tbody>{board.current.map((c) => <tr key={String(c.dimension)}><td>{String(c.dimension_name || c.dimension)}</td><td>{Number(c.weight).toFixed(4)}</td><td>{String(c.window_days)}天</td><td><span className="meta">规则已留档</span></td></tr>)}</tbody></table>}
+        <div className="meta">调整评分标准，请在右侧创建草案，经审核后生效。</div></div>
       <div className="task-card"><div className="t">规则草案（批准并生效前不参与任何计算/展示口径）</div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
-          <select className="btn" value={dim} onChange={(e) => setDim(e.target.value)} style={{ width: "auto" }}>{curDims.map((d) => <option key={d}>{d}</option>)}</select>
-          <input className="btn" style={{ width: 110 }} type="number" min="0" max="1" step="0.0001" placeholder={`改 ${dim} 权重`} value={weights[dim] ?? ""} onChange={(e) => setWeights({ ...weights, [dim]: e.target.value })} />
+          <select className="btn" value={dim} onChange={(e) => setDim(e.target.value)} style={{ width: "auto" }}>{curDims.map((d) => <option key={d} value={d}>{dimName(d)}</option>)}</select>
+          <input className="btn" style={{ width: 110 }} type="number" min="0" max="1" step="0.0001" placeholder={`调整${dimName(dim)}权重`} value={weights[dim] ?? ""} onChange={(e) => setWeights({ ...weights, [dim]: e.target.value })} />
           {Object.keys(weights).length > 0 && <span className="meta">拟权重合计≈{wSum.toFixed(4)}（现行未改维度按原值补足）</span>}
         </div>
         <textarea className="btn" style={{ width: "100%", minHeight: 56, textAlign: "left", fontFamily: "inherit" }} placeholder="提案说明（拟议口径/理由/影响评估）；填了权重即为可生效的结构化提案" value={prop} onChange={(e) => setProp(e.target.value)} />
@@ -69,8 +71,8 @@ export function SmDraftsPage() {
             try { const r = await ruleDraftCreate({ dimension: dim, proposal: prop, ...(hasStructured ? { weights: Object.fromEntries(Object.entries(weights).map(([k, v]) => [k, Number(v)])) } : {}) }); setMsg(`已建草案 ${r.draft_id}${(r as unknown as Row).structured ? "（结构化·可生效）" : "（仅文本·不可生效）"} · 审计 ${r.audit_id}`); setProp(""); setWeights({}); await reload(); } catch (e) { setErr(e instanceof Error ? e.message : "创建失败"); } }}>创建草案</button>
         </div>
         {!board ? <div className="meta">读取中…</div> : board.drafts.length === 0 ? <div className="meta">暂无草案</div> : board.drafts.map((d) => { const st = String(d.status); const sp = parsedProp(String(d.proposal || "")); return <div key={String(d.draft_id)} className="task-card" style={{ padding: 8, marginTop: 6 }}>
-          <div style={{ fontSize: 12.5 }}><b>{String(d.draft_id)}</b> · {String(d.dimension)} <StatusTag s={st === "approved" ? "approved_draft" : st} />{sp ? <span className="meta"> · 结构化{sp.weights ? `（${Object.keys(sp.weights).length} 维权重）` : ""}</span> : null}</div>
-          <div className="meta" style={{ whiteSpace: "pre-wrap" }}>{sp ? `权重提案：${Object.entries(sp.weights || {}).map(([k, v]) => `${k}→${v}`).join("；")}｜${String(sp.note || "").slice(0, 160)}` : String(d.proposal || "").slice(0, 300)}</div>
+          <div style={{ fontSize: 12.5 }}><b>规则调整草案</b> · {dimName(d.dimension)} <StatusTag s={st === "approved" ? "approved_draft" : st} />{sp ? <span className="meta"> · 结构化{sp.weights ? `（${Object.keys(sp.weights).length} 维权重）` : ""}</span> : null}</div>
+          <div className="meta" style={{ whiteSpace: "pre-wrap" }}>{sp ? `权重提案：${Object.entries(sp.weights || {}).map(([k, v]) => `${dimName(k)}→${v}`).join("；")}｜${String(sp.note || "").slice(0, 160)}` : String(d.proposal || "").slice(0, 300)}</div>
           <div className="meta">基线 {String(d.base_version || "—")} · {String(d.created_by)} · {String(d.updated_at || "").slice(0, 10)}{d.review_note ? ` · 意见：${String(d.review_note).slice(0, 60)}` : ""}</div>
           <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
             {st === "draft" && <button className="btn" style={{ padding: "2px 8px" }} onClick={() => act(String(d.draft_id), { action: "submit" }, "提交审核")}>提交审核</button>}
@@ -83,7 +85,7 @@ export function SmDraftsPage() {
                   : <button className="btn primary" style={{ padding: "2px 8px", width: "auto" }} onClick={() => setApproveFor(String(d.draft_id))}>批准…</button>}</>}
             {st === "approved" && (sp ? <>
               <button className="btn primary" style={{ padding: "2px 8px", width: "auto" }} disabled={Boolean((d as Row)._busy)} onClick={() => {
-                const chg = Object.entries(sp.weights || {}).map(([k, v]) => `${k}→${v}`).join("；");
+                const chg = Object.entries(sp.weights || {}).map(([k, v]) => `${dimName(k)}→${v}`).join("；");
                 if (!window.confirm(`确认把该已批准提案写为现行口径？\n变更：${chg}\n生效后 source_version 更新为新 ruleset 版本；历史快照/台账/预测不因此改写（重新出数由算法侧执行）。`)) return;
                 act(String(d.draft_id), { action: "effectuate", confirm_effectuate: true }, "生效");
               }}>生效为新口径…</button></> : <span className="meta">（文本草案：不可生效）</span>)}
@@ -97,7 +99,7 @@ export function SmDraftsPage() {
         </div>; })}
       </div>
     </div>
-    <p className="login-note">草案动作全链审计（rule_draft.create/submit/withdraw/note/approve/effectuate/archive）；批准需审阅意见，生效需显式确认（window.confirm）+ 同作者强制二次确认；生效后现行权重与口径版本（ruleset_vN）即刻被 SM05 左栏/页面/AI rules_read 同源呈现，历史快照不回算。</p>
+    <p className="login-note">草案经审核、确认生效后成为现行规则；历史评分保持留档。</p>
   </div>;
 }
 
@@ -116,23 +118,24 @@ export function SmKnowledgePage() {
     catch (e) { const m = e instanceof Error ? e.message : String(e); if (m.includes("self_review_requires_explicit_confirm")) { setConfirmId(id); setErr("你是该条目作者：请点“确认并批准”完成同作者二次确认（将写入审计）"); } else setErr("操作被拒：" + m); }
   }
   return <div>
-    <PageHead code="SM06" title="知识内容管理" desc="全部转换由服务端校验并写审计（含版本坐标 article_id:version_no）；同作者审阅必须显式二次确认。运行时 AI 正式引用 = 仅 approved 的最新版本（含版本核验，停用/待审拒绝）。" />
+    <KnowledgeUpload onSaved={()=>void reload()}/><KnowledgeMap rows={rows||[]}/><AuthoritativeKnowledge/>
+    <PageHead code="" title="知识内容管理" desc="全部转换由服务端校验并写审计（含版本坐标 article_id:version_no）；同作者审阅必须显式二次确认。运行时 AI 正式引用 = 仅 approved 的最新版本（含版本核验，停用/待审拒绝）。" />
     {err && <div className="alert warn">{err}</div>}
     {msg && <div className="alert info">{msg}</div>}
-    <div className="task-card"><div className="t">新建知识条目（起草即 draft，不会自动批准）</div>
+    <div className="task-card"><div className="t">新建知识条目（审核通过后生效）</div>
       <input className="btn" style={{ width: "100%" }} placeholder="标题" value={title} onChange={(e) => setTitle(e.target.value)} />
       <textarea className="btn" style={{ width: "100%", minHeight: 52, textAlign: "left", fontFamily: "inherit", marginTop: 4 }} placeholder="正文（Markdown 纯文本均可）" value={content} onChange={(e) => setContent(e.target.value)} />
       <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
-        <input className="btn" style={{ flex: 1, width: "auto" }} placeholder="source_note（来源说明/依据）" value={snote} onChange={(e) => setSnote(e.target.value)} />
-        <select className="btn" style={{ width: "auto" }} value={role} onChange={(e) => setRole(e.target.value)}><option value="all">all</option><option value="driver">driver</option><option value="safety_admin">safety_admin</option></select>
+        <input className="btn" style={{ flex: 1, width: "auto" }} placeholder="来源说明或依据" value={snote} onChange={(e) => setSnote(e.target.value)} />
+        <select className="btn" style={{ width: "auto" }} value={role} onChange={(e) => setRole(e.target.value)}><option value="all">所有人员</option><option value="driver">司机</option><option value="safety_admin">管理员</option></select>
         <button className="btn primary" style={{ width: "auto" }} disabled={!title.trim() || !content.trim()} onClick={async () => { try { const r = await knowledgeCreate({ title, content, source_note: snote, applicable_role: role }); setMsg(`已建 ${r.article_id} v${r.version_no}（draft）· 审计 ${r.audit_id}`); setTitle(""); setContent(""); setSnote(""); await reload(); } catch (e) { setErr(e instanceof Error ? e.message : "创建失败"); } }}>创建草稿</button>
       </div></div>
-    {!rows ? <div className="meta">读取中…</div> : rows.map((r) => <div key={`${r.article_id}:${r.version_no}`} className="task-card" style={{ padding: 8, marginTop: 6, outline: hl === String(r.article_id) ? "2px solid #1a56c4" : "none" }}>
-      <div style={{ fontSize: 12.5 }}><b>{String(r.article_id)} · v{String(r.version_no)}</b> {r.is_latest ? null : <span className="meta">（历史版本，仅追溯）</span>} <StatusTag s={String(r.review_status)} /> {r.officially_referenceable ? <span style={{ fontSize: 11, color: "#1a6b2a" }}>· AI 可正式引用</span> : null}</div>
+    {!rows ? <div className="meta">读取中…</div> : rows.map((r) => <div id={r.is_latest?`knowledge-${r.article_id}`:undefined} key={`${r.article_id}:${r.version_no}`} className="task-card knowledge-entry" style={{ padding: 8, marginTop: 6, outline: hl === String(r.article_id) ? "2px solid #1a56c4" : "none" }}>
+      <div style={{ fontSize: 12.5 }}><b>第{String(r.version_no)}版</b> {r.is_latest ? null : <span className="meta">（历史版本，仅追溯）</span>} <StatusTag s={String(r.review_status)} /> {r.officially_referenceable ? <span style={{ fontSize: 11, color: "#1a6b2a" }}>· AI 可正式引用</span> : null}</div>
       <div className="t" style={{ fontSize: 13 }}>{String(r.title)}</div>
-      <div className="meta">维度 {String(r.dimension || "—")} · 适用 {String(r.applicable_role || "all")} · 来源 {String(r.source_note || "—")} · 作者 {String(r.created_by)} · {r.reviewed_by ? `审核 ${String(r.reviewed_by)} @${String(r.reviewed_at || "").slice(0, 16)}` : "未审"}</div>
+      <div className="meta">维度 {dimName(r.dimension)} · 适用 {r.applicable_role==="driver"?"司机":r.applicable_role==="safety_admin"?"管理员":"所有人员"} · 来源 {String(r.source_note || "—")} · 作者 {String(r.created_by)} · {r.reviewed_by ? `审核 ${String(r.reviewed_by)} @${String(r.reviewed_at || "").slice(0, 16)}` : "未审"}</div>
       {r.content ? <div className="meta" style={{ whiteSpace: "pre-wrap" }}>{String(r.content).slice(0, 240)}{(String(r.content).length > 240 ? "…" : "")}</div> : null}
-      {r.is_latest ? <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+      <KnowledgeAttachments content={r.content}/>{r.is_latest ? <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
         {r.review_status === "draft" && <>
           {editFor === `${r.article_id}` ? <div style={{ display: "flex", gap: 6, width: "100%" }}><input className="btn" style={{ flex: 1, width: "auto" }} value={editTxt} onChange={(e) => setEditTxt(e.target.value)} placeholder="修订正文" /><button className="btn primary" style={{ width: "auto" }} onClick={() => { act(String(r.article_id), { action: "edit", content: editTxt }, "修订"); setEditFor(null); }}>存修订</button></div>
             : <button className="btn" style={{ padding: "2px 8px" }} onClick={() => { setEditFor(String(r.article_id)); setEditTxt(String(r.content || "")); }}>编辑</button>}
@@ -147,7 +150,6 @@ export function SmKnowledgePage() {
           <button className="btn" style={{ padding: "2px 8px" }} onClick={() => act(String(r.article_id), { action: "new_version", content: String(r.content) }, "建新版本(基于当前)")}>新版本</button></>}
       </div> : null}
     </div>)}
-    <p className="login-note">状态机：draft→pending_review→approved→disabled（服务端校验 + 409 拒非法转移）；approved 后改内容=新版本（旧版留档可追溯）；AI/evidence-check 引用带版本号，停用后即时失效。</p>
+    <p className="login-note">知识条目依次经过起草、审核和发布；修改已发布内容会生成新版本，旧版保留。</p>
   </div>;
 }
-

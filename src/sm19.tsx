@@ -1,5 +1,7 @@
+import {CourseEditor,CourseContent,courseText} from './course-editor';
+import {api} from './api';
 // R19：TR05 课程库/审核面板（复用 course-review 状态机 + 新 course-draft） + SM04 审计控制台（服务端筛选/分页/导出）
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { auditQuery, courseCreate, courseDraftEdit, coursesBoard, courseReview, opsSet } from "./api";
 
 type Course = Record<string, unknown> & { course_id: string; review_trail?: Record<string, unknown>[] };
@@ -14,85 +16,71 @@ const STY: Record<string, [string, React.CSSProperties]> = {
 };
 const Tag2 = ({ s }: { s: string }) => { const [t, st] = STY[s] || [s, {}]; return <span style={{ fontSize: 11, padding: "1px 6px", borderRadius: 6, ...st }}>{t}</span>; };
 
-export function CourseBoard({ localOnly = false }: { localOnly?: boolean }) {
+export function CourseBoard() {
   const [rows, setRows] = useState<Course[] | null>(null);
   const [open, setOpen] = useState<Course | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [fStatus, setFStatus] = useState("");
   const [showTrail, setShowTrail] = useState<string | null>(null);
-  const [nc, setNc] = useState({ course_id: "", title: "", dimension: "", content: "" });
+  const reviewRef=useRef<HTMLDivElement>(null);
+  useEffect(()=>{if(open)requestAnimationFrame(()=>reviewRef.current?.scrollIntoView({behavior:"smooth",block:"start"}))},[open?.course_id]);
   const [editFor, setEditFor] = useState<Course | null>(null);
   async function reload(pick?: string) { const r = await coursesBoard(); setRows(r.courses as Course[]); if (pick) setOpen((r.courses as Course[]).find(x => x.course_id === pick) || null); }
   useEffect(() => { reload().catch(() => setErr("课程板读取失败")); }, []);
   async function review(c: Course, next: string, confirm = false) {
     setErr(null);
-    try { const r = await courseReview({ course_id: c.course_id, new_status: next, ...(confirm ? { confirm_by: "manual_admin" } : {}) }); setMsg(`${c.course_id} ${r.old_status} → ${r.new_status} · v${r.version_no} · 审计 ${r.audit_id}`); await reload(c.course_id); }
+    try { const r = await courseReview({ course_id: c.course_id, new_status: next, ...(confirm ? { confirm_by: "manual_admin" } : {}) }); setMsg(`「${String(c.title)}」已更新为${STY[r.new_status]?.[0]||'最新状态'}`); await reload(c.course_id); }
     catch (e) { setErr("审核动作被拒：" + String((e as { code?: string }).code || e)); }
   }
-  const list = (rows || []).filter(x => !fStatus || String(x.content_status) === fStatus);
-  return <div>
+  const list = (rows || []).filter(x => x.content_status!=="deleted"&&(!fStatus || String(x.content_status) === fStatus));
+  return <div className="course-board">
     {msg && <div className="alert info">{msg}</div>}
     {err && <div className="alert warn">{err}</div>}
     <div style={{ display: "flex", gap: 6, margin: "4px 0", flexWrap: "wrap" }}>
-      <select className="btn" style={{ width: "auto" }} value={fStatus} onChange={(e) => setFStatus(e.target.value)} aria-label="课程状态筛选"><option value="">状态·全部</option>{Object.keys(STY).map(s => <option key={s}>{s}</option>)}</select>
+      <select className="btn" style={{ width: "auto" }} value={fStatus} onChange={(e) => setFStatus(e.target.value)} aria-label="课程状态筛选"><option value="">状态·全部</option>{Object.keys(STY).map(s => <option key={s} value={s}>{STY[s][0]}</option>)}</select>
       <span className="meta" style={{ alignSelf: "center" }}>{list.length}/{(rows || []).length}</span>
     </div>
     {!rows ? <div className="meta">读取中…</div> : <table className="tbl"><thead><tr><th>课程 / 标题</th><th>维度</th><th>状态</th><th>版本</th><th>作者</th><th>审核人 · 时间</th><th>操作</th></tr></thead>
       <tbody>{list.map(c => <tr key={c.course_id} style={{ outline: open?.course_id === c.course_id ? "2px solid #1a56c4" : "none" }}>
-        <td><b>{c.course_id}</b> {String(c.title)}<div className="meta">{String((c.content as string) || "").slice(0, 60)}…</div></td>
-        <td>{String(c.dimension || "—")}</td><td><Tag2 s={String(c.content_status)} /></td><td>v{String(c.version_no)}</td>
-        <td className="meta">{String(c.authored_by || "—")}<div>{String(c.authored_at || "").slice(0, 10)}</div></td>
-        <td className="meta">{c.reviewed_by ? `${String(c.reviewed_by)}` : "—"}<div>{String(c.reviewed_at || "").slice(0, 16)}</div></td>
+        <td><b>{String(c.title)}</b><div className="meta">{courseText(c.content).slice(0,60)}…</div></td>
+        <td>{({history:'历史事故与未遂',fatigue_distraction:'疲劳与分心',driving_stability:'驾驶稳定性',road_rule:'道路规则',management:'管理配合',imu_evidence:'车辆运行状态'} as Record<string,string>)[String(c.dimension)]||'综合安全'}</td><td><Tag2 s={String(c.content_status)} /></td><td>第{String(c.version_no)}版</td>
+        <td className="meta">{c.authored_by?'已登记':'未登记'}<div>{String(c.authored_at || "").slice(0, 10)}</div></td>
+        <td className="meta">{c.reviewed_by ? "已审核" : "—"}<div>{String(c.reviewed_at || "").slice(0, 16)}</div></td>
         <td style={{ whiteSpace: "nowrap" }}>
-          <button className="btn" style={{ padding: "2px 8px" }} onClick={() => { setOpen(c); setShowTrail(c.course_id); }}>审核 / 轨迹</button>
+          <button className="btn" style={{ padding: "2px 8px" }} onClick={() => { setOpen(c); setShowTrail(c.course_id); }}>查看与审核</button><button className="btn" onClick={async()=>{if(!window.confirm('删除「'+c.title+'」？已分配任务的课程记录保留。'))return;try{await api('/api/courses/'+encodeURIComponent(c.course_id)+'/delete',{method:'POST',body:'{}'});setOpen(null);await reload();setMsg('课程已从课程库移除。')}catch{setErr('删除未完成，请重试。')}}}>删除</button>
         </td>
       </tr>)}</tbody></table>}
-    {open && <div className="task-card" style={{ marginTop: 8 }}>
-      <div className="t">审核抽屉 · {open.course_id}（{String(open.title)}） <Tag2 s={String(open.content_status)} /> v{String(open.version_no)}</div>
-      <div className="meta" style={{ whiteSpace: "pre-wrap", maxHeight: 120, overflowY: "auto" }}>{String(open.content)}</div>
-      <div className="meta">完成要求：{String((open as { completion_requirement?: string }).completion_requirement || "—")} · source: {String((open as { source_version?: string }).source_version || "—")}</div>
+    {open && <div ref={reviewRef} className="task-card course-review-detail" style={{ marginTop: 28 }}>
+      <div className="t">课程审核 · {String(open.title)} <Tag2 s={String(open.content_status)} /> 第{String(open.version_no)}版</div>
+      <CourseContent content={open.content} answers/>
+      <div className="meta">完成要求：{String((open as { completion_requirement?: string }).completion_requirement || "—")}</div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
         {["demo_draft_requires_team_review", "draft"].includes(String(open.content_status)) && <button className="btn" onClick={() => review(open, "pending_review")}>提交审核</button>}
         {open.content_status === "pending_review" && <>
           <button className="btn" onClick={() => review(open, "draft")}>退回草稿</button>
-          <button className="btn primary" style={{ width: "auto" }} onClick={() => { if (window.confirm(`确认以你的名义批准课程 ${open.course_id}？批准后方可被 TR02 正式分配（人工决定，不自动批准）。`)) review(open, "approved", true); }}>批准（明确确认）</button>
+          <button className="btn primary" style={{ width: "auto" }} onClick={() => { if (window.confirm(`确认审核通过「${String(open.title)}」？通过后可分配给司机。`)) review(open, "approved", true); }}>审核通过</button>
         </>}
-        {open.content_status === "approved" && <button className="btn" onClick={() => { if (window.confirm(`停用 ${open.course_id}？此后 TR02 分配与 AI 引用将拒绝（文本与轨迹保留）。`)) review(open, "disabled", true); }}>停用（明确确认）</button>}
-        {!localOnly && ["draft", "pending_review", "demo_draft_requires_team_review"].includes(String(open.content_status)) && <button className="btn" onClick={() => setEditFor(open)}>修订文本</button>}
+        {open.content_status === "approved" && <button className="btn" onClick={() => { if (window.confirm(`确认停用「${String(open.title)}」？停用后不能再分配。`)) review(open, "disabled", true); }}>停用课程</button>}
+        {["draft", "pending_review", "demo_draft_requires_team_review"].includes(String(open.content_status)) && <button className="btn" onClick={() => setEditFor(open)}>修订文本</button>}
         <button className="btn" onClick={() => setOpen(null)}>收起</button>
       </div>
       {showTrail === open.course_id && <div style={{ marginTop: 6 }}>
-        <div className="t" style={{ fontSize: 12.5 }}>审核轨迹（audit_logs 合成，可回看）</div>
+        <div className="t" style={{ fontSize: 12.5 }}>审核记录</div>
         {(open.review_trail || []).slice().reverse().map((x) => <div key={String(x.audit_id)} className="meta" style={{ fontSize: 11.5 }}>
-          {String(x.at || "").slice(0, 19)} · {String(x.action)} {x.from ? `${x.from}→${String(x.to)}` : ""} · {String(x.by)} · <a href={`#/sm-audit?audit_id=${String(x.audit_id)}`}>{String(x.audit_id)}</a>
+          {String(x.at || "").slice(0, 19).replace('T',' ')} · {STY[String(x.to)]?.[0]||'课程内容已更新'} · <a href={`#/sm-audit?audit_id=${String(x.audit_id)}`}>查看操作详情</a>
         </div>)}
-        {!(open.review_trail || []).length && <div className="meta">无审计事件</div>}
+        {!(open.review_trail || []).length && <div className="meta">暂无审核记录</div>}
       </div>}
-      {editFor && !localOnly && <div style={{ marginTop: 6, display: "grid", gap: 4 }}>
-        <textarea className="btn" style={{ minHeight: 60, textAlign: "left", fontFamily: "inherit" }} defaultValue={String(editFor.content)} onChange={(e) => ((editFor as { _new?: string; })._new = e.target.value)} />
-        <div style={{ display: "flex", gap: 6 }}>
-          <button className="btn primary" style={{ width: "auto" }} onClick={async () => { try { const r = await courseDraftEdit({ course_id: editFor.course_id, content: (editFor as { _new?: string; })._new ?? String(editFor.content) }); setMsg(`已修订 ${r.course_id} → v${r.version_no} · 审计 ${r.audit_id}`); setEditFor(null); await reload(editFor.course_id); } catch (e) { setErr("修订被拒：" + String((e as { code?: string }).code || e)); } }}>保存修订（仅未审核课程）</button>
-          <button className="btn" onClick={() => setEditFor(null)}>取消</button>
-        </div>
-        <div className="meta">已 approved 的课程修订走"停用 + 新课程"流程，避免静默改词。</div>
-      </div>}
+      {editFor && <CourseEditor initial={{course_id:editFor.course_id,title:String(editFor.title),dimension:editFor.dimension,content:editFor.content}} onCancel={()=>setEditFor(null)} onSave={async value=>{await courseDraftEdit(value);setEditFor(null);setMsg('课程已修订，请重新核对并审核。');await reload(editFor.course_id)}}/>}
     </div>}
-    <div className="task-card" hidden={localOnly} style={{ marginTop: 8, padding: 8 }}>
-      <div className="t">自建课程草稿（初始 draft，永不自动批准/分配）</div>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        <input className="btn" style={{ width: 150 }} placeholder="course_id(大写)" value={nc.course_id} onChange={(e) => setNc({ ...nc, course_id: e.target.value.toUpperCase() })} aria-label="新课程ID" />
-        <input className="btn" style={{ width: 200 }} placeholder="标题" value={nc.title} onChange={(e) => setNc({ ...nc, title: e.target.value })} aria-label="新课程标题" />
-        <input className="btn" style={{ width: 130 }} placeholder="维度(可空)" value={nc.dimension} onChange={(e) => setNc({ ...nc, dimension: e.target.value })} />
-      </div>
-      <textarea className="btn" style={{ width: "100%", minHeight: 44, textAlign: "left", fontFamily: "inherit", marginTop: 4 }} placeholder="课程正文" value={nc.content} onChange={(e) => setNc({ ...nc, content: e.target.value })} aria-label="新课程正文" />
-      <button className="btn primary" style={{ width: "auto", marginTop: 4 }} disabled={!nc.course_id || !nc.title || !nc.content} onClick={async () => { try { const r = await courseCreate(nc); setMsg(`已创建 ${r.course_id}（draft）· 审计 ${r.audit_id}`); setNc({ course_id: "", title: "", dimension: "", content: "" }); await reload(r.course_id); } catch (e) { setErr("创建被拒：" + String((e as { code?: string }).code || e)); } }}>创建草稿课程</button>
-    </div>
+    <CourseEditor onSave={async value=>{const result=await courseCreate(value);setMsg('课程草稿已保存。');await reload(result.course_id)}}/>
   </div>;
 }
 
 const ACTION_PREFIXES = ["", "ai.chat", "ai.confirm", "account", "course", "knowledge", "rule_draft", "intervention", "alert", "training", "review", "import", "ops"];
 
+const auditText=(value:unknown):string=>{const text=String(value||'—');const names:Record<string,string>={safety_admin:'管理员',safety_officer:'安全员',driver:'司机',team_leader:'队长',active:'已启用',disabled:'已停用',pending_review:'待审核',approved:'已审核',draft:'草稿',confirmed:'已确认',closed:'已关闭',assigned:'已分配',submitted:'待验收',reviewed:'已验收',account:'账号',app_users:'账号',training_task:'培训任务',course:'课程',alert:'风险告警',rule_draft:'规则草案',knowledge:'知识内容',operation_config:'运营配置',create:'创建',update:'修改',edit:'编辑',submit:'提交',approve:'审核通过',disable:'停用',restore:'恢复',note:'添加备注',close:'关闭',confirm:'确认',assign:'分配',review:'验收',binding:'车辆绑定',import:'数据导入',login:'登录',logout:'退出',effectuate:'生效',archive:'归档',withdraw:'撤回'};return names[text]||text.split('.').map(t=>names[t]||(/[a-z_]/i.test(t)?'业务操作':t)).join(' · ')};
 export function AuditConsole() {
   const [q, setQ] = useState({ actor: "", entity_id: "", action_prefix: "", from: "", to: "" });
   const [page, setPage] = useState(0);
@@ -111,10 +99,10 @@ export function AuditConsole() {
   return <div>
     <div className="task-card" style={{ padding: 8 }}>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        <input className="btn" style={{ width: 150 }} placeholder="操作者（user_id）" value={q.actor} onChange={(e) => setQ({ ...q, actor: e.target.value })} aria-label="审计-操作者" />
-        <input className="btn" style={{ width: 190 }} placeholder="对象 ID（record_id）" value={q.entity_id} onChange={(e) => setQ({ ...q, entity_id: e.target.value })} aria-label="审计-对象ID" />
+        <input className="btn" style={{ width: 150 }} placeholder="操作人编号" value={q.actor} onChange={(e) => setQ({ ...q, actor: e.target.value })} aria-label="审计-操作者" />
+        <input className="btn" style={{ width: 190 }} placeholder="业务记录编号" value={q.entity_id} onChange={(e) => setQ({ ...q, entity_id: e.target.value })} aria-label="审计-对象ID" />
         <select className="btn" style={{ width: "auto" }} value={q.action_prefix} onChange={(e) => setQ({ ...q, action_prefix: e.target.value })} aria-label="审计-action前缀">
-          <option value="">action 前缀·全部</option>{ACTION_PREFIXES.filter(Boolean).map(a => <option key={a}>{a}</option>)}
+          <option value="">全部操作类型</option>{ACTION_PREFIXES.filter(Boolean).map(a => <option key={a} value={a}>{auditText(a)}</option>)}
         </select>
         <input className="btn" style={{ width: 160 }} type="date" value={q.from} onChange={(e) => setQ({ ...q, from: e.target.value })} aria-label="审计-起" />
         <input className="btn" style={{ width: 160 }} type="date" value={q.to} onChange={(e) => setQ({ ...q, to: e.target.value })} aria-label="审计-止" />
@@ -124,21 +112,20 @@ export function AuditConsole() {
       <div className="meta">{data ? `共 ${data.total} 条 · 第 ${page + 1}/${Math.max(pages, 1)} 页` : "查询中…"}</div>
     </div>
     {err && <div className="alert warn">{err}</div>}
-    <table className="tbl"><thead><tr><th>audit_id / 时间</th><th>角色·操作者</th><th>动作</th><th>对象</th><th>状态变化</th><th>request_id</th></tr></thead>
+    <table className="tbl"><thead><tr><th>操作时间</th><th>角色·操作者</th><th>动作</th><th>对象</th><th>状态变化</th><th>追溯记录</th></tr></thead>
       <tbody>{(data?.rows || []).map(r => <tr key={String(r.audit_id)}>
-        <td><button className="btn" style={{ padding: "0 4px", fontSize: 11.5 }} onClick={async () => { try { const d = await fetch(`/api/admin/audit/${encodeURIComponent(String(r.audit_id))}`, { headers: {} , credentials:"include"}).then(x => x.json()); setDetail(d); } catch { setErr("详情读取失败"); } }}>{String(r.audit_id)}</button><div className="meta">{String(r.occurred_at || "").slice(0, 19)}</div></td>
-        <td>{String(r.actor_role)}<div className="meta">{String(r.actor_id)}</div></td>
-        <td><b>{String(r.action)}</b></td>
-        <td>{String(r.entity_type)}<div className="meta">{String(r.entity_id).slice(0, 40)}</div></td>
-        <td>{r.old_status ? `${r.old_status}→` : ""}{r.new_status ? String(r.new_status) : "—"}</td>
-        <td className="meta">{String(r.request_id || "—")}</td>
+        <td><button className="btn" style={{ padding: "0 4px", fontSize: 11.5 }} onClick={async () => { try { const d = await fetch(`/api/admin/audit/${encodeURIComponent(String(r.audit_id))}`, { headers: {} , credentials:"include"}).then(x => x.json()); setDetail(d); } catch { setErr("详情读取失败"); } }}>查看详情</button><div className="meta">{String(r.occurred_at || "").slice(0, 19)}</div></td>
+        <td>{auditText(r.actor_role)}<div className="meta">{String(r.actor_id)}</div></td>
+        <td><b>{auditText(r.action)}</b></td>
+        <td>{auditText(r.entity_type)}<div className="meta">关联业务记录</div></td>
+        <td>{r.old_status ? `${auditText(r.old_status)}→` : ""}{r.new_status ? auditText(r.new_status) : "—"}</td>
+        <td className="meta">{r.request_id?"已留档":"—"}</td>
       </tr>)}</tbody></table>
     <div style={{ display: "flex", gap: 8 }}><button className="btn" disabled={page === 0} onClick={() => { setPage(page - 1); load(page - 1); }}>上一页</button><button className="btn" disabled={page + 1 >= pages} onClick={() => { setPage(page + 1); load(page + 1); }}>下一页</button></div>
     {detail && <div className="task-card" style={{ marginTop: 6 }} key={JSON.stringify(detail).length}>
-      <div className="t">审计详情 · {String((detail.audit as AudRow)?.audit_id)}</div>
-      <pre style={{ fontSize: 11.5, whiteSpace: "pre-wrap", maxHeight: 200, overflowY: "auto" }}>{JSON.stringify({ audit: detail.audit, evidence_refs: detail.evidence_refs, detail_meta: detail.detail_meta, redaction_note: detail.redaction_note }, null, 1).slice(0, 1800)}</pre>
+      <div className="t">操作详情</div>
+      <details><summary>查看追溯信息</summary><pre style={{ fontSize: 11.5, whiteSpace: "pre-wrap", maxHeight: 200, overflowY: "auto" }}>{JSON.stringify({ audit: detail.audit, evidence_refs: detail.evidence_refs, detail_meta: detail.detail_meta, redaction_note: detail.redaction_note }, null, 1).slice(0, 1800)}</pre></details>
       <button className="btn" onClick={() => setDetail(null)}>关闭</button>
     </div>}
   </div>;
 }
-

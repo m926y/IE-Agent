@@ -1,4 +1,6 @@
-import { useState } from "react";
+import {getData} from './api';
+import {useTrainingNames,trainingStatus} from './training-ui';
+import { useEffect,useState } from "react";
 import { ApiError, retryTaskNotification } from "./api";
 import type { TaskNotificationReceipt } from "./api";
 
@@ -7,12 +9,14 @@ export function notificationText(receipt?: TaskNotificationReceipt): string {
 }
 
 export function TrainingNotificationRecovery() {
+  const names=useTrainingNames(),[tasks,setTasks]=useState<Record<string,unknown>[]>([]);
+  useEffect(()=>{let active=true;(async()=>{const all:Record<string,unknown>[]=[];for(let offset=0;;offset+=200){const r=await getData<Record<string,unknown>>('admin.trainings',{limit:200,offset});all.push(...r.rows);if(r.rows.length<200)break}return all})().then(rows=>{if(active)setTasks(rows)}).catch(()=>{});return()=>{active=false}},[]);
   const [id, setId] = useState(""), [kind, setKind] = useState<"assigned" | "submitted">("assigned"), [busy, setBusy] = useState(false), [msg, setMsg] = useState("");
   async function retry() {
     setBusy(true); setMsg("");
-    try { const r = await retryTaskNotification(id.trim(), kind); setMsg(`任务 ${r.task_id}：${notificationText(r.notification)}${r.notification.notification_id ? ` 回执 ${r.notification.notification_id}` : ""}`); }
+    try { const r = await retryTaskNotification(id.trim(), kind); setMsg(notificationText(r.notification)); }
     catch (e) { setMsg(`未完成（${e instanceof ApiError ? e.code : "network"}），请核对任务编号与车队权限。`); }
     finally { setBusy(false); }
   }
-  return <details className="panel"><summary>站内提醒故障恢复</summary><p>仅补记既有任务当前阶段的站内提醒，不重新分配或修改任务。重复重试返回同一回执。</p><label>任务编号<input aria-label="补发提醒任务编号" value={id} maxLength={80} onChange={e => setId(e.target.value)} /></label><label>提醒阶段<select aria-label="补发提醒阶段" value={kind} onChange={e => setKind(e.target.value as "assigned" | "submitted")}><option value="assigned">新分配提醒司机</option><option value="submitted">已提交提醒安全员</option></select></label><button className="btn" disabled={busy || !/^[\w:,.-]{1,80}$/.test(id.trim())} onClick={retry}>补记站内提醒</button>{msg && <div className="alert info" role="status">{msg}</div>}</details>;
+  return <details className="panel training-notification-recovery"><summary>培训通知补发</summary><p className="recovery-description">为已分配或已提交的培训补发通知，不会重复创建任务。</p><div className="recovery-form"><label>选择培训任务<select aria-label="补发通知培训任务" value={id} onChange={e=>setId(e.target.value)}><option value="">请选择任务</option>{tasks.map(t=><option key={String(t.task_id)} value={String(t.task_id)}>{names.driver(t.driver_id)} · {names.course(t.course_id)} · {trainingStatus(t.status)}</option>)}</select></label><label>提醒阶段<select aria-label="补发提醒阶段" value={kind} onChange={e => setKind(e.target.value as "assigned" | "submitted")}><option value="assigned">新分配提醒司机</option><option value="submitted">已提交提醒安全员</option></select></label><button className="btn primary" disabled={busy || !/^[\w:,.-]{1,80}$/.test(id.trim())} onClick={retry}>{busy?"正在补发…":"补发通知"}</button></div>{msg && <div className="alert info" role="status">{msg}</div>}</details>;
 }

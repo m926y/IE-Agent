@@ -1,3 +1,14 @@
+import {BrandMark} from './brand';
+import {LoginHome} from './login-home';
+import {ConversationSidebar,readConversations} from './ai-conversations';
+import {MessagingProvider} from './messaging';
+import { AiMessage } from './ai-message';
+import './ai-message.css';
+import { AgentReportCard, AgentActionCard, AgentAccountUpload } from './agent-tools';
+import {RiskMonitorProvider} from './risk-monitor';
+import type { AgentArtifact, AgentPlan } from './agent-tools';
+import { AccountProfile } from "./account";
+import { loadVehicleLabels, displayText } from "./vehicles";
 import {useEffect, useState, useRef} from "react";
 import type { FormEvent } from "react";
 import {ApiError, aiCallsStatus, aiChat, aiConfirm, aiEvidenceCheck, aiEvidenceCheckVer, aiSelftest, getMe, login, opsList, opsSet} from "./api";
@@ -10,6 +21,7 @@ import { AdminShell } from "./admin";
 import { DriverShell } from "./driver";
 
 function LoginView({ onDone }: { onDone: () => void }) {
+  const [notice] = useState(() => { const s = sessionStorage.getItem("account_notice"); sessionStorage.removeItem("account_notice"); return s; });
   const [u, setU] = useState("");
   const [p, setP] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -33,19 +45,16 @@ function LoginView({ onDone }: { onDone: () => void }) {
           : "暂时无法完成登录，请稍后重试。" });
     } finally { setBusy(false); }
   }
-  return <div className="login-wrap">
-    <div className="login-visual" aria-hidden="true"><div className="login-emblem">行</div><div className="login-name">行安</div><div className="login-system">驾驶安全管理</div><div className="login-orbit orbit-one" /><div className="login-orbit orbit-two" /><div className="login-orbit orbit-three" /></div>
-    <form className="login-card" onSubmit={submit}>
-      <div className="login-brand"><div className="logo">行</div><div><h1>行安</h1><div className="login-sub">驾驶安全管理</div></div></div>
-      <h2 className="login-heading">账号登录</h2>
+  return <LoginHome>
+    <form id="login-form" className="login-card" onSubmit={submit}>
+      <div className="login-brand"><BrandMark/><div><h1>易流智安</h1><div className="login-sub">驾驶安全管理</div></div></div>
+      <h2 className="login-heading">欢迎回来</h2><p className="lh-form-subtitle">登录易流智安，进入安全管理工作台</p>{notice && <div className="alert info">{notice}</div>}
       {msg && <div className={`alert ${msg.tone}`} role="alert">{msg.text}</div>}
       <div className="field"><label htmlFor="ln">账号</label><input id="ln" autoComplete="username" autoCapitalize="none" spellCheck={false} value={u} onChange={(e) => { setU(e.target.value); setMsg(null); }} placeholder="请输入账号" required /></div>
       <div className="field"><label htmlFor="pw">密码</label><div className="password-input"><input id="pw" type={showPassword ? "text" : "password"} autoComplete="current-password" value={p} onChange={(e) => { setP(e.target.value); setMsg(null); }} placeholder="请输入密码" required /><button type="button" className="password-toggle" aria-label={showPassword ? "隐藏密码" : "显示密码"} aria-pressed={showPassword} onClick={() => setShowPassword(v => !v)}><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" />{showPassword && <path d="M3 3l18 18" />}</svg></button></div></div>
       <button className="btn primary login-submit" disabled={busy || !u.trim() || !p}>{busy ? "登录中…" : "登录"}<span aria-hidden="true">→</span></button>
-      <p className="login-note">身份与角色由服务端按会话校验；登录后按角色进入：安全管理员 → 工作台，司机 → 窄屏端。</p>
-      <p className="login-note">算法边界：40天预测、近14天评分、六维扣分、可信度与事件证据为只读事实，页面与 AI 只引用解释，不重算修改。</p>
     </form>
-  </div>;
+  </LoginHome>;
 }
 
 function SsoUnboundView({ name, provider, onUseAppAccount }: { name: string; provider: string; onUseAppAccount: () => void }) {
@@ -57,15 +66,28 @@ function SsoUnboundView({ name, provider, onUseAppAccount }: { name: string; pro
   </div></div>;
 }
 
+function openEvidenceRoute(route:string){if(route.startsWith('driver:'))window.dispatchEvent(new CustomEvent('claw:driver-nav',{detail:route.slice(7)}));else location.hash=route.replace(/^#/, '');}
+
 function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; who: { role: string; userId: string }; preset?: string | null; onPresetUsed?: () => void }) {
-  type Msg = { role: "user" | "assistant"; content: string; citations?: string[]; limitations?: string[]; drafts?: Record<string, unknown>[] | null; err?: string; cards?: EvidenceCard[]; callId?: string | null; restored?: boolean; longTerm?: boolean; replayed?: boolean };
+  type Msg = { artifacts?:AgentArtifact[]; actionPlans?:AgentPlan[]; role: "user" | "assistant"; content: string; citations?: string[]; limitations?: string[]; drafts?: Record<string, unknown>[] | null; err?: string; cards?: EvidenceCard[]; callId?: string | null; restored?: boolean; longTerm?: boolean; replayed?: boolean };
+  const [historyOpen,setHistoryOpen]=useState(false);
+  const [driverGreeting]=useState(()=>[
+    '开车辛苦了，有什么想问的？',
+    '一路辛苦了，有什么我能帮忙的？',
+    '歇一会儿吧，有问题随时问我。',
+    '辛苦了，今天有什么想了解的？',
+    '休息一下，有什么想聊的吗？'
+  ][Math.floor(Math.random()*5)]);
   const storeKey = "claw_ai_msgs_" + who.userId;
+  const chatScrollRef=useRef<HTMLDivElement>(null);
   const [msgs, setMsgs] = useState<Msg[]>(() => {
     try {
       const owner = sessionStorage.getItem("claw_ai_owner");
       if (owner && owner !== who.userId) { sessionStorage.removeItem("claw_ai_owner"); sessionStorage.removeItem("claw_ai_msgs_" + owner); sessionStorage.removeItem("claw_fill"); }
       sessionStorage.setItem("claw_ai_owner", who.userId);
-      const raw = sessionStorage.getItem(storeKey);
+      const history=readConversations(who.userId);
+      const historical=history.items.find(t=>t.id===history.active);
+      const raw = historical?JSON.stringify(historical.messages):sessionStorage.getItem(storeKey);
       const arr: Msg[] = raw ? JSON.parse(raw) : [];
       let lg: Msg[] = [];
       try { const lr = localStorage.getItem("claw_ai_long_" + who.userId); if (lr) { const d = JSON.parse(lr); if (Number(d.exp) < Date.now()) localStorage.removeItem("claw_ai_long_" + who.userId); else lg = (d.items || []).map((x: { r: string; x: string }): Msg => ({ role: x.r === "assistant" ? "assistant" : "user", content: String(x.x), longTerm: true, restored: true })); } } catch {}
@@ -73,7 +95,7 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
       return arr.length ? base : base.concat(lg);
     } catch { return []; }
   });
-  useEffect(() => { try { sessionStorage.setItem(storeKey, JSON.stringify(msgs.slice(-24))); } catch {} }, [msgs, storeKey]);
+  useEffect(() => { try { sessionStorage.setItem(storeKey, JSON.stringify(msgs.slice(-24))); } catch {} if(chatScrollRef.current)chatScrollRef.current.scrollTop=chatScrollRef.current.scrollHeight; }, [msgs, storeKey]);
   const sendRef = useRef<(p?: string) => void>(() => undefined);
   sendRef.current = (text?: string) => { void send(text); };
   useEffect(() => { if (preset) { const t = setTimeout(() => { sendRef.current(preset); onPresetUsed && onPresetUsed(); }, 60); return () => clearTimeout(t); } }, [preset]);
@@ -104,9 +126,9 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
     // 幂等键（agent1 client_request_id 语义）：网络重试/双击由服务端回放同一结果
     const crid = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : "r" + Date.now() + Math.random().toString(36).slice(2, 10);
     try {
-      const r = await aiChat(next.map((m) => ({ role: m.role, content: m.content })), page, crid);
+      const r = await aiChat(next.map((m) => ({ role: m.role, content: m.content })), page, crid,page.startsWith('rm-live')?sessionStorage.getItem('claw_current_case')||undefined:undefined);
       if (r.meta?.model) setLastModel(String(r.meta.model));
-      setMsgs(next.concat({ role: "assistant", content: r.answer, citations: r.citations, limitations: r.data_limitations, drafts: r.draft_preview, cards: (r as { evidence_cards?: EvidenceCard[] }).evidence_cards || [], callId: (r as { ai_call_id?: string | null }).ai_call_id || null, replayed: r.idempotent_replay === true }));
+      setMsgs(next.concat({ role: "assistant", content: r.answer, artifacts:r.artifacts, actionPlans:r.action_plans, citations: r.citations, limitations: r.data_limitations, drafts: r.draft_preview, cards: (r as { evidence_cards?: EvidenceCard[] }).evidence_cards || [], callId: (r as { ai_call_id?: string | null }).ai_call_id || null, replayed: r.idempotent_replay === true }));
       { const ids = msgs.filter((m) => m.callId).map((m) => m.callId as string).concat([(r as { ai_call_id?: string | null }).ai_call_id || ""].filter(Boolean)); if (ids.length) aiCallsStatus(ids).then((x) => setConfirms((c0) => ({ ...c0, ...x.confirms }))).catch(() => {}); }
     } catch (e) {
       const code = e instanceof ApiError ? e.code : "network_error";
@@ -116,38 +138,51 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
   }
   const suggestions = who.role === "driver"
     ? ["我的评分怎么构成？", "我能问别人分数吗", "待审核课程算正式制度吗", "如何提交复核申请"]
-    : ["今天先处理谁？", "说明 DEMO_D0149 三路信号", "三种管理路径预演（95302616）", "给 alert-1e7ec09935dd735b 起草干预消息"];
-  return <div className="ai-panel" role="complementary" style={{ width: 380, padding: 0 }}>
+    : ["生成最近有数据的一周车队周报，输出HTML和Markdown文件", "分析车队评分分布及重点关注车辆", "查看课程，准备给D级车辆创建培训任务"];
+  return <div className={"ai-panel ai-with-history"+(who.role==="driver"?" mobile-ai "+(historyOpen?"history-open":""):"")} role="complementary" style={{ width: 380, padding: 0 }}>
+    {who.role==="driver"&&<div className="mobile-ai-toolbar"><button aria-label="历史会话" onClick={()=>setHistoryOpen(true)}>☰</button><strong>新会话</strong><button aria-label="新建会话" disabled={busy} onClick={()=>window.dispatchEvent(new Event("claw:driver-new-chat"))}>＋</button></div>}
     <div style={{ padding: "10px 14px", background: "var(--navy)", color: "#fff", borderRadius: "12px 12px 0 0" }}>
       <button className="ai-close" onClick={onClose} style={{ color: "#cdd9ef" }} aria-label="关闭">✕</button>
       <b style={{ fontSize: 14 }}>AI 助手</b>
-      <div className="ai-subtitle">{lastModel ? "模型 " + lastModel : "运行时模型"} · 技能路由 · 指令版本 {st?.prompt_version || probe?.match(/ver ([a-f0-9]{12})/)?.[1] || "加载中…"} · 写入须人工确认</div>
+      <details className="ai-tools-menu"><summary>更多</summary><div>    {["safety_admin","safety_officer"].includes(who.role) && <details className="ai-advanced"><summary>会话设置</summary><div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+      <label className="meta" style={{ display: "flex", gap: 4, alignItems: "center" }}><input type="checkbox" checked={Boolean(longOn)} aria-label="长期会话摘要开关" onChange={(e) => { const v = e.target.checked; setLongOn(v); if (!v) { try { localStorage.removeItem(longKey); } catch {} setLongBanner("已关闭并清除本设备长期摘要"); } opsSet("ai_long_session", v ? "on" : "off").then((r) => setLongBanner(`长期摘要开关=${v ? "on" : "off"}（config v${r.new_version}，审计 ${r.audit_id}）`)).catch(() => setLongBanner("开关写入失败（需 manage.operation_config 能力）")); }} />重登后保留脱敏摘要（默认关；2h 过期；不含令牌/明文个人数据/业务状态）</label>
+      <button className="btn" style={{ padding: "2px 8px" }} onClick={() => { try { localStorage.removeItem(longKey); } catch {} setLongBanner("已一键清除本设备长期摘要"); }}>一键清除</button>
+    </div>{longBanner && <p className="meta">{longBanner}</p>}</details>}
+    {["safety_admin","safety_officer"].includes(who.role) && <details className="ai-advanced"><summary>Excel账号导入</summary><AgentAccountUpload disabled={busy} onPlan={p=>setMsgs(m=>m.concat({role:"assistant",content:`已上传并校验账号表，批次 ${p.id}，共 ${p.count} 个账号；尚未创建。可以在下方确认，或让我检查这个批次。`,actionPlans:[p]}))}/></details>}
+</div></details>
+      
     </div>
-    <div style={{ maxHeight: "52vh", overflow: "auto", padding: "10px 12px" }}>
-      {msgs.length === 0 && <div className="ai-empty"><span aria-hidden="true">✳</span><p>回答结构：结论→数字与证据→限制→下一步；草稿仅预演，不自动写。</p></div>}
+    {who.role==="driver"&&historyOpen&&<button className="mobile-history-backdrop" aria-label="关闭历史会话" onClick={()=>setHistoryOpen(false)}/>}
+    <ConversationSidebar mobile={who.role==="driver"} onDismiss={()=>setHistoryOpen(false)} user={who.userId} messages={msgs} busy={busy} onSelect={items=>{setMsgs(items);setInput('');setCheckMsg(null);setBizDraft({});setConfirms({})}}/>
+    <div className="ai-main">
+    <div className="ai-chat-body" ref={chatScrollRef} style={{ overflow: "auto", padding: "10px 12px" }}>
+
+      {who.role==="driver"&&msgs.length===0&&<div className="mobile-chat-welcome"><img className="mobile-chat-logo" src="/brand/yiliu-mark.svg" alt="易流智安"/><h2>{driverGreeting}</h2></div>}
       {msgs.map((m, i) => m.role === "user"
-        ? <div key={i} className="task-card" style={{ background: "var(--info-bg)" }}>{m.restored ? <div style={{ fontSize: 11, color: "var(--ink-3)", marginBottom: 2 }}>— 上一上下文的历史快照（以下数字未重新计算；追问将实时重查并重新验权）</div> : null}<div className="t">{m.content}</div></div>
+        ? <div key={i} className="task-card" style={{ background: "var(--info-bg)" }}><div className="t">{displayText(m.content).startsWith("AI04 三种管理路径并排预演") ? "分析当前车辆的处置方案" : displayText(m.content)}</div></div>
         : m.err
           ? <div key={i} className="alert warn" style={{ fontSize: 12.5 }}>{m.err === "ai_provider_not_configured" ? "AI 通道未配置（属主 Page env）：运行时模型尚未接通——本界面不是静态聊天模拟，拒绝假回答。人工流程不受影响。" : m.err === "ai_upstream_error" ? "模型上游暂时不可用；工具与人工流程不受影响（可稍后重试）。" : m.err === "ai_request_version_conflict" ? "该问题已有返回结果（幂等保护）；请修改问题后重试。" : m.err === "unauthenticated" ? "登录已过期：请刷新页面重新登录。" : m.err === "ai_policy_blocked" ? "模型端点策略不允许（必须是外部 HTTPS 地址）；请属主检查 Page env。" : `请求失败：${m.err}`}</div>
           : <div key={i} className="task-card">
               {m.longTerm ? <div style={{ fontSize: 11, color: "#ad6800", marginBottom: 2 }}>⌛ 长期摘要（本设备暂存·已截断，非业务状态；重登恢复）</div> : null}
-              {m.restored && !m.longTerm ? <div style={{ fontSize: 11, color: "var(--ink-3)", marginBottom: 2 }}>— 上一上下文的历史快照（数字未重新计算；追问将实时重查并重新验权）</div> : null}
-              <div style={{ whiteSpace: "pre-wrap", fontSize: 13 }}>{m.content}</div>
+              
+              <AiMessage content={displayText(m.content)} />
+              {m.artifacts?.map(a=><AgentReportCard key={a.id} artifact={a}/>)}
+              {m.actionPlans?.map(p=><AgentActionCard key={p.id} initial={p}/>)}
               {m.cards && m.cards.length > 0 && <div style={{ marginTop: 6 }}>
                 <div style={{ fontSize: 12, color: "var(--ink-2)", marginBottom: 4 }}>证据卡（数字仅来自受控工具真实返回；点击按当前会话重新验权；空值显示“—”不出 0）：</div>
                 <div style={{ display: "grid", gap: 6 }}>
                 {m.cards.map((cd) => <div key={cd.ref} className="task-card" style={{ padding: 8 }}>
-                  <div className="t" style={{ fontSize: 12.5 }}>{cd.field} = <b style={{ color: cd.confidence === "low" ? "var(--warn)" : "var(--ink)" }}>{cd.value === null ? "—" : String(cd.value)}</b>{cd.confidence ? <> <Tag tone={cd.confidence === "low" ? "amber" : "green"}>可信度 {cd.confidence}</Tag></> : null}</div>
+                  <div className="t" style={{ fontSize: 12.5 }}>{cd.field} = <b style={{ color: cd.confidence === "low" ? "var(--warn)" : "var(--ink)" }}>{cd.value === null ? "—" : displayText(cd.value)}</b>{cd.confidence ? <> <Tag tone={cd.confidence === "low" ? "amber" : "green"}>可信度 {cd.confidence}</Tag></> : null}</div>
                   <div className="meta" style={{ fontSize: 11 }}>来源表 {cd.table} · record_id <span className="mono">{cd.ref.slice(cd.ref.indexOf(":") + 1)}</span>{cd.window ? ` · ${cd.window}` : ""}{cd.as_of_date ? ` · 截止 ${cd.as_of_date}` : ""}{cd.source_version ? ` · ${String(cd.source_version).slice(0, 22)}` : ""}</div>
                   {cd.limitations ? <div className="meta" style={{ color: "var(--warn)" }}>⚠ {cd.limitations}</div> : null}
                   <button className="btn" style={{ padding: "3px 10px", fontSize: 12, marginTop: 4 }} onClick={() => { setCheckMsg(null);
                     const go = cd.verification_id
                       ? aiEvidenceCheckVer(cd.verification_id).then((r2) => {
-                          if ("ok" in r2 && r2.ok) { if (r2.route) { location.hash = r2.route.replace(/^#/, ""); setCheckMsg("回执重验通过（按当前会话重新授权），已跳转：" + r2.route); } else setCheckMsg("回执重验通过：记录在你授权范围内（该来源无独立详情页）。"); }
+                          if ("ok" in r2 && r2.ok) { if (r2.route) { openEvidenceRoute(r2.route); setCheckMsg("回执重验通过，已请求打开对应记录。"); } else setCheckMsg("回执重验通过：记录在你授权范围内（该来源无独立详情页）。"); }
                           else setCheckMsg(`验权未通过/回执已过期（5 分钟）：${("hint" in r2 && r2.hint) || "请重新向 AI 查询"}`);
                         })
                       : aiEvidenceCheck(cd.ref).then((r2) => {
-                          if (r2.ok) { if (r2.route) { location.hash = r2.route; setCheckMsg(`重新验权通过，已跳转：${r2.route}`); } else setCheckMsg("服务端已按当前会话重新验权：记录在你授权范围内（该来源无独立详情页）。"); } else setCheckMsg(`验权未通过/记录失效：${r2.hint || "请重新向AI查询"}`);
+                          if (r2.ok) { if (r2.route) { openEvidenceRoute(r2.route); setCheckMsg("重新验权通过，已请求打开对应记录。"); } else setCheckMsg("服务端已按当前会话重新验权：记录在你授权范围内（该来源无独立详情页）。"); } else setCheckMsg(`验权未通过/记录失效：${r2.hint || "请重新向AI查询"}`);
                         });
                     go.catch(() => setCheckMsg("校验未完成：请重试")); }}>打开 / 重新验权</button>
                   {m.callId && m.drafts && m.drafts.length > 0 && null}
@@ -155,38 +190,34 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
                 </div>
               </div>}
               {m.citations && m.citations.length > 0 && <details style={{ marginTop: 6 }}><summary style={{ fontSize: 12, cursor: "pointer" }}>原始引用（{m.citations.length}）</summary>
-                {m.citations.map((c) => <div key={c} className="mono" style={{ fontSize: 11 }}>{c}</div>)}
+                {m.citations.map((c) => <div key={c} className="mono" style={{ fontSize: 11 }}>{displayText(c)}</div>)}
               </details>}
-              {m.limitations && m.limitations.length > 0 && <div style={{ fontSize: 11.5, color: "var(--warn)", marginTop: 4 }}>限制：{m.limitations.join("；")}</div>}
+              {m.limitations && m.limitations.length > 0 && <details style={{ fontSize:11.5,marginTop:6 }}><summary style={{cursor:"pointer",color:"var(--ink-3)"}}>数据口径与限制</summary><div style={{color:"var(--warn)"}}>{m.limitations.join("；")}</div></details>}
               {m.drafts && m.drafts.length > 0 && <div style={{ marginTop: 6 }}>
                 {m.drafts.map((d, k) => <div key={k} style={{ border: 0 }}>{d.kind === "intervention"
-                  ? <div className="task-card"><div className="t">干预草稿（requires_confirmation=true）</div><div className="meta">{String((d as { draft_text?: string }).draft_text || "").slice(0, 210)}…</div><div className="meta">AI 未写库；发送前在 RM03 编辑并独立确认</div>{(d as { fill_to?: Record<string, unknown> }).fill_to ? <button className="btn" style={{ padding: "3px 10px" }} onClick={() => doFill((d as { fill_to: Record<string, unknown> }).fill_to)}>编辑干预草稿 →</button> : null}</div>
+                  ? <div className="task-card"><div className="t">干预草稿</div><div className="meta">{displayText((d as { draft_text?: string }).draft_text || "").slice(0, 210)}…</div><div className="meta">AI 未写库；发送前在 RM03 编辑并独立确认</div>{(d as { fill_to?: Record<string, unknown> }).fill_to ? <button className="btn" style={{ padding: "3px 10px" }} onClick={() => doFill((d as { fill_to: Record<string, unknown> }).fill_to)}>编辑干预草稿 →</button> : null}</div>
                   : d.kind === "training"
-                    ? <div className="task-card"><div className="t">培训草稿（requires_confirmation=true）{(d as { fill_to?: Record<string, unknown> }).fill_to ? <button className="btn" style={{ padding: "3px 10px" }} onClick={() => doFill((d as { fill_to: Record<string, unknown> }).fill_to)}>编辑培训方案 →</button> : null}</div><div className="meta">{String((d as { goal?: string }).goal || "")}</div><div className="meta">仅 approved 课程可分配；TR02 页面确认；未审核课程由服务端 409 拒绝</div></div>
+                    ? <div className="task-card"><div className="t">培训计划草稿{(d as { fill_to?: Record<string, unknown> }).fill_to ? <button className="btn" style={{ padding: "3px 10px" }} onClick={() => doFill((d as { fill_to: Record<string, unknown> }).fill_to)}>编辑培训方案 →</button> : null}</div><div className="meta">{String((d as { goal?: string }).goal || "")}</div><div className="meta">仅 approved 课程可分配；TR02 页面确认；未审核课程由服务端 409 拒绝</div></div>
                     : <div className="task-card"><div className="t">管理动作建议（预演，未写入）</div><div className="meta">{JSON.stringify((d as { paths?: unknown[] }).paths || (d as { draft_action?: unknown[] }) || []).slice(0, 240)}</div>{(d as { fill_to?: Record<string, unknown> }).fill_to ? <button className="btn" style={{ padding: "3px 10px" }} onClick={() => doFill((d as { fill_to: Record<string, unknown> }).fill_to)}>填入表单 →</button> : null}</div>}
                 </div>)}
               </div>}
             </div>)}
     </div>
-    {who.role === "safety_admin" && <div style={{ display: "flex", gap: 6, margin: "2px 12px 6px", alignItems: "center", flexWrap: "wrap" }}>
-      <label className="meta" style={{ display: "flex", gap: 4, alignItems: "center" }}><input type="checkbox" checked={Boolean(longOn)} aria-label="长期会话摘要开关" onChange={(e) => { const v = e.target.checked; setLongOn(v); if (!v) { try { localStorage.removeItem(longKey); } catch {} setLongBanner("已关闭并清除本设备长期摘要"); } opsSet("ai_long_session", v ? "on" : "off").then((r) => setLongBanner(`长期摘要开关=${v ? "on" : "off"}（config v${r.new_version}，审计 ${r.audit_id}）`)).catch(() => setLongBanner("开关写入失败（需 manage.operation_config 能力）")); }} />重登后保留脱敏摘要（默认关；2h 过期；不含令牌/明文个人数据/业务状态）</label>
-      <button className="btn" style={{ padding: "2px 8px" }} onClick={() => { try { localStorage.removeItem(longKey); } catch {} setLongBanner("已一键清除本设备长期摘要"); }}>一键清除</button>
-    </div>}
-    {longBanner && <div className="alert info" style={{ margin: "0 12px 6px", fontSize: 12, color: "#57230f", background: "#fff7e6", border: "1px solid #ffd591", borderRadius: 8, padding: "6px 10px" }}>{longBanner}</div>}
     {probe && <div className="alert info" style={{ fontSize: 12 }}>{probe}</div>}
     {checkMsg && <div className="alert info" style={{ margin: "0 12px 6px" }}>{checkMsg}</div>}
-    <div style={{ padding: "8px 12px", display: "flex", gap: 6 }}>
-      <input style={{ flex: 1, minWidth: 0, padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 8 }} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") send(); }} placeholder={busy ? "运行中…" : "问业务问题（越权会被工具层拒绝）"} aria-label="AI 提问" />
-      <button className="btn primary" style={{ width: "auto" }} onClick={() => send()} disabled={busy || !input.trim()}>发送</button>
-    </div>
-    <div className="row" style={{ padding: "0 12px 10px" }}>
-      {suggestions.map((s) => <button key={s} className="btn" style={{ padding: "4px 8px", fontSize: 12 }} onClick={() => send(s)}>{s}</button>)}
-      {who.role === "safety_admin" && <button className="btn" style={{ padding: "4px 8px", fontSize: 12 }} onClick={() => { aiSelftest().then((r) => { setSt(r); setProbe(`工具自检 ${r.tools.length} 项 · 写入=${r.writes==="zero_confirmed"?"零":"异常"} · ${r.provider} · ver ${r.prompt_version}`);
+    <div className="row ai-shortcuts" style={{ padding: "0 12px 10px" }}>
+      {suggestions.map((s,index) => <button key={s} className="btn" style={{ padding: "4px 8px", fontSize: 12 }} onClick={() => send(s)}>{who.role === "driver"?s:["生成周报","数据分析","创建培训"][index]}</button>)}
+      {["safety_admin","safety_officer"].includes(who.role) && <button className="btn" style={{ padding: "4px 8px", fontSize: 12 }} onClick={() => { aiSelftest().then((r) => { setSt(r); setProbe(`工具自检 ${r.tools.length} 项 · 写入=${r.writes==="zero_confirmed"?"零":"异常"} · ${r.provider} · ver ${r.prompt_version}`);
  const pre: Record<string, unknown>[] = [];
  const pi = (r as { preplan?: Record<string, Record<string, unknown>> }).preplan;
  if (pi?.intervention?.fill_to) pre.push({ kind: "intervention", ...(pi.intervention as Record<string, unknown>) });
  if (pi?.training?.fill_to) pre.push({ kind: "training", ...(pi.training as Record<string, unknown>) });
- setMsgs((m) => m.concat({ role: "assistant" as const, content: `【工具链自检（真实执行，非模型对话）】\n` + r.tools.map((x) => `${x.tool}:${x.status}${x.requires_confirmation ? "(需确认草稿)" : ""}`).join("\n") + `\n业务表计数前后一致=${r.writes}`, drafts: pre.length ? pre : null })); }).catch((e) => setProbe("自检失败 " + (e instanceof ApiError ? e.code : "?"))); }}>运行工具链自检</button>}
+ setMsgs((m) => m.concat({ role: "assistant" as const, content: `【工具链自检（真实执行，非模型对话）】\n` + r.tools.map((x) => `${x.tool}:${x.status}${x.requires_confirmation ? "(需确认草稿)" : ""}`).join("\n") + `\n业务表计数前后一致=${r.writes}`, drafts: pre.length ? pre : null })); }).catch((e) => setProbe("自检失败 " + (e instanceof ApiError ? e.code : "?"))); }}>检查工具</button>}
+    </div>
+    <div className="ai-composer" style={{ padding: "8px 12px", display: "flex", gap: 6 }}>
+      <input style={{ flex: 1, minWidth: 0, padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 8 }} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") send(); }} placeholder={busy ? "正在回复…" : "发送消息"} aria-label="AI 提问" />
+      <button className="btn primary" style={{ width: "auto" }} onClick={() => send()} disabled={busy || !input.trim()}>发送</button>
+    </div>
     </div>
   </div>;
 }
@@ -196,27 +227,25 @@ export function App() {
   const [unbound, setUnbound] = useState<{ name: string; provider: string } | null>(null);
   const [forceLogin, setForceLogin] = useState(false);
   const [ai, setAi] = useState(false);
+  const [scoreVersion,setScoreVersion] = useState("initial");
   const [aiPreset, setAiPreset] = useState<string | null>(null);
-  useEffect(() => {
-    const lost = () => { setMe(null); setUnbound(null); setAi(false); };
-    window.addEventListener("claw:auth-lost", lost);
-    return () => window.removeEventListener("claw:auth-lost", lost);
-  }, []);
-  useEffect(() => { const h = (ev: Event) => { const d = (ev as CustomEvent<{ prompt?: string }>).detail; if (d && d.prompt) { setAiPreset(String(d.prompt).slice(0, 400)); setAi(true); } }; window.addEventListener("claw:ai-preset", h); return () => window.removeEventListener("claw:ai-preset", h); }, []);
-  const reload = () => getMe().then((r) => {
+  useEffect(() => { const h = (ev: Event) => { const d = (ev as CustomEvent<{ prompt?: string }>).detail; if (d && d.prompt) { setAiPreset(String(d.prompt).slice(0, 400)); setAi(true); window.dispatchEvent(new CustomEvent("claw:driver-nav",{detail:"ai"})); } }; window.addEventListener("claw:ai-preset", h); return () => window.removeEventListener("claw:ai-preset", h); }, []);
+  const reload = () => getMe().then(async (r) => {
     if (!r) { setMe(null); return; }
-    if (r.user) { setMe(r.user); setUnbound(null); setAi(false); }
+    if (r.user) { if (!r.user.mustChangePassword) await loadVehicleLabels().catch(() => {}); setMe(r.user); setUnbound(null); setAi(false); }
     else if (r.unbound) { setMe(null); setUnbound({ name: r.unbound.name, provider: r.unbound.provider }); }
     else setMe(null);
   }).catch(() => setMe(null));
-  useEffect(() => { reload(); }, []);
+  useEffect(() => { reload(); const h = () => { void reload(); }; window.addEventListener("claw:account-updated", h); return () => window.removeEventListener("claw:account-updated", h); }, []);
+  useEffect(() => { if (!me || me.role !== "driver") return; const refresh = () => { getMe().then(async r => { if (r?.user && (r.user.driverId !== me.driverId || r.user.bindingVerified !== me.bindingVerified)) { await loadVehicleLabels().catch(() => {}); sessionStorage.removeItem("claw_ai_msgs_" + me.userId); sessionStorage.removeItem("claw_ai_threads_" + me.userId); setAi(false); setMe(r.user); } }).catch(() => {}); }; const timer = setInterval(refresh, 15000); window.addEventListener("focus", refresh); return () => { clearInterval(timer); window.removeEventListener("focus", refresh); }; }, [me?.userId, me?.driverId, me?.bindingVerified]);
+  useEffect(() => { if (!me) return; let alive=true, previous:string|null=null; const sync=async()=>{ try { const response=await fetch("/api/score-version",{credentials:"same-origin"}); if(!response.ok)return; const result=await response.json(); if(!alive)return; if(previous!==null&&result.version!==previous){sessionStorage.removeItem("claw_ai_msgs_"+me.userId);setAi(false);setScoreVersion(result.version);} previous=result.version; }catch{} }; void sync(); const timer=setInterval(sync,15000); window.addEventListener("claw:scores-updated",sync); window.addEventListener("focus",sync); return()=>{alive=false;clearInterval(timer);window.removeEventListener("claw:scores-updated",sync);window.removeEventListener("focus",sync);}; },[me?.userId]);
   if (me === undefined) return <div className="login-wrap"><div className="skeleton" style={{ width: 240 }} /></div>;
   if (unbound && !forceLogin) return <SsoUnboundView {...unbound} onUseAppAccount={() => setForceLogin(true)} />;
   if (!me) return <LoginView onDone={reload} />;
-  return <div className={`app-workspace ${me.role === "driver" ? "driver-workspace" : "admin-workspace"} ${ai ? "ai-open" : ""}`}>
-    {me.role === "driver" ? <DriverShell user={me} /> : <AdminShell user={me} aiOpen={ai} onAiToggle={() => setAi(v => !v)} />}
-    {me.role === "driver" && !me.localSourceOnly && <button className="ai-fab" onClick={() => setAi((v) => !v)} title="AI 助手">AI</button>}
-    {ai && !me.localSourceOnly && <AiPanel onClose={() => setAi(false)} who={{ role: me!.role, userId: me!.userId }} preset={aiPreset} onPresetUsed={() => setAiPreset(null)} />}
-  </div>;
+  if (me.mustChangePassword) return <div className="first-login"><AccountProfile user={me} required /></div>;
+  return <RiskMonitorProvider key={me.userId+':'+me.driverId} user={me}><MessagingProvider user={me}><div className={`app-workspace ${me.role === "driver" ? "driver-workspace" : "admin-workspace"} ${ai ? "ai-open" : ""}`}>
+    {me.role === "driver" ? <DriverShell key={`${me.userId}:${me.driverId}:${me.bindingVerified}:${scoreVersion}`} user={me} aiContent={<AiPanel onClose={()=>window.dispatchEvent(new CustomEvent("claw:driver-nav",{detail:"safety"}))} who={{role:me.role,userId:me.userId}} preset={aiPreset} onPresetUsed={()=>setAiPreset(null)}/>} /> : <AdminShell key={`${me.userId}:${scoreVersion}`} user={me} aiOpen={ai} onAiToggle={() => setAi(v => !v)} />}
+    
+    {ai && me.role!=="driver" && <AiPanel onClose={() => setAi(false)} who={{ role: me!.role, userId: me!.userId }} preset={aiPreset} onPresetUsed={() => setAiPreset(null)} />}
+  </div></MessagingProvider></RiskMonitorProvider>;
 }
-

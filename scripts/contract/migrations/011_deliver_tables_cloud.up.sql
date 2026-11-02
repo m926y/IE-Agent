@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS offline_trainings (id text PRIMARY KEY, title text NOT NULL, content text NOT NULL, room text NOT NULL, start_at text NOT NULL, end_at text NOT NULL, status text NOT NULL DEFAULT 'scheduled', owner text NOT NULL, request_key text NOT NULL, request_hash text NOT NULL, created_at text NOT NULL, cancelled_at text, UNIQUE(owner,request_key));
+CREATE TABLE IF NOT EXISTS offline_training_attendees (booking_id text NOT NULL, user_id text NOT NULL, driver_id text, PRIMARY KEY(booking_id,user_id));
+CREATE TABLE IF NOT EXISTS handover_settings (user_id text PRIMARY KEY, enabled boolean NOT NULL DEFAULT true, end_time text NOT NULL DEFAULT '18:00', recipient_id text, ai_enabled boolean NOT NULL DEFAULT true, next_date text);
+CREATE TABLE IF NOT EXISTS handover_reports (id text PRIMARY KEY, owner_id text NOT NULL, scope text NOT NULL, report_date text NOT NULL, cutoff_at text NOT NULL, captured_at text NOT NULL, trigger_kind text NOT NULL DEFAULT 'manual', snapshot text NOT NULL, summary text, ai_status text NOT NULL DEFAULT 'pending', ai_error text, ai_attempts integer NOT NULL DEFAULT 0, ai_retry_at text, recipient_id text, status text NOT NULL DEFAULT 'open', UNIQUE(owner_id,report_date));
+CREATE TABLE IF NOT EXISTS handover_notes (id text PRIMARY KEY, report_id text NOT NULL, author_id text NOT NULL, content text NOT NULL, created_at text NOT NULL);
+CREATE TABLE IF NOT EXISTS handover_note_deletions (note_id text PRIMARY KEY, actor_id text, deleted_at text);
+-- R48：线下培训/班次交接云端表（=本地模块 DDL 的 PG 等价：boolean/text/identity bigint）
+-- 2026-11-02 经控制 API database/migrate 执行成功（与属主迁移编号对齐：008/009 由交付版定义，本文件为 011）。

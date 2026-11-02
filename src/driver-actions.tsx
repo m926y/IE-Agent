@@ -1,3 +1,5 @@
+import {DriverTodos} from './driver-notifications';
+import {driverText} from './driver-shared';
 import { useEffect, useRef, useState } from "react";
 import { ApiError, driverActionCenter, driverInterventionView, driverScoreComparison, interventionRead, interventionReply, rrView, taskView } from "./api";
 import type { DriverActionCenter, DriverInterventionView, DriverScoreComparison, DriverSourceRef, RRView, TaskView } from "./api";
@@ -26,34 +28,25 @@ export function DriverActions({ navigate }: { navigate: (target: DriverDestinati
   const refresh = () => { setCursor(undefined); setVersion(v => v + 1); };
   const open = (ref: DriverSourceRef) => navigation.request(() => setSelected(ref));
   return <section className="panel stack" aria-label="本人行动摘要">
-    <h3>我接下来做什么</h3>
-    <button className="btn" disabled={busy} onClick={refresh}>刷新行动摘要</button>
-    {error ? <><DriverReadError error={error} retry={refresh} />{error instanceof ApiError && error.code === "action_center_changed" && <p>处理进度已变化，请刷新摘要，从第一页重新核对。</p>}</> : !data ? <EmptyState kind="loading" /> : <>
-      <p className="meta">本人评分截止 {data.as_of_date || "未取得"} · 来源 {data.source_version || "未取得"}</p>
-      <p>{data.next_step.note}</p>
-      <div className="row">
-        <button className="btn" onClick={() => navigate("training")}>待完成培训 {data.counts.training_pending}</button>
-        <button className="btn" onClick={() => navigate("training")}>培训待复核 {data.counts.training_awaiting_review} · 需跟进 {data.counts.training_follow_up}</button>
-        <button className="btn" onClick={() => navigate("risk")}>待回复沟通 {data.counts.messages_awaiting_reply}</button>
-        <button className="btn" onClick={() => navigate("review")}>复核处理中 {data.counts.review_open} · 已答复 {data.counts.review_answered}</button>
-      </div>
-      <details open={timelineOpen} onToggle={e => setTimelineOpen(e.currentTarget.open)}>
-        <summary>查看本人业务时间线</summary>
-        <p className="meta">{data.limitations}</p>
+    <h3>待办任务</h3><DriverTodos/>
+    {error ? <DriverReadError error={error} retry={refresh} /> : !data ? null : <>
+      <details className={timelineOpen?"driver-record-page":"driver-record-entry"} open={timelineOpen} onToggle={e => setTimelineOpen(e.currentTarget.open)}>
+        <summary>{timelineOpen?"←":"查看本人业务时间线"}</summary>{timelineOpen&&<h2>业务时间线</h2>}
+        
         {data.timeline.length === 0 && <p>暂无可展示的已保存节点，无记录不等于零风险。</p>}
         {data.timeline.map(node => <article className="task-card" key={node.event_id}>
           <b>{eventNames[node.event_type] || node.event_type}</b>
           <p className="meta">{node.date_precision === "day" ? "日期 " + new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date(node.event_at)) : "记录时间 " + new Date(node.event_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })} · 当前状态 {statusNames[node.status] || node.status}</p>
-          <p className="meta">来源记录 {node.source_id} · 版本 {node.source_version || "未记录，不能推定"}</p>
-          {node.source_kind === "training_task" && node.related.length === 0 && <p className="meta">独立培训，未取得本人告警关联；不按时间接近猜测关联。</p>}
-          <button className="btn" aria-label={`打开记录 ${node.source_id} ${node.event_type}`} onClick={() => open(node)}>打开本人记录与下一步</button>
-          {node.related.map(ref => <button className="btn" key={`${ref.source_kind}:${ref.source_id}`} onClick={() => open(ref)}>打开关联依据 {ref.source_id}</button>)}
+          
+
+          <button className="btn" aria-label={`打开记录 ${node.source_id} ${node.event_type}`} onClick={() => open(node)}>查看详情</button>
+          {node.related.map(ref => <button className="btn" key={`${ref.source_kind}:${ref.source_id}`} onClick={() => open(ref)}>相关记录</button>)}
         </article>)}
         <div className="row"><button className="btn" disabled={busy || !cursor} onClick={() => setCursor(undefined)}>回到时间线第一页</button><button className="btn" disabled={busy || !data.pagination.has_more} onClick={() => { if (data.pagination.next_cursor) setCursor(data.pagination.next_cursor); }}>更早业务节点</button></div>
       </details>
     </>}
     {selected && <><button className="btn" onClick={() => navigation.request(() => setSelected(null))}>关闭当前业务详情</button><ActionDetail key={`${selected.source_kind}:${selected.source_id}`} selected={selected} refresh={refresh} /></>}
-    <details open={comparisonOpen} onToggle={e => setComparisonOpen(e.currentTarget.open)}><summary>两期评分变化核对</summary>{comparisonOpen && <ScoreChanges />}</details>
+    <details className={comparisonOpen?"driver-record-page":"driver-record-entry"} open={comparisonOpen} onToggle={e => setComparisonOpen(e.currentTarget.open)}><summary>{comparisonOpen?"←":"两期评分变化核对"}</summary>{comparisonOpen&&<h2>评分变化对比</h2>}{comparisonOpen && <ScoreChanges />}</details>
   </section>;
 }
 
@@ -68,7 +61,7 @@ function ActionDetail({ selected, refresh }: { selected: DriverSourceRef; refres
     if (kind === "intervention") driverInterventionView(selected.source_id).then(r => { if (active) setMessage(r); }).catch(e => { if (active) setError(e); });
     return () => { active = false; };
   }, [kind, selected.source_id, retry]);
-  if (["score", "score_history", "alert", "event"].includes(kind)) return <DriverEvidence kind={kind as "score" | "score_history" | "alert" | "event"} id={selected.source_id} initialOpen />;
+  if (["score", "score_history", "alert", "event"].includes(kind)) return <DriverEvidence readable kind={kind as "score" | "score_history" | "alert" | "event"} id={selected.source_id} initialOpen />;
   return <section className="stack" aria-label="本人业务详情">
     {error ? <DriverReadError error={error} retry={() => setRetry(x => x + 1)} /> : kind === "training_task" ? task ? <DriverTrainingCard row={task.task} reload={() => { setRetry(x => x + 1); refresh(); }} /> : <EmptyState kind="loading" /> : kind === "review_request" ? review ? <>
       <h4>本人复核申请 {String(review.request.request_id)}</h4><p>当前状态：{statusNames[String(review.request.status)] || String(review.request.status)}</p><p>申请原文：{String(review.request.description || "未取得")}</p><p>已保存答复：{String(review.request.review_note || "尚无人工答复，等待安全员处理。")}</p>
@@ -92,7 +85,7 @@ function MessageDetail({ message, reload }: { message: DriverInterventionView; r
   return <><h4>本人沟通 {message.intervention_id}</h4><p>{message.sent_text || "已发送正文未取得"}</p><p>状态 {statusNames[message.status] || message.status} · 发送 {message.sent_at}</p>
     {message.reply_text && <p>已保存回复：{message.reply_text}</p>}
     {["sent", "read"].includes(message.status) && <>{!message.read_at && <button className="btn" disabled={busy} onClick={() => void act(false)}>阅读这条沟通</button>}<label>对此沟通回复<textarea aria-label="业务详情回复" maxLength={2000} disabled={busy} value={reply} onChange={e => setReply(e.target.value)} /></label><p className="meta">{reply.length}/2000 字</p><button className="btn" disabled={busy || !reply.trim()} onClick={() => void act(true)}>发送这条沟通的回复</button></>}
-    {message.alert_id && <DriverEvidence kind="alert" id={message.alert_id} label="核验沟通关联证据" />}
+    {message.alert_id && <DriverEvidence readable kind="alert" id={message.alert_id} label="核验沟通关联证据" />}
     {receipt && <p role="status">{receipt}</p>}
   </>;
 }
@@ -110,15 +103,15 @@ function ScoreChanges() {
   useEffect(() => { void load(); return () => { sequence.current++; }; }, []);
   return <section className="stack" aria-label="两期真实评分核对">
     {error ? <DriverReadError error={error} retry={() => void load(before, after)} /> : !data ? <EmptyState kind="loading" /> : <>
-      <label>较早记录<select aria-label="较早评分记录" disabled={busy} value={before} onChange={e => setBefore(e.target.value)}>{!before && <option value="">未取得</option>}{data.options.map(row => <option key={row.score_id} value={row.score_id}>{row.as_of_date} · {row.score_id}</option>)}</select></label>
-      <label>较晚记录<select aria-label="较晚评分记录" disabled={busy} value={after} onChange={e => setAfter(e.target.value)}>{!after && <option value="">未取得</option>}{data.options.map(row => <option key={row.score_id} value={row.score_id}>{row.as_of_date} · {row.score_id}</option>)}</select></label>
+      <label>较早记录<select aria-label="较早评分记录" disabled={busy} value={before} onChange={e => setBefore(e.target.value)}>{!before && <option value="">未取得</option>}{data.options.map(row => <option key={row.score_id} value={row.score_id}>{row.as_of_date}</option>)}</select></label>
+      <label>较晚记录<select aria-label="较晚评分记录" disabled={busy} value={after} onChange={e => setAfter(e.target.value)}>{!after && <option value="">未取得</option>}{data.options.map(row => <option key={row.score_id} value={row.score_id}>{row.as_of_date}</option>)}</select></label>
       <button className="btn" disabled={busy || !before || !after || before === after} onClick={() => void load(before, after)}>核对选定两期</button>
       {data.options_truncated && <p className="meta">选择器展示最近50条真实记录，不补造日期。</p>}
       <p>{data.note}</p>
-      {[data.before, data.after].map((row, index) => row ? <div className="task-card" key={index}><h4>{index === 0 ? "较早" : "较晚"}真实记录</h4><p>截止 {String(row.as_of_date)} · 安全分 {numberText(row.safety_score)}</p><p className="meta">窗口 {String(row.window_start || "未取得")} 至 {String(row.as_of_date)} · 方法 {String(row.score_method || "未取得")} · 可信度 {String(row.confidence_level || "未取得")} · 来源 {String(row.source_version || "未取得")}</p><DriverEvidence kind="score_history" id={String(row.score_id)} label={`查看${index === 0 ? "较早" : "较晚"}评分依据`} /></div> : <p key={index}>未取得{index === 0 ? "较早" : "较晚"}记录。</p>)}
+      {[data.before, data.after].map((row, index) => row ? <div className="task-card" key={index}><h4>{index === 0 ? "较早" : "较晚"}真实记录</h4><p>截止 {String(row.as_of_date)} · 安全分 {numberText(row.safety_score)}</p><p className="meta">窗口 {String(row.window_start || "未取得")} 至 {String(row.as_of_date)} · 可信度 {driverText(row.confidence_level)}</p><DriverEvidence readable kind="score_history" id={String(row.score_id)} label={`查看${index === 0 ? "较早" : "较晚"}评分依据`} /></div> : <p key={index}>未取得{index === 0 ? "较早" : "较晚"}记录。</p>)}
       <p>记录数值差：{numberText(data.difference)}；不是改善有效判定。</p>
       <div className="table-wrap"><table><thead><tr><th>维度</th><th>较早扣分</th><th>较晚扣分</th><th>记录差值</th></tr></thead><tbody>{dimensions.map(([key, label]) => <tr key={key}><td>{label}</td><td>{numberText(data.before?.[key])}</td><td>{numberText(data.after?.[key])}</td><td>{numberText(data.dimensions[key])}</td></tr>)}</tbody></table></div>
-      <p className="meta">{data.limitations}</p>
+      
     </>}
   </section>;
 }

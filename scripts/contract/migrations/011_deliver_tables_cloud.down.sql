@@ -1,0 +1,1 @@
+DROP TABLE IF EXISTS handover_note_deletions; DROP TABLE IF EXISTS handover_notes; DROP TABLE IF EXISTS handover_reports; DROP TABLE IF EXISTS handover_settings; DROP TABLE IF EXISTS offline_training_attendees; DROP TABLE IF EXISTS offline_trainings;
