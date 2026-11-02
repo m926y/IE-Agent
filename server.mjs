@@ -122,7 +122,7 @@ function readBodyRaw(request, limitBytes = 64 * 1024) {
 const BROKER_URL = "http://127.0.0.1:9001";
 const BROKER_PLACEHOLDER_KEY = "qwenwork-runtime-broker";
 const SAFE_DATABASE_OPERATIONS = new Set([
-  "ofl_r", "ofl_w", "hvo_r", "hvo_w", "hon_r", "hon_w", "hnd_r", "cen_r", "cen_w",
+  "ofl_r", "ofl_w", "hvo_r", "hvo_w", "hon_r", "hon_w", "hnd_r", "cen_r", "cen_w", "eva_r", "eva_w",
   "dsr_q", "dsr_i", "dsr_u", "drj_q", "drj_i", "drj_u", "dsg_q", "dsg_i", "dsg_u", "dau_q", "dne_q",
   "list_users", "get_user_by_name", "get_user_by_id", "touch_login",
   "create_session", "get_session", "delete_session",
@@ -4192,20 +4192,34 @@ async function hvSnapshot(a, date, cutoff) {
   const withinAlerts = alerts.filter(x => within(x.occurred_at));
   const logs = await qRows('hnd_r', 'audit_logs', { actor_id: `eq.${a.user_id}`, occurred_at: `gte.${new Date(fromMs).toISOString()}`, select: 'action,occurred_at', order: 'occurred_at.asc', limit: 1000 });
   const byAction = {}; for (const l of logs) if (within(l.occurred_at)) byAction[l.action] = (byAction[l.action] || 0) + 1;
-  const counts = { new_cases: withinAlerts.length, new_replay_cases: withinAlerts.filter(x => x.is_replay).length, closed_cases: 0, training_submitted: tasks.filter(t => t.status === 'submitted' && within(t.updated_at || captured)).length, reviews_open: reviews.filter(x2 => !['closed', 'answered'].includes(String(x2.status))).length, followups_open: ivs.filter(x2 => ['sent', 'read'].includes(String(x2.status))).length, quality_open: lows.filter(allowed).length };
+  const counts = { new_cases: withinAlerts.length, new_replay_cases: withinAlerts.filter(x => x.is_replay).length, closed_cases: 0, training_submitted: tasks.filter(t => t.status === 'submitted' && within(t.updated_at || captured)).length, reviews_open: reviews.filter(x2 => !['closed', 'answered'].includes(String(x2.status))).length, followups_open: ivs.filter(x2 => ['sent', 'read'].includes(String(x2.status))).length, quality_open: lows.filter(allowed).length,
+   pending_risks: items.filter(x => x.kind === 'alert' || x.kind === 'risk').length, pending_red: 0, closed_note: '云端案卷口径为 alerts；红色影子案卷属本地实时流',
+   pending_training_review: tasks.filter(t => t.status === 'submitted').length,
+   pending_training_learning: tasks.filter(t => ['assigned', 'in_progress', 'returned', 'observation', 'interview'].includes(String(t.status))).length,
+   overdue_training: items.filter(x => x.kind === 'training' && x.overdue).length,
+   pending_chats: 0, pending_followups: items.filter(x => x.kind === 'followup').length,
+   training_reviewed: tasks.filter(t => t.status === 'reviewed' && within(t.reviewed_at || captured)).length,
+   messages_received: 0, messages_sent: 0, personal_operations: Object.values(byAction).reduce((a2, b2) => a2 + Number(b2), 0) };
   items.sort((x, y) => Number(y.overdue) - Number(x.overdue) || x.kind.localeCompare(y.kind));
-  return { report_date: date, cutoff_at: cutoff, captured_at: captured, owner_name: a.display_name || a.username, scope: sc, counts, personal_actions: byAction, items, chat: [], limitations: ['host 模式：司机会话/影子案卷表未接入（完整数据服务可用时并入）', '历史回放口径：案卷 occurred_at 为事件日期，交接时间不等于当日新增', '已读、备注不代表行为改善'] };
+  const scoreRows = await qRows('hnd_r', 'score_snapshots', { select: 'risk_level,confidence_level,as_of_date', order: 'as_of_date.desc', limit: 5000 });
+  const latestDate = scoreRows[0]?.as_of_date || null;
+  const refRows = latestDate ? scoreRows.filter(x => String(x.as_of_date) === String(latestDate)) : [];
+  return { report_date: date, period_start: new Date(fromMs).toISOString(), cutoff_at: cutoff, captured_at: captured, owner_name: a.display_name || a.username, scope: sc, counts, personal_actions: byAction, items, chat: [], chat_total: 0, score_reference: { latest_date: latestDate, vehicle_count: refRows.length, d_count: refRows.filter(x => x.risk_level === 'D').length, low_confidence: refRows.filter(x => x.confidence_level === 'low').length }, limitations: ['host 模式：司机会话/影子案卷表未接入（完整数据服务可用时并入）；待回复会话按 0 如实计', '历史回放口径：案卷 occurred_at 为事件日期，交接时间不等于当日新增', '已读、备注不代表行为改善', '未完成事项按生成时实际状态；红色案卷口径依赖本地实时流，云端计 0'] };
 }
-function hvFallback(s) { const c = s.counts; return { overview: `本时段新增案卷 ${c.new_cases} 项（历史回放 ${c.new_replay_cases} 项）；培训提交 ${c.training_submitted} 项；评分异议待处理 ${c.reviews_open} 项；干预待回复 ${c.followups_open} 项；低可信覆盖待核验 ${c.quality_open} 项。`, priorities: s.items.slice(0, 4).map(x => x.title + ' · ' + x.vehicle), suggestion: '按"确认证据 → 沟通干预 → 培训验收 → 回访跟进"逐项闭环；数字与证据以案卷页为准。', limitations: '规则式摘要（AI 摘要不可用时兜底）。' }; }
-function hvView(r, notes, ownerName) { let snap = {}, sum = null; try { snap = JSON.parse(r.snapshot || '{}'); } catch { } try { sum = JSON.parse(r.summary || 'null'); } catch { } return { ...r, snapshot: snap, summary: sum, notes, owner_name: ownerName }; }
+function hvNormalizeSummary(sum) { if (!sum || typeof sum !== 'object') return sum; sum.priorities = Array.isArray(sum.priorities) ? sum.priorities.map(x => typeof x === 'string' ? { text: x, refs: [] } : { text: String((x && x.text) || ''), refs: Array.isArray(x && x.refs) ? x.refs : [] }) : []; return sum; }
+function hvFallback(s) { const c = s.counts; return { overview: `本时段新增案卷 ${c.new_cases} 项（历史回放 ${c.new_replay_cases} 项）；培训提交 ${c.training_submitted} 项；评分异议待处理 ${c.reviews_open} 项；干预待回复 ${c.followups_open} 项；低可信覆盖待核验 ${c.quality_open} 项。`, priorities: s.items.slice(0, 6).map(x => ({ text: x.title + ' · ' + x.vehicle + '，请接班后核查当前状态并继续跟进。', refs: [x.id] })), suggestion: '按"确认证据 → 沟通干预 → 培训验收 → 回访跟进"逐项闭环；数字与证据以案卷页为准。', limitations: '规则式摘要（AI 摘要不可用时兜底）。' }; }
+function hvView(r, notes, ownerName, recipientName) { let snap = {}, sum = null; try { snap = JSON.parse(r.snapshot || '{}'); } catch { } try { sum = JSON.parse(r.summary || 'null'); } catch { } return { ...r, trigger: r.trigger_kind, snapshot: snap, summary: sum, notes, owner_name: ownerName, recipient_name: recipientName || null, status: r.status === 'open' ? 'pending' : (r.status || 'unassigned') }; }
+async function hvNameMap(ids) { const m = new Map(); for (const id of ids) { const u = (await qRows('ofl_r', 'app_users', { user_id: `eq.${id}`, select: 'display_name,username', limit: 1 }))[0]; m.set(String(id), u ? (u.display_name || u.username) : '安全员'); } return m; }
+
 async function hvBuildView(a, id) {
-  const r = (await qRows('hvo_r', 'handover_reports', { id: `eq.${id}`, select: 'id,owner_id,scope,report_date,cutoff_at,captured_at,trigger_kind,snapshot,summary,ai_status,ai_error,recipient_id,status', limit: 1 }))[0];
+  const r = (await qRows('hvo_r', 'handover_reports', { id: `eq.${id}`, select: 'id,owner_id,scope,report_date,cutoff_at,captured_at,trigger_kind,snapshot,summary,ai_status,ai_error,recipient_id,status,accepted_at,accepted_note', limit: 1 }))[0];
   if (!r || !hvPermitted(a, r)) throw new HttpError(404, 'handover_not_found');
   const notes = await qRows('hon_r', 'handover_notes', { report_id: `eq.${r.id}`, select: 'id,author_id,content,created_at', order: 'created_at.asc', limit: 100 });
   let del = new Set();
   if (notes.length) del = new Set((await qRows('hon_r', 'handover_note_deletions', { note_id: `in.(${notes.map(n => `'${n.id}'`).join(',')})`, select: 'note_id', limit: 300 })).map(x => x.note_id));
-  const owner = notes && (await qRows('ofl_r', 'app_users', { user_id: `eq.${r.owner_id}`, select: 'display_name,username', limit: 1 }))[0];
-  return hvView(r, notes.filter(n => !del.has(n.id)), owner?.display_name || owner?.username || '');
+  const personIds = new Set([r.owner_id, r.recipient_id, ...notes.map(n => n.author_id)].filter(Boolean));
+  const names = await hvNameMap([...personIds]);
+  return hvView(r, notes.filter(n => !del.has(n.id)).map(n => ({ ...n, author_name: names.get(String(n.author_id)) || n.author_id })), names.get(String(r.owner_id)) || '安全员', names.get(String(r.recipient_id)) || null);
 }
 async function hvGenerate(a, actorCtx, input) {
   const setting = await hvSetting(a.user_id);
@@ -4214,11 +4228,15 @@ async function hvGenerate(a, actorCtx, input) {
   const old = (await qRows('hvo_r', 'handover_reports', { owner_id: `eq.${a.user_id}`, report_date: `eq.${date}`, select: 'id', limit: 1 }))[0];
   if (old) return { ...(await hvBuildView(a, old.id)), idempotent_replay: true };
   const cutoff = new Date(date + 'T' + (setting.end_time || '18:00') + ':00+08:00').toISOString();
+  if (Number.isFinite(Date.parse(cutoff)) && Date.parse(cutoff) > Date.now() && date === bjIso().slice(0, 10) && actorCtx) throw new HttpError(409, 'handover_shift_not_finished');
   const snap = await hvSnapshot(a, date, cutoff);
   let summary = hvFallback(snap), aiStatus = 'rule_fallback';
-  if (setting.ai_enabled !== false && aiAvailable()) { try { const raw = await aiUpstream({ model: aiModel(), temperature: 0.3, max_tokens: 900, messages: [{ role: 'system', content: '你是驾驶安全班组交接摘要助手。仅依据输入条目写交接摘要：不得新增数字或事件，不使用实时监测措辞，不承诺改善。输出 JSON {overview,priorities,suggestion}。' }, { role: 'user', content: JSON.stringify({ report_date: snap.report_date, counts: snap.counts, items: snap.items.slice(0, 40), limitations: snap.limitations }).slice(0, 8000) }] }); const txt = String(raw?.choices?.[0]?.message?.content || '').trim(); const j = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1)); if (typeof j.overview !== 'string' || !Array.isArray(j.priorities)) throw new Error('shape'); summary = { overview: j.overview.slice(0, 400), priorities: j.priorities.slice(0, 6).map(x => String(x).slice(0, 120)), suggestion: String(j.suggestion || '').slice(0, 300), limitations: ['AI 摘要仅组织已核算的条目；点开条目回源核对'] }; aiStatus = 'done'; } catch { aiStatus = 'failed'; } }
+  if (setting.ai_enabled !== false && aiAvailable()) { try { const raw = await aiUpstream({ model: aiModel(), temperature: 0.3, max_tokens: 900, messages: [{ role: 'system', content: '你是驾驶安全班组交接摘要助手。仅依据输入条目写交接摘要：不得新增数字或事件，不使用实时监测措辞，不承诺改善。输出 JSON {overview,priorities:[{text,refs:[item_id]}],suggestion}，refs 必须取自输入 items 的 id。' }, { role: 'user', content: JSON.stringify({ report_date: snap.report_date, counts: snap.counts, items: snap.items.slice(0, 40), limitations: snap.limitations }).slice(0, 8000) }] }); const txt = String(raw?.choices?.[0]?.message?.content || '').trim(); const j = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1)); if (typeof j.overview !== 'string' || !Array.isArray(j.priorities)) throw new Error('shape'); summary = { overview: j.overview.slice(0, 400), priorities: j.priorities.slice(0, 6).map(x => String(x).slice(0, 120)), suggestion: String(j.suggestion || '').slice(0, 300), limitations: ['AI 摘要仅组织已核算的条目；点开条目回源核对'] }; aiStatus = 'done'; } catch { aiStatus = 'failed'; } }
+  summary = hvNormalizeSummary(summary);
   const id = newId('ho'); const at = nowIso();
-  await dbRequest('hvo_w', 'POST', 'handover_reports', { body: [{ id, owner_id: a.user_id, scope: String(a.fleet_scope || '*'), report_date: date, cutoff_at: cutoff, captured_at: at, trigger_kind: actorCtx ? 'manual' : 'auto', snapshot: JSON.stringify(snap), summary: JSON.stringify(summary), ai_status: aiStatus, ai_attempts: aiStatus !== 'rule_fallback' ? 1 : 0, status: 'open' }], headers: { Prefer: 'return=minimal' } });
+  const rec0 = setting.recipient_id ? String(setting.recipient_id) : null;
+  await dbRequest('hvo_w', 'POST', 'handover_reports', { body: [{ id, owner_id: a.user_id, scope: String(a.fleet_scope || '*'), report_date: date, cutoff_at: cutoff, captured_at: at, trigger_kind: actorCtx ? 'manual' : 'auto', snapshot: JSON.stringify(snap), summary: JSON.stringify(summary), ai_status: aiStatus, recipient_id: rec0, status: rec0 ? 'pending' : 'unassigned' }], headers: { Prefer: 'return=minimal' } });
+  try { await notify(a.user_id, 'handover_generated', id, `${date}交接单已生成，可核对重点事项。`, `ho:${id}:generated:${a.user_id}`, 'handover_report', '班次交接已生成'); if (rec0) await notify(rec0, 'handover_assigned', id, `${date}交接单等待接收。`, `ho:assign:${id}:${rec0}`, 'handover_report', '班次交接指派'); } catch { }
   await appendAudit(actorCtx || { user: { user_id: a.user_id, role: a.role } }, 'handover.generate', 'handover_report', id, null, aiStatus, actorCtx?.requestId || null, [], { date, items: snap.items.length, trigger: actorCtx ? 'manual' : 'auto' });
   return await hvBuildView(a, id);
 }
@@ -4228,15 +4246,16 @@ async function handleHandoverHost(request, response, url, ctx) {
   const input = request.method === 'GET' ? Object.fromEntries(url.searchParams) : await readBody(request);
   if (action === 'data') {
     const page = Math.max(0, Math.floor(Number(input.page) || 0));
-    const all = await qRows('hvo_r', 'handover_reports', { select: 'id,owner_id,scope,report_date,cutoff_at,captured_at,trigger_kind,ai_status,ai_error,recipient_id,status,summary', order: 'report_date.desc,captured_at.desc', limit: 400 });
+    const all = await qRows('hvo_r', 'handover_reports', { select: 'id,owner_id,scope,report_date,cutoff_at,captured_at,ai_status,recipient_id,status,snapshot', order: 'report_date.desc,captured_at.desc', limit: 5000 });
     const visible = all.filter(r => hvPermitted(a, r));
-    const owners = new Map(); for (const r of visible.slice(page * 20, page * 20 + 20)) if (!owners.has(r.owner_id)) owners.set(r.owner_id, (await qRows('ofl_r', 'app_users', { user_id: `eq.${r.owner_id}`, select: 'display_name,username', limit: 1 }))[0]);
-    const reports = visible.slice(page * 20, page * 20 + 20).map(r => { let sum = null; try { sum = JSON.parse(r.summary || 'null'); } catch { } return { ...r, summary: sum, owner_name: owners.get(r.owner_id)?.display_name || owners.get(r.owner_id)?.username || (r.owner_id === a.user_id ? '本人' : '同事') }; });
-    const cand = (await qRows('ofl_r', 'app_users', { role: 'in.(safety_admin,safety_officer)', account_status: 'eq.active', select: 'user_id,display_name,username,role', limit: 100 })).filter(u => u.user_id !== a.user_id);
+    const pageRows = visible.slice(page * 20, page * 20 + 20);
+    const names = await hvNameMap(pageRows.map(r => r.owner_id));
+    const reports = pageRows.map(r => { let counts = {}; try { counts = JSON.parse(r.snapshot || '{}').counts || {}; } catch { } return { id: r.id, owner_id: r.owner_id, owner_name: names.get(String(r.owner_id)) || '安全员', report_date: r.report_date, cutoff_at: r.cutoff_at, captured_at: r.captured_at, status: r.status === 'open' ? 'pending' : (r.status || 'unassigned'), ai_status: r.ai_status, counts }; });
+    const cand = (await qRows('ofl_r', 'app_users', { role: 'in.(safety_admin,safety_officer)', account_status: 'eq.active', select: 'user_id,display_name,username', limit: 100 })).filter(u => u.user_id !== a.user_id).map(u => ({ id: u.user_id, name: u.display_name || u.username }));
     sendJson(response, 200, { settings: await hvSetting(a.user_id), reports, page, total: visible.length, today: bjIso().slice(0, 10), server_time: nowIso(), timezone: 'Asia/Shanghai', candidates: cand }); return;
   }
   if (action === 'view') { sendJson(response, 200, await hvBuildView(a, String(input.id))); return; }
-  if (action === 'preview') { const setting = await hvSetting(a.user_id); const date = bjIso().slice(0, 10); const cutoff = new Date(date + 'T' + (setting.end_time || '18:00') + ':00+08:00').toISOString(); const snap = await hvSnapshot(a, date, cutoff); snap.limitations = ['当前为截稿前实时预览，内容随处理完成而变化；正式交接单在到点后自动生成或手动点"生成交接单"定稿。', ...snap.limitations]; sendJson(response, 200, { ...snap, id: 'preview', trigger: 'preview', summary: hvFallback(snap) }); return; }
+  if (action === 'preview') { const setting = await hvSetting(a.user_id); const date = bjIso().slice(0, 10); const cutoff = new Date(date + 'T' + (setting.end_time || '18:00') + ':00+08:00').toISOString(); const snap = await hvSnapshot(a, date, cutoff); snap.limitations = ['当前为截至此刻的临时预览，不会保存为正式交接单；正式交接单在下班后另行生成。预览不执行 AI 总结，展示规则式摘要。', ...snap.limitations]; const names = await hvNameMap([a.user_id, setting.recipient_id].filter(Boolean)); sendJson(response, 200, { id: 'preview', owner_id: a.user_id, owner_name: names.get(String(a.user_id)) || a.username, report_date: snap.report_date || date, cutoff_at: snap.cutoff_at || cutoff, captured_at: snap.captured_at || nowIso(), status: 'preview', recipient_id: setting.recipient_id || null, recipient_name: setting.recipient_id ? (names.get(String(setting.recipient_id)) || null) : null, accepted_at: null, trigger: 'preview', snapshot: snap, summary: hvFallback(snap), ai_status: 'disabled', notes: [] }); return; }
   if (action === 'settings') {
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(input.end_time || '')) || typeof input.enabled !== 'boolean' || typeof input.ai_enabled !== 'boolean') throw new HttpError(400, 'handover_settings_invalid');
     let rec = input.recipient_id ? String(input.recipient_id) : null;
@@ -4255,18 +4274,21 @@ async function handleHandoverHost(request, response, url, ctx) {
     if (r.status === 'accepted') throw new HttpError(409, 'handover_already_accepted');
     const u = (await qRows('ofl_r', 'app_users', { user_id: `eq.${String(input.recipient_id || '')}`, role: 'in.(safety_admin,safety_officer)', account_status: 'eq.active', select: 'user_id', limit: 1 }))[0];
     if (!u || u.user_id === a.user_id) throw new HttpError(409, 'handover_recipient_invalid');
-    await dbRequest('hvo_w', 'PATCH', 'handover_reports', { query: { id: `eq.${r.id}` }, body: { recipient_id: u.user_id }, headers: { Prefer: 'return=minimal' } });
+    await dbRequest('hvo_w', 'PATCH', 'handover_reports', { query: { id: `eq.${r.id}` }, body: { recipient_id: u.user_id, status: 'pending' }, headers: { Prefer: 'return=minimal' } });
     try { await notify(u.user_id, 'handover_assigned', r.id, `${r.report_date} 的交接单已指派给你接班，请在"班次交接"查看并确认。`, `ho:assign:${r.id}:${u.user_id}`, 'handover_report', '班次交接指派'); } catch { }
     await appendAudit(ctx.principal, 'handover.assign', 'handover_report', r.id, null, u.user_id, ctx.requestId, [], { recipient: u.user_id });
     sendJson(response, 200, { ok: true, id: r.id }); return;
   }
   if (action === 'accept') {
-    const r = (await qRows('hvo_r', 'handover_reports', { id: `eq.${String(input.id)}`, select: 'id,recipient_id,status', limit: 1 }))[0];
+    const r = (await qRows('hvo_r', 'handover_reports', { id: `eq.${String(input.id)}`, select: 'id,recipient_id,status,report_date', limit: 1 }))[0];
+    const r2 = r;
     if (!r) throw new HttpError(404, 'handover_not_found');
     if (r.recipient_id !== a.user_id) throw new HttpError(403, 'handover_recipient_required');
     if (r.status === 'accepted') return sendJson(response, 200, { ok: true, idempotent_replay: true });
-    await dbRequest('hvo_w', 'PATCH', 'handover_reports', { query: { id: `eq.${r.id}`, status: 'eq.open' }, body: { status: 'accepted' }, headers: { Prefer: 'return=minimal' } });
-    await appendAudit(ctx.principal, 'handover.accept', 'handover_report', r.id, 'open', 'accepted', ctx.requestId, [], {});
+    const at0 = nowIso();
+    await dbRequest('hvo_w', 'PATCH', 'handover_reports', { query: { id: `eq.${r.id}`, owner_id: `eq.${String(r2.owner_id)}` }, body: { status: 'accepted', accepted_at: at0, accepted_note: String(input.note || '').slice(0, 2000) }, headers: { Prefer: 'return=minimal' } });
+    try { const rr = (await qRows('hvo_r', 'handover_reports', { id: `eq.${r.id}`, select: 'owner_id,report_date', limit: 1 }))[0]; if (rr) await notify(rr.owner_id, 'handover_accepted', r.id, `${rr.report_date}交接单已被接班人确认接收。`, `ho:${r.id}:accepted`, 'handover_report', '班次交接已接收'); } catch { }
+    await appendAudit(ctx.principal, 'handover.accept', 'handover_report', r.id, r.status || 'pending', 'accepted', ctx.requestId, [], { note_saved: Boolean(input.note) });
     sendJson(response, 200, { ok: true }); return;
   }
   if (action === 'note') {
@@ -4362,6 +4384,7 @@ async function hostCenterData(a){
  let hovers=[];
  if(staff&&['safety_admin','safety_officer'].includes(a.role))hovers=await qRows('cen_r','handover_reports',{select:'id,owner_id,scope,report_date,cutoff_at,captured_at,recipient_id,status',order:'report_date.desc',limit:500});
  hovers=hovers.filter(r=>(scope==='*'||String(scope)===String(r.scope))&&(r.owner_id===a.user_id||r.recipient_id===a.user_id||a.role==='safety_admin'));
+ for(const h of hovers)if(h.status==='open')h.status='pending'; // 历史列语义对齐（R48 探针行）
  const handoverIds=new Set(hovers.map(r=>String(r.id)));
  for(const h of hovers)if(h.recipient_id===a.user_id&&h.status==='pending')todos.push({id:'handover:'+h.id,kind:'handover',title:h.report_date+'交接单待接收',vehicle:'交接班',route:'#/handover?id='+encodeURIComponent(h.id),urgent:false,due_at:null,created_at:h.captured_at,is_replay:false});
  const todayCN=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(new Date());
@@ -4439,9 +4462,142 @@ async function handleActionCenter(request,response,url,ctx){
  else throw new HttpError(404,'center_action_not_found');
 }
 
-async function handleEvaluationActions(request,response,url,ctx){
- const u=requireUser(ctx.principal);if(process.env.APP_DATA_MODE!=='full')throw new HttpError(503,'evaluation_local_data_required');const action=url.pathname.split('/').at(-1),body=request.method==='GET'?{}:await readBody(request),t=resolveDbTarget();const r=await fetch(t.url+'/internal/evaluation/'+action,{method:'POST',headers:{apikey:t.key,'content-type':'application/json'},body:JSON.stringify({...body,actor:{id:u.user_id}})}),data=await r.json();if(!r.ok)throw new HttpError(r.status,data.error||'evaluation_service_failed');sendJson(response,200,data);
+// —— R50：评价与分层处置云端宿主（/api/evaluation-actions/{data,remind,prepare,apply}；APP_DATA_MODE 非 full）——
+// 语义镜像 server/evaluation-actions.mjs。本地专属差异：alert_deliveries/risk_cases 提醒送达表云端不存在→warnings 如实全零（不放假数）。
+const EVAL_POLICY_TEXT = { C: '定向辅导：按主风险安排1—3个模块，默认3课18题，记录本人行动计划并复核', D: '强化干预：先核实当班安全条件，默认4个模块＋综合复盘共30题，分次学习并人工复核', AB: '常规观察与必要提醒，不生成培训任务', quality: '先核查身份、设备和覆盖，不安排行为培训' };
+const EVAL_TIER_ORDER = { quality: 0, d: 1, c: 2, routine: 3 };
+function evalActor(u, write = false) {
+ if (!['safety_admin', 'safety_officer', 'team_leader'].includes(u.role) || (write && !['safety_admin', 'safety_officer'].includes(u.role))) throw new HttpError(403, 'evaluation_forbidden');
+ return { ...u, scope: String(u.fleet_scope || '*') };
 }
+function evalEligible(s) { return ['C', 'D'].includes(s.risk_level) && ['high', 'medium'].includes(s.confidence_level); }
+function evalRecommendations(s) {
+ const main = { history: 'XA_T08', fatigue_distraction: 'XA_T03', driving_stability: 'XA_T04', road_rule: 'XA_T05', management: 'XA_T07', imu_evidence: 'XA_T07' }[s.primary_risk_dimension] || 'XA_T01';
+ const list = [...new Set([main, ...(s.risk_level === 'D' ? ['XA_T02', 'XA_T04', 'XA_T08', 'XA_T03'] : ['XA_T01', 'XA_T08'])])].slice(0, s.risk_level === 'D' ? 4 : 3);
+ return s.risk_level === 'D' ? [...list, 'XA_TX'] : list;
+}
+async function evalActiveVersion() { const r = (await qRows('eva_r', 'score_snapshots', { select: 'source_version', order: 'as_of_date.desc', limit: 1 }))[0]; return r?.source_version || null; }
+async function evalCatalog() {
+ const rows = await qRows('eva_r', 'training_courses', { select: 'course_id,content_status,version_no,source_version', limit: 60 });
+ const m = new Map(rows.map(c => [String(c.course_id), c]));
+ return [...TRAINING_REFERENCE.modules.map((mm, i) => ({ id: 'XA_T0' + (i + 1), title: mm.title, objective: mm.objective, reading: mm.reading, action: mm.action, links: mm.links, question_count: mm.questions.length })), { id: 'XA_TX', title: '跨模块综合决策', question_count: TRAINING_REFERENCE.cross.length, reading: ['D级强化复核，完成基础模块后学习'], links: [] }].map(c0 => {
+  const r0 = m.get(c0.id);
+  return { ...c0, status: r0 ? (r0.source_version === TIER_VERSION ? r0.content_status : 'version_conflict') : 'not_installed', version: r0 ? Number(r0.version_no) || 0 : 0 };
+ });
+}
+async function evalScoreOf(a, driverId) {
+ const s = (await qRows('eva_r', 'score_snapshots', { driver_id: `eq.${driverId}`, select: 'score_id,driver_id,gpsno,risk_level,confidence_level,source_version,safety_score,top_reason_1', order: 'as_of_date.desc', limit: 1 }))[0];
+ if (!s) throw new HttpError(404, 'evaluation_not_found');
+ if (a.scope !== '*') { const d = (await qRows('eva_r', 'drivers', { driver_id: `eq.${driverId}`, select: 'fleet_id', limit: 1 }))[0]; if (!d || String(d.fleet_id) !== a.scope) throw new HttpError(404, 'evaluation_not_found'); }
+ return s;
+}
+async function evalBound(s) {
+ const us = (await qRows('eva_r', 'app_users', { driver_id: `eq.${s.driver_id}`, role: 'eq.driver', binding_verified: 'eq.true', account_status: 'eq.active', select: 'user_id', limit: 2 })).map(x => x.user_id);
+ return us.length === 1 ? us[0] : null;
+}
+async function evalData(a) {
+ const labels = new Map((await qRows('eva_r', 'vehicle_labels', { select: 'gpsno,display_no', limit: 5000 })).map(v => [String(v.gpsno), '车辆' + v.display_no]));
+ const fleet = new Map((await qRows('eva_r', 'drivers', { select: 'driver_id,fleet_id', limit: 5000 })).map(d => [String(d.driver_id), String(d.fleet_id)]));
+ const inScope = r => a.scope === '*' || fleet.get(String(r.driver_id)) === a.scope;
+ const scores = await qRows('eva_r', 'score_snapshots', { select: 'score_id,driver_id,gpsno,safety_score,risk_level,confidence_level,as_of_date,top_reason_1,score_change_7d,primary_risk_dimension,source_version', order: 'as_of_date.desc,score_id.asc', limit: 20000 });
+ const latest = new Map(); for (const q0 of scores) { const k = String(q0.driver_id); if (!latest.has(k)) latest.set(k, q0); }
+ const bindCount = new Map(); for (const u of await qRows('eva_r', 'app_users', { role: 'eq.driver', binding_verified: 'eq.true', account_status: 'eq.active', select: 'user_id,driver_id', limit: 2000 })) { const k = String(u.driver_id); bindCount.set(k, bindCount.has(k) ? bindCount.get(k) + '|' + u.user_id : `${u.user_id}`); }
+ const group = (map, k, v, cap) => { const arr = map.get(k) || []; if (arr.length < cap) { arr.push(v); map.set(k, arr); } return arr; };
+ const alertsG = new Map(); for (const x of await qRows('eva_r', 'alerts', { select: 'alert_id,gpsno,rule_code,status,occurred_at,is_replay', order: 'updated_at.desc', limit: 20000 })) group(alertsG, String(x.gpsno), { alert_id: x.alert_id, rule_code: x.rule_code, status: x.status, occurred_at: x.occurred_at, is_replay: x.is_replay }, 8);
+ const tasksG = new Map(); for (const x of await qRows('eva_r', 'training_tasks', { select: 'task_id,driver_id,course_id,status,due_at,mandatory,score_version,assigned_risk_level,stratification_plan_id', order: 'updated_at.desc', limit: 20000 })) group(tasksG, String(x.driver_id), x, 20);
+ const ivsG = new Map(); for (const x of await qRows('eva_r', 'interventions', { select: 'intervention_id,alert_id,driver_id,status,sent_at,sent_text,reply_text', order: 'updated_at.desc', limit: 10000 })) group(ivsG, String(x.driver_id), { intervention_id: x.intervention_id, alert_id: x.alert_id, status: x.status, sent_at: x.sent_at, sent_text: x.sent_text, reply_text: x.reply_text }, 8);
+ const actsG = new Map(); for (const x of await qRows('eva_r', 'evaluation_actions', { select: 'id,driver_id,gpsno,score_version,risk_level,kind,content,actor_id,created_at', order: 'created_at.desc', limit: 5000 })) group(actsG, String(x.driver_id), x, 20);
+ const plansG = new Map(); for (const x of await qRows('eva_r', 'evaluation_training_plans', { select: 'id,driver_id,score_version,risk_level,status,created_at,due_at,result', order: 'created_at.desc', limit: 2000 })) group(plansG, String(x.driver_id), x, 12);
+ const courses = await evalCatalog(); const active_version = await evalActiveVersion();
+ const rows = [...latest.values()].filter(s => inScope(s) && labels.has(String(s.gpsno))).map(s => {
+  const k = String(s.driver_id), bs = bindCount.get(k) || null, target = bs && !bs.includes('|') ? bs : null;
+  return { warnings: { generated: 0, received: 0 }, driver_id: s.driver_id, gpsno: s.gpsno, vehicle: labels.get(String(s.gpsno)) || '待绑定车辆', score: s.safety_score, level: s.risk_level, confidence: s.confidence_level, as_of_date: s.as_of_date, score_id: s.score_id, score_version: s.source_version, reason: s.top_reason_1, dimension: s.primary_risk_dimension, tier: s.confidence_level === 'low' ? 'quality' : s.risk_level === 'D' ? 'd' : s.risk_level === 'C' ? 'c' : 'routine', training_eligible: evalEligible(s), target_user_id: target, suggested_courses: evalEligible(s) ? evalRecommendations(s) : [], alerts: alertsG.get(String(s.gpsno)) || [], interventions: ivsG.get(k) || [], tasks: tasksG.get(k) || [], actions: actsG.get(k) || [], plans: plansG.get(k) || [] };
+ });
+ rows.sort((x, y) => (EVAL_TIER_ORDER[x.tier] - EVAL_TIER_ORDER[y.tier]) || x.score - y.score);
+ return { active_version: active_version, rows: rows, courses: courses, policy: EVAL_POLICY_TEXT };
+}
+async function evalRemind(a, ctx, i) {
+ const s = await evalScoreOf(a, String(i.driver_id || ''));
+ if (String(i.score_version || '') !== String(s.source_version)) throw new HttpError(409, 'evaluation_score_changed');
+ const target = await evalBound(s);
+ if (!target) throw new HttpError(409, 'evaluation_binding_required');
+ const content = String(i.content || '').trim();
+ if (!content || content.length > 1000 || !/^[-\w]{8,80}$/.test(String(i.request_key || ''))) throw new HttpError(400, 'evaluation_reminder_invalid');
+ const id = 'ev-remind-' + a.user_id + '-' + String(i.request_key);
+ const old = (await qRows('eva_r', 'evaluation_actions', { id: `eq.${id}`, limit: 1 }))[0];
+ if (old) { if (old.content !== content || String(old.driver_id) !== String(s.driver_id)) throw new HttpError(409, 'evaluation_request_conflict'); return { ok: true, idempotent_replay: true }; }
+ const at = nowIso();
+ await dbRequest('eva_w', 'POST', 'evaluation_actions', { body: [{ id: id, driver_id: s.driver_id, gpsno: s.gpsno, score_version: s.source_version, risk_level: s.risk_level, kind: 'reminder', content: content, actor_id: a.user_id, created_at: at }], headers: { Prefer: 'return=minimal' } });
+ const notif = await notify(target, 'evaluation_reminder', id, content, id, 'evaluation_action', '安全评价提醒（停车后查看）');
+ await appendAudit(ctx, 'evaluation.remind', 'evaluation_action', id, null, 'reminder', ctx.requestId, [], { score_version: s.source_version, risk_level: s.risk_level, target: notif });
+ return { ok: true };
+}
+async function evalPrepare(a, ctx, i) {
+ const s = await evalScoreOf(a, String(i.driver_id || ''));
+ if (!evalEligible(s)) throw new HttpError(409, !['high', 'medium'].includes(s.confidence_level) ? 'training_data_review_first' : 'training_cd_only');
+ if (String(i.score_version || '') !== String(s.source_version)) throw new HttpError(409, 'evaluation_score_changed');
+ const target = await evalBound(s);
+ if (!target) throw new HttpError(409, 'evaluation_binding_required');
+ const cat = await evalCatalog();
+ const ids = Array.isArray(i.course_ids) && i.course_ids.length ? i.course_ids : evalRecommendations(s);
+ if (new Set(ids).size !== ids.length || !ids.length || ids.length > 5 || ids.some(id => !cat.some(c => c.id === id)) || (s.risk_level === 'C' && (ids.length > 3 || ids.includes('XA_TX'))) || (s.risk_level === 'D' && (ids.filter(x => x !== 'XA_TX').length < 2 || ids.filter(x => x !== 'XA_TX').length > 4))) throw new HttpError(400, 'evaluation_courses_invalid');
+ const todayCN = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date());
+ if (!/^\d{4}-\d{2}-\d{2}$/.test(String(i.due_at || '')) || !Number.isFinite(Date.parse(i.due_at)) || new Date(String(i.due_at) + 'T00:00:00Z').toISOString().slice(0, 10) !== String(i.due_at) || String(i.due_at) < todayCN) throw new HttpError(400, 'evaluation_due_invalid');
+ const av = await evalActiveVersion();
+ const id = newId('ev-plan'); const at = nowIso();
+ const selected = ids.map(x0 => cat.find(c => c.id === x0));
+ const payload = { base_version: av, target: target, courses: selected.map(c => ({ id: c.id, version: c.version })), snapshot: { score_id: s.score_id, score: s.safety_score, reason: s.top_reason_1, confidence: s.confidence_level }, goal: String(i.goal || '完成针对性阅读、情境练习并提交个人行动计划').slice(0, 500), questions: selected.reduce((sum, c) => sum + (c.question_count || 0), 0) };
+ await dbRequest('eva_w', 'POST', 'evaluation_training_plans', { body: [{ id: id, owner: a.user_id, driver_id: s.driver_id, gpsno: s.gpsno, score_version: s.source_version, risk_level: s.risk_level, due_at: String(i.due_at), created_at: at, payload: JSON.stringify(payload), status: 'pending', result: null }], headers: { Prefer: 'return=minimal' } });
+ await appendAudit(ctx, 'evaluation.training_prepare', 'evaluation_plan', id, null, 'pending', ctx.requestId, [], { score_version: s.source_version, level: s.risk_level, courses: ids });
+ return { id: id, courses: selected, questions: payload.questions, ready: selected.every(c => c.status === 'approved'), snapshot: payload.snapshot, risk_level: s.risk_level, score_version: s.source_version };
+}
+async function evalApply(a, ctx, i) {
+ const p = (await qRows('eva_r', 'evaluation_training_plans', { id: `eq.${String(i.id || '')}`, limit: 1 }))[0];
+ if (!p || p.owner !== a.user_id) throw new HttpError(404, 'evaluation_not_found');
+ const s = await evalScoreOf(a, p.driver_id);
+ if (p.status === 'applied') { let prev = {}; try { prev = JSON.parse(p.result || '{}'); } catch { } return { ok: true, idempotent_replay: true, ...prev }; }
+ if (i.confirm !== true) throw new HttpError(409, 'evaluation_confirmation_required');
+ if (!evalEligible(s)) throw new HttpError(409, 'training_cd_only');
+ if (String(s.source_version) !== String(p.score_version) || String(s.risk_level) !== String(p.risk_level)) throw new HttpError(409, 'evaluation_score_changed');
+ let payload; try { payload = JSON.parse(p.payload); } catch { throw new HttpError(409, 'evaluation_course_changed'); }
+ const av = await evalActiveVersion();
+ if (av !== payload.base_version) throw new HttpError(409, 'evaluation_score_changed');
+ if ((await evalBound(s)) !== payload.target) throw new HttpError(409, 'evaluation_binding_changed');
+ if (Date.now() - Date.parse(p.created_at) > 30 * 60000) throw new HttpError(409, 'evaluation_plan_expired');
+ const catRows = await qRows('eva_r', 'training_courses', { select: 'course_id,title,content_status,source_version,version_no', limit: 60 });
+ const ready = [];
+ for (const c0 of payload.courses) { const row = catRows.find(x => String(x.course_id) === String(c0.id) && x.content_status === 'approved' && x.source_version === TIER_VERSION && Number(x.version_no) === Number(c0.version)); if (!row) throw new HttpError(409, 'evaluation_course_changed'); ready.push(row); }
+ const at = nowIso(); const task_ids = []; const skipped = [];
+ for (const cRow of ready) {
+  const existing = (await qRows('eva_r', 'training_tasks', { driver_id: `eq.${s.driver_id}`, course_id: `eq.${cRow.course_id}`, status: 'in.(assigned,in_progress,submitted,returned,observation,interview)', select: 'task_id', limit: 1 }))[0];
+  if (existing) { task_ids.push(existing.task_id); skipped.push(cRow.course_id); continue; }
+  const id = newId('task'); const text = `新${s.risk_level === 'D' ? '强化' : '定向'}培训：${cRow.title}；请停车后分次完成。`; const ide = p.id + ':' + cRow.course_id;
+  await dbRequest('eva_w', 'POST', 'training_tasks', { body: [{ task_id: id, driver_id: s.driver_id, alert_id: '', course_id: cRow.course_id, goal: payload.goal, mandatory: s.risk_level === 'D', due_at: p.due_at, status: 'assigned', created_by: a.user_id, idempotency_key: ide, updated_at: at, score_version: p.score_version, assigned_risk_level: p.risk_level, stratification_plan_id: p.id }], headers: { Prefer: 'return=minimal' } });
+  try { await notify(payload.target, 'task_assigned', id, text, `notif:taskas:${id}`, 'training_task', '新的分层培训任务'); } catch { }
+  task_ids.push(id);
+  await appendAudit(ctx, 'training.assign', 'training_task', id, null, 'assigned', ctx.requestId, [], { plan_id: p.id, level: p.risk_level, score_version: p.score_version });
+ }
+ const created = task_ids.length - skipped.length;
+ const result = { task_ids: task_ids, skipped: skipped, created: created };
+ await dbRequest('eva_w', 'PATCH', 'evaluation_training_plans', { query: { id: `eq.${p.id}` }, body: { status: 'applied', result: JSON.stringify(result) }, headers: { Prefer: 'return=minimal' } });
+ await dbRequest('eva_w', 'POST', 'evaluation_actions', { body: [{ id: newId('ev-action'), driver_id: s.driver_id, gpsno: s.gpsno, score_version: p.score_version, risk_level: p.risk_level, kind: 'training', content: `分层计划：新增${created}个任务；复用${skipped.length}个未结束任务`, actor_id: a.user_id, created_at: at }], headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' } });
+ await appendAudit(ctx, 'evaluation.training_apply', 'evaluation_plan', p.id, 'pending', 'applied', ctx.requestId, [], result);
+ return { ok: true, ...result };
+}
+
+
+async function handleEvaluationActions(request,response,url,ctx){
+ const u=requireUser(ctx.principal);
+ if(process.env.APP_DATA_MODE==='full'){const action=url.pathname.split('/').at(-1),body=request.method==='GET'?{}:await readBody(request),t=resolveDbTarget();const r=await fetch(t.url+'/internal/evaluation/'+action,{method:'POST',headers:{apikey:t.key,'content-type':'application/json'},body:JSON.stringify({...body,actor:{id:u.user_id}})});const data=await r.json();if(!r.ok)throw new HttpError(r.status,data.error||'evaluation_service_failed');sendJson(response,200,data);return;}
+ const action=url.pathname.split('/').at(-1);
+ if(action==='data'){const a=evalActor(u,false);sendJson(response,200,await evalData(a));return;}
+ const a=evalActor(u,true);const body=await readBody(request);
+ if(action==='remind')sendJson(response,200,await evalRemind(a,ctx.principal,body));
+ else if(action==='prepare')sendJson(response,200,await evalPrepare(a,ctx.principal,body));
+ else if(action==='apply')sendJson(response,200,await evalApply(a,ctx.principal,body));
+ else throw new HttpError(404,'evaluation_action_not_found');
+}
+
 async function handleChat(request,response,url,ctx){
  const u=requireUser(ctx.principal);if(process.env.APP_DATA_MODE!=='full')throw new HttpError(503,'chat_local_service_required');
  const action=url.pathname.split('/').at(-1),input=request.method==='GET'?Object.fromEntries(url.searchParams):await readBody(request),t=resolveDbTarget();

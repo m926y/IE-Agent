@@ -19,3 +19,4 @@
 
 ## 托管双模说明（2026-11-02 起）
 - `APP_DATA_MODE` 未设（平台托管）时，司机投影与每日简报/学习报告/行动中心走 **Supabase 宿主实现**（DUAL 分发）；`=full`（本地完整数据工作台）走集成分机。修改 `server/daily-report/`、`server/driver-actions.mjs` 时两模式同时生效，回归至少覆盖云端矩阵（BASE=r34/r37/r40 电池）。
+- 迁移 SQL 不要包含 RENAME COLUMN / DO $$ 语句：平台 WAF 会静默返回 punish 页（http 200 但无效果）。列命名与 UI 契约不同时，在宿主输出层映射（如 handover_reports.trigger_kind → report.trigger）。
