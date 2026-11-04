@@ -248,6 +248,16 @@ test('hosted AI attachments and action plans (R60)', async (t) => {
     assert.equal(assignA.body.error, 'training_cd_only', '手工分发入口保留 C/D 门禁（不随 Agent 放开）');
   });
 
+  await t.test('Markdown 建课只调用一次模型且无需在消息里填写 upload_id', async () => {
+    const up = await upload(admin, '课程材料.md', Buffer.from('# 安全停车\n疲劳时先停车休息。', 'utf8'));
+    const r = await api('/api/ai/chat', { cookie: admin, method: 'POST', body: { messages: [{ role: 'user', content: '请根据上传的 md 文件生成培训课程，出 2 道题' }], attachments: [up.body.upload_id] } });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.meta.rounds, 1);
+    assert.equal(r.body.meta.tool_calls, 1);
+    assert.equal(r.body.action_plans?.[0]?.kind, 'course');
+    assert.equal(r.body.requires_confirmation, true);
+  });
+
   await t.test('培训清单：对象放开到所有评级与可信度，确认后才建任务+通知，重复确认幂等', async () => {
     /* 前面的用例已导入若干"车辆→账号"绑定，这里按夹具现算期望，避免与执行顺序耦合 */
     const boundCount = (driverId) => tables.app_users.filter((u) => u.role === 'driver' && u.account_status === 'active' && u.binding_verified === true && String(u.driver_id) === String(driverId)).length;

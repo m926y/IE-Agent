@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "vite build && node scripts/prepare-publish.mjs",
+    "build": "vite build --configLoader runner && node scripts/prepare-publish.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "start": "node server.mjs",
     "start:local": "node scripts/start-local.mjs",
