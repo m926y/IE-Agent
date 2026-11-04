@@ -57,6 +57,7 @@ test('hosted read-only scoring view (R61)', async (t) => {
     assert.ok(Array.isArray(r.body.factors) && r.body.factors.length === 6, '因子按维度分组只读展示');
     assert.ok(r.body.factors.every((f) => f.events.every((e) => typeof e.severity === 'number')));
     assert.equal(r.body.model_config.half_life_days, 14);
+    assert.deepEqual(r.body.model_config.level_ratios, { A: 20, B: 40, C: 30, D: 10 }, '等级占比取自冻结生效链（供只读展示）');
     assert.ok(r.body.reference && Object.values(r.body.reference).every((x) => x.tau !== null), '参考口径取自冻结文件');
     assert.equal(r.body.vehicle_count, 1);
   });

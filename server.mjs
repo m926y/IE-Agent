@@ -1028,7 +1028,7 @@ async function hostedScoreWeights() {
     dimension_windows, score_methods, ruleset_versions,
     factors: SCORING_FACTORS.map((d) => ({ key: d.key, name: d.name, unit: d.unit, condition: d.condition, events: d.events.map((e) => ({ code: e.code, name: e.name, severity: e.severity })) })),
     reference,
-    model_config: frozen ? { window_days: frozen.window_days, half_life_days: frozen.half_life_days, factors: SCORING_FACTORS.flatMap((d) => d.events.map((e) => ({ code: e.code, name: e.name, dimension: d.key, severity: e.severity }))), reference: reference || {} } : null,
+    model_config: frozen ? { level_ratios: frozen.level_policy?.shares ? Object.fromEntries(Object.entries(frozen.level_policy.shares).map(([k, v]) => [k, Math.round(Number(v) * 100)])) : null, window_days: frozen.window_days, half_life_days: frozen.half_life_days, factors: SCORING_FACTORS.flatMap((d) => d.events.map((e) => ({ code: e.code, name: e.name, dimension: d.key, severity: e.severity }))), reference: reference || {} } : null,
     vehicle_count: parseCount(countReq?.rangeHeader) ?? (countReq?.data?.length ?? null),
     hosted_note: "云端工作台只显示当前生效的权重与口径，不在此页预览、重算或生效（评分链路红线：概率、安全分、等级、六维扣分只读）。调整权重与全量重算只在本地完整数据工作台按草案→审核→生效执行。",
   };

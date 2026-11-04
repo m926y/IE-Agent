@@ -64,9 +64,17 @@ test('AI attachment UI contract (R60)', async (t) => {
     assert.match(drv, /一键收起/, '司机端待办提供一键收起');
     assert.match(drv, /aria-expanded/, '收起状态对读屏可感知');
     assert.match(drv, /aria-controls="driver-todo-items"/);
-    assert.match(drv, /收起只是隐藏列表，不会延长任何截止时间/, '收起不得改变业务时限');
+    assert.match(drv, /不延长任何截止时间|不延长任何截止时间/, '收起不得改变业务时限');
+    assert.match(drv, /优先处理|dt-group/, '待办按紧迫感分组');
+    assert.match(drv, /dt-skeleton|dt-empty/, '读取中与空态有专门呈现（不再长时间空白）');
+    const ratio = await src('overview-controls.tsx');
+    assert.match(ratio, /const readOnly = Boolean\(state\?\.hosted_readonly\)/);
+    assert.ok(ratio.indexOf('const readOnly') < ratio.indexOf('disabled={busy || readOnly}'), 'readOnly 必须在使用前声明（避免再次 TDZ 白屏）');
+    assert.match(ratio, /云端只读/);
     const css = await readFile(root + '/src/driver-integrated.css', 'utf8');
-    assert.match(css, /\.driver-todo-list\.is-folded #driver-todo-items\{display:none\}/);
+    assert.match(css, /\.driver-todo\.is-folded #driver-todo-items\{display:none\}/);
+    assert.match(css, /prefers-reduced-motion/);
+    assert.equal(css.includes('.driver-todo-list'), false, '旧类名规则应清理掉');
   });
 
   await t.test('R60 一并补齐的云端入口：台账勾选删除与账号删除', async () => {

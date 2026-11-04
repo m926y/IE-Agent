@@ -11,7 +11,25 @@ type Comparison={changed:number;level_changed:number;weights:{key:string;name:st
 type State={window_days:number|null;factors:Factor[];designs:Design[];active_version:string;ordinal:number;weights:Weights;baseline_weights:Weights;dimensions:{key:string;name:string}[];vehicle_count:number|null;versions:{version_id:string;ordinal:number;created_at:string;weights:Weights;design?:{label:string;reason:string;restored_from:string}}[];hosted_readonly?:boolean;hosted_note?:string;dimension_windows?:Record<string,number|null>;ruleset_versions?:Record<string,string>};
 type Preview={restore_version?:string|null;base_version:string;weights:Weights;preview_id:string;summary:Summary};
 type History={version:string;ordinal:number;rows:{gpsno:string;safety_score:number;risk_level:string}[]};
-function errorMessage(e:unknown){const c=e instanceof ApiError?e.code:'';return ({scoring_version_conflict:'配置已被更新，请重新加载后再预览',scoring_preview_required:'请先预览当前权重的分数变化',weights_sum_invalid:'权重合计必须为 100%',weights_invalid:'请为六个维度填写 0–100% 的有效权重',scoring_global_admin_required:'仅拥有全部车队权限的安全管理员可调整全局评分',scoring_service_unavailable:'评分重算服务暂不可用',scoring_recompute_failed:'重算失败，当前评分版本未改变'} as Record<string,string>)[c]||'操作失败，请稍后重试';}
+function errorMessage(e:unknown){const c=e instanceof ApiError?e.code:'';return ({scoring_version_conflict:'配置已被更新，请重新加载后再预览',scoring_preview_required:'请先预览当前权重的分数变化',weights_sum_invalid:'权重合计必须为 100%',weights_invalid:'请为六个维度填写 0–100% 的有效权重',scoring_global_admin_required:'仅拥有全部车队权限的安全管理员可调整全局评分',scoring_service_unavailable:'评分口径暂时读不到：请刷新重试；权重调整与全量重算在本地完整数据工作台执行',scoring_recompute_failed:'重算失败，当前评分版本未改变'} as Record<string,string>)[c]||'操作失败，请稍后重试';}
+
+/* 云端只读视图：独立组件，配色等常量在其函数体内声明。
+ * （此前只读分支内联在 WeightEditor 里、用到的 colors 声明在其之后 → TDZ ReferenceError，整个评分规则页白屏） */
+export function HostedWeightView({state,error}:{state:State;error?:string}){
+  const colors=['#9671be','#b48bd0','#7d91c3','#75a5a3','#c6a16c','#b8849c'];
+  const dim=(k:string)=>Number(state.weights&&state.weights[k])||0;
+  const total=Object.values(state.weights||{}).reduce((a,b)=>a+(Number(b)||0),0);
+  return <div className="stack weight-editor">
+    <div className="row"><h2>当前使用的评分权重</h2><span className="tag blue">云端只读</span>{state.vehicle_count!==null&&<span className="meta">覆盖 {state.vehicle_count} 辆车</span>}</div>
+    <section className="panel stack">
+      <div className="weight-stacked" role="img" aria-label={`六维权重合计 ${(total*100).toFixed(2)}%`}>{state.dimensions.map((d,ix)=><span key={d.key} style={{width:`${dim(d.key)*100}%`,background:colors[ix%colors.length]}} title={`${d.name} ${(dim(d.key)*100).toFixed(2)}%`}/>)}</div>
+      <table className="tbl weight-readonly-table"><thead><tr><th>维度</th><th>当前权重</th><th>观察窗口／天</th><th>生效口径版本</th></tr></thead><tbody>{state.dimensions.map((d,ix)=>{const share=dim(d.key)*100;const whole=Math.abs(share-Math.round(share))<0.005;return <tr key={d.key}><td><i className="weight-dot" style={{background:colors[ix%colors.length]}} aria-hidden="true"/>{d.name}</td><td><b>{whole?Math.round(share):Number(share.toFixed(2))}%</b></td><td>{state.dimension_windows?.[d.key] ?? state.window_days ?? '—'}</td><td className="meta">{state.ruleset_versions?.[d.key] || state.active_version}</td></tr>})}</tbody></table>
+      <p className="meta">{state.hosted_note||'云端工作台只读取当前生效权重，不在此页预览、重算或生效。'}</p>
+      {error&&<div className="alert warn" role="alert">{error}</div>}
+    </section>
+  </div>;
+}
+
 export function WeightEditor(){
   const [label,setLabel]=useState(''),[reason,setReason]=useState(''),[comparison,setComparison]=useState<Comparison|null>(null),[right,setRight]=useState('');
   const [state,setState]=useState<State|null>(null),[weights,setWeights]=useState<Weights>({});
@@ -20,6 +38,8 @@ export function WeightEditor(){
   const [notice,setNotice]=useState(()=>sessionStorage.getItem('score_apply_notice')||'');
   const [version,setVersion]=useState(''),[history,setHistory]=useState<History|null>(null),[page,setPage]=useState(0);
   const request=useRef('');
+  /* 必须在任何提前 return 之前声明：只读分支曾在 const 之前使用它（TDZ 会让整个评分规则页白屏） */
+  const colors=['#9671be','#b48bd0','#7d91c3','#75a5a3','#c6a16c','#b8849c'];
   function loadWeights(value:Weights){setWeights(value);setInputs(weightInputs(value));setInputError('');}
   async function load(){const r=await api<State>('/api/admin/score-weights');setState(r);loadWeights(r.weights);setPreview(null);setVersion(r.active_version);setRight(r.active_version);}
   useEffect(()=>{load().catch(e=>setError(errorMessage(e)));},[]);
@@ -38,25 +58,17 @@ export function WeightEditor(){
   }catch(e){setError(errorMessage(e));}finally{setBusy(false);}}
   async function viewHistory(){setError('');try{const r=await api<History>('/api/admin/score-weights?version='+encodeURIComponent(version));setHistory(r);setPage(0);}catch(e){setError(errorMessage(e));}}
   useEffect(()=>{const refresh=()=>{void load();};window.addEventListener("claw:scores-updated",refresh);return()=>window.removeEventListener("claw:scores-updated",refresh)},[]);
-  if(!state)return <section className="panel"><h3>维度权重</h3>{error?<div className="alert warn">{error}</div>:<p>正在读取评分配置…</p>}</section>;  if(state.hosted_readonly)return <div className="stack weight-editor">
-    <div className="row"><h2>当前使用的评分权重</h2><span className="tag blue">云端只读</span>{state.vehicle_count!==null&&<span className="meta">覆盖 {state.vehicle_count} 辆车</span>}</div>
-    <section className="panel stack">
-      <div className="weight-stacked" aria-label="六维权重合计">{state.dimensions.map((d,i)=><span key={d.key} style={{width:`${(state.weights[d.key]||0)*100}%`,background:colors[i]}} title={d.name}/>)}</div>
-      <table className="tbl weight-readonly-table"><thead><tr><th>维度</th><th>当前权重</th><th>观察窗口／天</th><th>生效口径版本</th></tr></thead><tbody>{state.dimensions.map((d,i)=>{const share=(state.weights[d.key]||0)*100;const exact=state.baseline_weights&&state.baseline_weights[d.key]!==undefined?(state.baseline_weights[d.key]*100):share;const shown=Math.abs(exact-Math.round(exact))<0.005&&Number.isFinite(exact)?Math.round(exact):Number(exact.toFixed(2));return <tr key={d.key}><td><i className="weight-dot" style={{background:colors[i]}} aria-hidden="true"/>{d.name}</td><td><b>{shown}%</b></td><td>{state.dimension_windows?.[d.key] ?? state.window_days ?? '—'}</td><td className="meta">{state.ruleset_versions?.[d.key] || state.active_version}</td></tr>})}</tbody></table>
-      <p className="meta">{state.hosted_note||'云端工作台只读取当前生效权重。'}</p>
-      {error&&<div className="alert warn" role="alert">{error}</div>}
-    </section>
-  </div>;
+  if(!state)return <section className="panel"><h3>维度权重</h3>{error?<div className="alert warn">{error}</div>:<p>正在读取评分配置…</p>}</section>;
+  if(state.hosted_readonly)return <HostedWeightView state={state} error={error}></HostedWeightView>;
 
-  const colors=['#9671be','#b48bd0','#7d91c3','#75a5a3','#c6a16c','#b8849c'];/* 与云端只读视图共用同一配色 */
   return <div className="stack weight-editor">
     <div className="row"><h2>维度权重与安全评分</h2><span className="tag blue">当前：{state.ordinal===0?'原始评分':`V${state.ordinal}`}</span><span className="meta">{state.vehicle_count} 辆车 · 当前窗口 {state.window_days} 天</span></div>
     {notice&&<div className="alert info" role="status">{notice}</div>}{error&&<div className="alert warn" role="alert">{error}</div>}
     <section className="panel"><h3>初赛评分口径与因子</h3><p>近14天观察窗口与14天半衰期；按严重度累计后做暴露调整、冻结参考百分位映射及零事件背景扣除。安全分＝100－六维实际扣分。事件严重度不是逐次直接扣分；预测概率与可信度分别展示。</p><p className="meta">A/B/C/D按当前等级占比分档；占比可在工作台总览调整。调权后应关注车辆跨档、分值及证据变化。本区调整六维权重；因子与参考口径由管理员在下方模型规则维护，原始基准保留。</p>{state.factors?.map(f=><details key={f.key}><summary>{f.name} · 初赛权重 {(state.baseline_weights[f.key]*100).toFixed(2)}%</summary><p>适用条件：{f.condition}</p><p>暴露口径：{f.unit}；{f.key==='imu_evidence'?'异常采样比例按0.60加速度＋0.30角速度＋0.10速度差组合（缺项归一），惩罚指数最高60，初赛权重下最多6分；缺失单列不确定性。':'风险率 r=(n+τμ)/(e+τ)，维度扣分为加权参考惩罚减去同暴露零事件背景，负值取0。'}</p>{f.events.length>0&&<table><thead><tr><th>事件码</th><th>因子</th><th>严重度</th></tr></thead><tbody>{f.events.map(e=><tr key={e.code}><td>{e.code}</td><td>{e.name}</td><td>{e.severity}</td></tr>)}</tbody></table>}<p className="meta">来源：初赛最终冻结 scoring_frozen.json、event_taxonomy.py、scoring_rules.py 与 method_report.pdf；原始基准保留；当前规则可在模型配置中维护。</p></details>)}</section>
-    <section className="panel stack"><div className="weight-stacked" aria-label={`六维权重合计 ${weightTotal(inputs)}%`}>{state.dimensions.map((d,i)=><span key={d.key} style={{width:`${Number(inputs[d.key])||0}%`,background:colors[i]}} title={`${d.name} ${Number(inputs[d.key])||0}%`}/>)}</div>
+    <section className="panel stack"><div className="weight-stacked" aria-label={`六维权重合计 ${weightTotal(inputs)}%`}>{state.dimensions.map((d,i)=><span key={d.key} style={{width:`${Number(inputs[d.key])||0}%`,background:colors[i%colors.length]}} title={`${d.name} ${Number(inputs[d.key])||0}%`}/>)}</div>
       <label>设计名称<input className="btn" aria-label="权重设计名称" maxLength={80} value={label} onChange={e=>setLabel(e.target.value)}/></label><label>调整依据<textarea aria-label="权重调整依据" maxLength={1000} value={reason} onChange={e=>setReason(e.target.value)} placeholder="说明业务场景、调整目的和需要核验的风险"/></label><button className="btn" disabled={busy} onClick={()=>void saveDesign()}>保存权重设计</button><p className="meta" role="status">当前合计 {weightTotal(inputs)}% · 剩余可分配 {Number((100-weightTotal(inputs)).toFixed(2))}%。各维度独立调整，预览和保存时合计须为 100%。</p>
       {inputError&&<div className="alert warn" role="alert">{inputError}</div>}
-      {state.dimensions.map((d,i)=><div className="weight-row" key={d.key}><label htmlFor={'weight-'+d.key}>{d.name}</label><input id={'weight-'+d.key} type="range" min="0" max="100" step="0.01" value={Number(inputs[d.key])||0} disabled={busy} onChange={e=>change(d.key,e.target.value)} style={{accentColor:colors[i],color:colors[i],background:`linear-gradient(to right,${colors[i]} ${Number(inputs[d.key])||0}%, #eee9f3 ${Number(inputs[d.key])||0}%)`}}/><div className="weight-value"><input aria-label={d.name+'权重百分比'} type="text" inputMode="decimal" autoComplete="off" spellCheck={false} value={inputs[d.key]??''} onBlur={()=>{const v=inputs[d.key];if(v&&v!=='.')setInputs(old=>({...old,[d.key]:String(Number(v))}));}} disabled={busy} onChange={e=>change(d.key,e.target.value)}/><span>%</span></div></div>)}
+      {state.dimensions.map((d,i)=><div className="weight-row" key={d.key}><label htmlFor={'weight-'+d.key}>{d.name}</label><input id={'weight-'+d.key} type="range" min="0" max="100" step="0.01" value={Number(inputs[d.key])||0} disabled={busy} onChange={e=>change(d.key,e.target.value)} style={{accentColor:colors[i%colors.length],color:colors[i%colors.length],background:`linear-gradient(to right,${colors[i%colors.length]} ${Number(inputs[d.key])||0}%, #eee9f3 ${Number(inputs[d.key])||0}%)`}}/><div className="weight-value"><input aria-label={d.name+'权重百分比'} type="text" inputMode="decimal" autoComplete="off" spellCheck={false} value={inputs[d.key]??''} onBlur={()=>{const v=inputs[d.key];if(v&&v!=='.')setInputs(old=>({...old,[d.key]:String(Number(v))}));}} disabled={busy} onChange={e=>change(d.key,e.target.value)}/><span>%</span></div></div>)}
       <div className="row weight-actions"><button className="btn" disabled={busy} onClick={()=>{loadWeights(state.baseline_weights);setPreview(null);}}>恢复原始权重</button><button className="btn" disabled={busy} onClick={()=>{setError('');load().catch(e=>setError(errorMessage(e)));}}>重新加载</button><button className="btn primary" disabled={busy} onClick={()=>void inspect()}>{busy?'计算中…':'预览分数变化'}</button></div>
     </section>
     {preview&&<section className="panel stack"><h3>{preview.restore_version?"恢复历史版本的影响预览":"重算影响预览"}</h3><p>仅预览，尚未生效；提交后将生成新版本，历史版本和既有处置任务继续保留。</p><div className="cards"><div className="card"><div className="k">评分变化</div><b>{preview.summary.changed} / {preview.summary.count} 辆</b></div><div className="card"><div className="k">平均分</div><b>{preview.summary.old_average.toFixed(2)} → {preview.summary.new_average.toFixed(2)}</b></div><div className="card"><div className="k">等级变化</div><b>{preview.summary.level_changed} 辆</b></div></div>
