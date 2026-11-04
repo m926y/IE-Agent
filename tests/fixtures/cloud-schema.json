@@ -1,5 +1,5 @@
 {
- "_comment": "托管库实际存在的表与列清单（2026-11-04 第60轮经平台只读 schema 接口重新核对：45→47 张，新增迁移018 的 ai_chat_uploads / ai_action_plans。仅表名/列名，无租户或凭据信息）。用于 startFixtureDatabase({schema}) 的保真夹具：未知关系按 PostgREST 语义回 404/42P01，未知列回 400+42703，避免夹具静默建表掩盖云端缺表缺列缺陷。",
+ "_comment": "托管库第60轮已核对的47张表，加待部署迁移019的 ai_conversation_history 契约。仅表名/列名，无租户或凭据信息。用于 startFixtureDatabase({schema}) 的保真夹具：未知关系按 PostgREST 语义回 404/42P01，未知列回 400+42703，避免夹具静默建表掩盖云端缺表缺列缺陷。",
  "action_center_hidden": [
   "hidden_at",
   "item_id",
@@ -37,6 +37,12 @@
   "text_content",
   "truncated",
   "upload_id"
+ ],
+ "ai_conversation_history": [
+  "owner_user_id",
+  "snapshot_json",
+  "version_no",
+  "updated_at"
  ],
  "alerts": [
   "alert_id",

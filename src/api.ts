@@ -161,6 +161,8 @@ export const aiUpload = async (file: File): Promise<AiUpload> => {
   return json as AiUpload;
 };
 export const aiChat = (messages: { role: string; content: string }[], page?: string, clientRequestId?: string, caseId?:string, attachments?:string[]) => api<ChatResult>("/api/ai/chat", { method: "POST", body: JSON.stringify({ messages, page,case_id:caseId, ...(attachments&&attachments.length?{attachments}:{}), ...(clientRequestId ? { client_request_id: clientRequestId } : {}) }) });
+export const aiHistoryGet = () => api<{ok:true;snapshot:{active:string;items:{id:string;title:string;updated:number;messages:{role:'user'|'assistant';content:string}[]}[]};version_no:number}>("/api/ai/history");
+export const aiHistorySave = (snapshot:{active:string;items:{id:string;title:string;updated:number;messages:{role:'user'|'assistant';content:string}[]}[]},expected_version:number) => api<{ok:true;version_no:number}>("/api/ai/history",{method:"PUT",body:JSON.stringify({snapshot,expected_version})});
 export const aiSelftest = () => api<Selftest>("/api/ai/selftest");
 
 export type EvidenceCard = { ref: string; table: string; field: string; value: string | number | null; window: string | null; as_of_date: string | null; source_version: string | null; confidence: string | null; limitations: string | null; verification_id?: string | null };

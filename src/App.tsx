@@ -90,16 +90,15 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
       const historical=history.items.find(t=>t.id===history.active);
       const raw = historical?JSON.stringify(historical.messages):sessionStorage.getItem(storeKey);
       const arr: Msg[] = raw ? JSON.parse(raw) : [];
-      let lg: Msg[] = [];
-      try { const lr = localStorage.getItem("claw_ai_long_" + who.userId); if (lr) { const d = JSON.parse(lr); if (Number(d.exp) < Date.now()) localStorage.removeItem("claw_ai_long_" + who.userId); else lg = (d.items || []).map((x: { r: string; x: string }): Msg => ({ role: x.r === "assistant" ? "assistant" : "user", content: String(x.x), longTerm: true, restored: true })); } } catch {}
       const base: Msg[] = arr.map((m): Msg => ({ ...m, restored: true }));
-      return arr.length ? base : base.concat(lg);
+      return base;
     } catch { return []; }
   });
-  useEffect(() => { try { sessionStorage.setItem(storeKey, JSON.stringify(msgs.slice(-24))); } catch {} if(chatScrollRef.current)chatScrollRef.current.scrollTop=chatScrollRef.current.scrollHeight; }, [msgs, storeKey]);
+  useEffect(() => { try { sessionStorage.setItem(storeKey, JSON.stringify(msgs)); } catch {} if(chatScrollRef.current)chatScrollRef.current.scrollTop=chatScrollRef.current.scrollHeight; }, [msgs, storeKey]);
+  const [historyReady,setHistoryReady]=useState(false);
   const sendRef = useRef<(p?: string) => void>(() => undefined);
   sendRef.current = (text?: string) => { void send(text); };
-  useEffect(() => { if (preset) { const t = setTimeout(() => { sendRef.current(preset); onPresetUsed && onPresetUsed(); }, 60); return () => clearTimeout(t); } }, [preset]);
+  useEffect(() => { if (preset&&historyReady) { const t = setTimeout(() => { sendRef.current(preset); onPresetUsed && onPresetUsed(); }, 60); return () => clearTimeout(t); } }, [preset,historyReady]);
   useEffect(() => { const on401 = () => { try { sessionStorage.removeItem(storeKey); sessionStorage.removeItem("claw_ai_owner"); } catch {} }; window.addEventListener("claw:auth-lost", on401); return () => window.removeEventListener("claw:auth-lost", on401); }, [storeKey]);
   function doFill(ft: Record<string, unknown>) { try { sessionStorage.setItem("claw_fill", JSON.stringify(ft)); window.dispatchEvent(new CustomEvent("claw:fill", { detail: ft })); } catch {} const r = String(ft.route || ""); if (r) location.hash = r.replace(/^#/, ""); }
   const [confirms, setConfirms] = useState<Record<string, { decision: string; at: string; business: string | null }>>({});
@@ -110,8 +109,8 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
   const [longBanner, setLongBanner] = useState<string | null>(null);
   function excerpt(s: string) { return String(s).replace(/(密码|口令|token|cookie|sk-)[^\s，。,]*/gi, "$1***").slice(0, 90); }
   useEffect(() => { if (who.role !== "safety_admin") { setLongOn(false); return; } opsList().then((r) => { const row = (r as { rows: Record<string, unknown>[] }).rows.find((x) => String(x.config_id) === "ai_long_session"); setLongOn(String(row?.value || "off") === "on"); }).catch(() => setLongOn(false)); }, [who.role]);
-  useEffect(() => { if (who.role !== "safety_admin" || !longOn) return; try { const items = msgs.slice(-8).map(m => ({ r: m.role, x: excerpt(m.content), refs: (m.cards || []).map(c => c.ref).slice(0, 6) })); localStorage.setItem(longKey, JSON.stringify({ exp: Date.now() + 7200000, items })); } catch { setLongBanner("本平台不支持安全本地存储或配额受限：长期恢复不可用（现跨页 sessionStorage 能力不受影响）"); } }, [msgs, longOn, longKey, who.role]);
-  useEffect(() => { try { const raw = localStorage.getItem(longKey); if (raw) { const d = JSON.parse(raw); if (Number(d.exp) > Date.now() && (d.items || []).length) setLongBanner(`已加载本设备长期摘要（脱敏 ${d.items.length} 条，非业务状态；数字将在追问时重查）`); else if (Number(d.exp) < Date.now()) { localStorage.removeItem(longKey); setLongBanner("长期摘要已过期（2h）自动清除——重登从空会话开始"); } } } catch {} }, [longKey]);
+  useEffect(() => { if (who.role !== "safety_admin" || !longOn) return; try { const items = msgs.slice(-8).map(m => ({ r: m.role, x: excerpt(m.content), refs: (m.cards || []).map(c => c.ref).slice(0, 6) })); localStorage.setItem(longKey, JSON.stringify({ exp: Date.now() + 7200000, items })); } catch { setLongBanner("本设备未能保存脱敏摘要；请检查浏览器存储空间"); } }, [msgs, longOn, longKey, who.role]);
+  useEffect(() => { try { const raw = localStorage.getItem(longKey); if (raw) { const d = JSON.parse(raw); if (Number(d.exp) > Date.now() && (d.items || []).length) setLongBanner(`已加载本设备长期摘要（脱敏 ${d.items.length} 条，非业务状态；数字将在追问时重查）`); else if (Number(d.exp) < Date.now()) { localStorage.removeItem(longKey); setLongBanner("长期摘要已过期；历史会话仍可在左侧查看"); } } } catch {} }, [longKey]);
   /* R60：聊天附件（解析后的文字在服务端保留 24 小时；本地只暂存 upload_id 与展示元信息，且不跨会话长期保存） */
   const attKey = "claw_ai_atts_" + who.userId;
   const [atts, setAtts] = useState<AiUpload[]>(() => {
@@ -146,7 +145,7 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
   }
   async function send(preset?: string) {
     const text = (preset ?? input).trim();
-    if ((!text && !atts.length) || busy) return;
+    if ((!text && !atts.length) || busy || !historyReady) return;
     const sentAtts = atts;
     const content = text || "（已上传附件，请结合文件内容处理。）";
     setInput(""); setAtts([]); setAttErr("");
@@ -169,12 +168,12 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
     ? ["我的评分怎么构成？", "我能问别人分数吗", "待审核课程算正式制度吗", "如何提交复核申请"]
     : ["汇总最近有数据的一周车队评分（车辆数、均分、等级与可信度分布、周内趋势）", "分析车队评分分布及重点关注车辆", "给出课程与车辆，准备创建一次培训任务"];
   return <div className={"ai-panel ai-with-history"+(who.role==="driver"?" mobile-ai "+(historyOpen?"history-open":""):"")} role="complementary" style={{ width: 380, padding: 0 }}>
-    {who.role==="driver"&&<div className="mobile-ai-toolbar"><button aria-label="历史会话" onClick={()=>setHistoryOpen(true)}>☰</button><strong>新会话</strong><button aria-label="新建会话" disabled={busy} onClick={()=>window.dispatchEvent(new Event("claw:driver-new-chat"))}>＋</button></div>}
+    {who.role==="driver"&&<div className="mobile-ai-toolbar"><button aria-label="历史会话" onClick={()=>setHistoryOpen(true)}>☰</button><strong>新会话</strong><button aria-label="新建会话" disabled={busy||!historyReady} onClick={()=>window.dispatchEvent(new Event("claw:driver-new-chat"))}>＋</button></div>}
     <div style={{ padding: "10px 14px", background: "var(--navy)", color: "#fff", borderRadius: "12px 12px 0 0" }}>
       <button className="ai-close" onClick={onClose} style={{ color: "#cdd9ef" }} aria-label="关闭">✕</button>
       <b style={{ fontSize: 14 }}>AI 助手</b>
       <details className="ai-tools-menu"><summary>更多</summary><div>    {["safety_admin","safety_officer"].includes(who.role) && <details className="ai-advanced"><summary>会话设置</summary><div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-      <label className="meta" style={{ display: "flex", gap: 4, alignItems: "center" }}><input type="checkbox" checked={Boolean(longOn)} aria-label="长期会话摘要开关" onChange={(e) => { const v = e.target.checked; setLongOn(v); if (!v) { try { localStorage.removeItem(longKey); } catch {} setLongBanner("已关闭并清除本设备长期摘要"); } opsSet("ai_long_session", v ? "on" : "off").then((r) => setLongBanner(`长期摘要开关=${v ? "on" : "off"}（config v${r.new_version}，审计 ${r.audit_id}）`)).catch(() => setLongBanner("开关写入失败（需 manage.operation_config 能力）")); }} />重登后保留脱敏摘要（默认关；2h 过期；不含令牌/明文个人数据/业务状态）</label>
+      <label className="meta" style={{ display: "flex", gap: 4, alignItems: "center" }}><input type="checkbox" checked={Boolean(longOn)} aria-label="长期会话摘要开关" onChange={(e) => { const v = e.target.checked; setLongOn(v); if (!v) { try { localStorage.removeItem(longKey); } catch {} setLongBanner("已关闭并清除本设备长期摘要"); } opsSet("ai_long_session", v ? "on" : "off").then((r) => setLongBanner(`长期摘要开关=${v ? "on" : "off"}（config v${r.new_version}，审计 ${r.audit_id}）`)).catch(() => setLongBanner("开关写入失败（需 manage.operation_config 能力）")); }} />可选脱敏摘要（2h 过期；不影响完整历史保存）</label>
       <button className="btn" style={{ padding: "2px 8px" }} onClick={() => { try { localStorage.removeItem(longKey); } catch {} setLongBanner("已一键清除本设备长期摘要"); }}>一键清除</button>
     </div>{longBanner && <p className="meta">{longBanner}</p>}</details>}
     {["safety_admin","safety_officer"].includes(who.role) && <details className="ai-advanced"><summary>Excel账号导入</summary><AgentAccountUpload disabled={busy} onPlan={p=>setMsgs(m=>m.concat({role:"assistant",content:`已上传并校验账号表，批次 ${p.id}，共 ${p.count} 个账号；尚未创建。可以在下方确认，或让我检查这个批次。`,actionPlans:[p]}))}/><p className="meta">上传后逐项校验重名、车辆唯一绑定与角色权限，确认执行时一次性给出初始口令。</p></details>}
@@ -182,7 +181,7 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
       
     </div>
     {who.role==="driver"&&historyOpen&&<button className="mobile-history-backdrop" aria-label="关闭历史会话" onClick={()=>setHistoryOpen(false)}/>}
-    <ConversationSidebar mobile={who.role==="driver"} onDismiss={()=>setHistoryOpen(false)} user={who.userId} messages={msgs} busy={busy} onSelect={items=>{setMsgs(items);setInput('');setCheckMsg(null);setBizDraft({});setConfirms({})}}/>
+    <ConversationSidebar mobile={who.role==="driver"} onDismiss={()=>setHistoryOpen(false)} user={who.userId} messages={msgs} busy={busy||!historyReady} onReady={()=>setHistoryReady(true)} onSelect={items=>{setMsgs(items);setInput('');setCheckMsg(null);setBizDraft({});setConfirms({})}}/>
     <div className="ai-main">
     <div className="ai-chat-body" ref={chatScrollRef} style={{ overflow: "auto", padding: "10px 12px" }}>
 
@@ -256,9 +255,9 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
     </div>}
     <div className="ai-composer" style={{ padding: "8px 12px", display: "flex", gap: 6 }}>
       <input ref={fileRef} type="file" accept=".xlsx,.csv,.docx,.pptx,.html,.htm,.md,.txt" style={{ display: "none" }} aria-label="上传文件给AI" onChange={(e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) void uploadFile(file); }} />
-      <button className="btn" style={{ width: "auto", padding: "8px 10px" }} title="上传文件（Excel账号表、Word、PPT、HTML、Markdown、TXT、CSV，≤20MB，每条消息最多 3 个；暂不支持 PDF）" aria-label="上传文件" disabled={busy || attBusy || atts.length >= 3} onClick={() => fileRef.current?.click()}>📎</button>
-      <input style={{ flex: 1, minWidth: 0, padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 8 }} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") send(); }} placeholder={busy ? "正在回复…" : atts.length ? "可补充说明，如：按表格批量创建账号" : "发送消息"} aria-label="AI 提问" />
-      <button className="btn primary" style={{ width: "auto" }} onClick={() => send()} disabled={busy || attBusy || (!input.trim() && !atts.length)}>发送</button>
+      <button className="btn" style={{ width: "auto", padding: "8px 10px" }} title="上传文件（Excel账号表、Word、PPT、HTML、Markdown、TXT、CSV，≤20MB，每条消息最多 3 个；暂不支持 PDF）" aria-label="上传文件" disabled={busy || !historyReady || attBusy || atts.length >= 3} onClick={() => fileRef.current?.click()}>📎</button>
+      <input style={{ flex: 1, minWidth: 0, padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 8 }} value={input} disabled={!historyReady} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") send(); }} placeholder={!historyReady?"正在恢复历史对话…":busy ? "正在回复…" : atts.length ? "可补充说明，如：按表格批量创建账号" : "发送消息"} aria-label="AI 提问" />
+      <button className="btn primary" style={{ width: "auto" }} onClick={() => send()} disabled={!historyReady || busy || attBusy || (!input.trim() && !atts.length)}>发送</button>
     </div>
     </div>
   </div>;

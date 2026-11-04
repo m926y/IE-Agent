@@ -146,7 +146,7 @@ const SAFE_DATABASE_OPERATIONS = new Set([
   "get_alert_row", "patch_alert_status", "insert_alert_row", "get_alert_evidence", "count_risk_rows", "create_intervention", "patch_intervention", "get_intervention_row", "insert_notification", "get_notification_by_key", "read_own_intervention", "reply_own_intervention", "send_intervention",
   "list_import_by_key", "get_binding_user", "count_driver_conflict", "insert_binding_row", "close_binding_rows", "patch_binding_fields", "get_driver_profile",
   /* R60 云端聊天附件与待确认清单（表在迁移018；账号/课程/任务的写入复用上方既有标签） */
-  "aiu_r", "aiu_w", "aiu_d", "aip_r", "aip_w", "aip_u", "aip_d", "delete_user",
+  "aiu_r", "aiu_w", "aiu_d", "aip_r", "aip_w", "aip_u", "aip_d", "aih_r", "aih_w", "delete_user",
 ]);
 
 function resolveDbTarget() {
@@ -3354,6 +3354,35 @@ async function aiUpstream(body) {
   throw last;
 }
 
+async function handleAiConversationHistory(request, response, url, ctx) {
+  const user = requireUser(ctx.principal);
+  if (process.env.APP_DATA_MODE === 'full') throw new HttpError(503, 'ai_history_cloud_only');
+  const query = { owner_user_id: `eq.${user.user_id}`, select: 'snapshot_json,version_no,updated_at', limit: 1 };
+  const current = (await dbRequest('aih_r', 'GET', 'ai_conversation_history', { query })).data?.[0] || null;
+  if (request.method === 'GET') {
+    let snapshot = { active: '', items: [] };
+    if (current) try { snapshot = JSON.parse(current.snapshot_json); } catch { throw new HttpError(500, 'ai_history_corrupt'); }
+    return sendJson(response, 200, { ok: true, snapshot, version_no: Number(current?.version_no || 0), updated_at: current?.updated_at || null });
+  }
+  const body = await readBody(request, 4 * 1024 * 1024);
+  const snapshot = body.snapshot;
+  if (!snapshot || typeof snapshot.active !== 'string' || !Array.isArray(snapshot.items)
+    || snapshot.items.some(t => !t || typeof t.id !== 'string' || !Array.isArray(t.messages)
+      || t.messages.some(m => !m || !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string'))) throw new HttpError(400, 'ai_history_invalid');
+  const json = JSON.stringify(snapshot);
+  if (Buffer.byteLength(json) > 3 * 1024 * 1024) throw new HttpError(413, 'ai_history_too_large');
+  const expected = Number(body.expected_version);
+  if (!Number.isSafeInteger(expected) || expected < 0 || expected !== Number(current?.version_no || 0)) throw new HttpError(409, 'ai_history_version_conflict');
+  const at = nowIso();
+  if (current) {
+    const changed = await dbRequest('aih_w', 'PATCH', 'ai_conversation_history', { query: { owner_user_id: `eq.${user.user_id}`, version_no: `eq.${expected}` }, body: { snapshot_json: json, version_no: expected + 1, updated_at: at }, headers: { Prefer: 'return=representation' } });
+    if (!changed.data?.length) throw new HttpError(409, 'ai_history_version_conflict');
+  } else {
+    await dbRequest('aih_w', 'POST', 'ai_conversation_history', { body: [{ owner_user_id: user.user_id, snapshot_json: json, version_no: 1, updated_at: at }], headers: { Prefer: 'return=minimal' } });
+  }
+  sendJson(response, 200, { ok: true, version_no: expected + 1, updated_at: at });
+}
+
 async function handleAiChat(request, response, url, ctx) {
   const user = requireUser(ctx.principal);
   const body = await readBody(request, 16384);
@@ -5954,6 +5983,8 @@ const API_ROUTES = [
   { method: "GET", path: "/api/meta/history-dates", needAuth: true, handler: handleHistoryDates },
   { method: "POST", path: "/api/ai/upload", needAuth: true, handler: handleAiUpload }, /* R60：聊天附件解析（文字入页面隔离库，24h 过期；清单执行仍走 /api/agent/execute） */
   { method: "POST", path: "/api/ai/chat", needAuth: true, handler: handleAiChat },
+  { method: "GET", path: "/api/ai/history", needAuth: true, handler: handleAiConversationHistory },
+  { method: "PUT", path: "/api/ai/history", needAuth: true, handler: handleAiConversationHistory },
   { method: "GET", path: "/api/ai/selftest", needAuth: true, handler: handleAiSelftest },
   { method: "POST", path: "/api/ai/task-summary", needAuth: true, cap: "review.training_feedback", handler: handleTaskSummary },
   { method: "GET", path: "/api/ai/preplan", needAuth: true, handler: handleAiPreplan },

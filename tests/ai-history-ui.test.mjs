@@ -1,0 +1,35 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import ts from 'typescript';
+import {mkdir,mkdtemp,rm,readFile,writeFile} from 'node:fs/promises';
+import {join} from 'node:path';
+import {pathToFileURL,fileURLToPath} from 'node:url';
+
+test('AI history migrates the old session and preserves all conversation fields',async t=>{
+ const root=fileURLToPath(new URL('../',import.meta.url));
+ await mkdir(join(root,'.runtime-tmp'),{recursive:true});
+ const dir=await mkdtemp(join(root,'.runtime-tmp','ai-history-'));
+ t.after(()=>rm(dir,{recursive:true,force:true}));
+ const output=join(dir,'history.mjs');
+ const source=await readFile(join(root,'src','ai-history.ts'),'utf8');
+ await writeFile(output,ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText);
+ const {readConversations,writeConversations,mergeConversations}=await import(pathToFileURL(output).href);
+ const local=new Map(),session=new Map();
+ const makeStorage=map=>({getItem:k=>map.get(k)??null,setItem:(k,v)=>map.set(k,String(v)),removeItem:k=>map.delete(k)});
+ const oldLocal=globalThis.localStorage,oldSession=globalThis.sessionStorage;
+ globalThis.localStorage=makeStorage(local);globalThis.sessionStorage=makeStorage(session);
+ t.after(()=>{globalThis.localStorage=oldLocal;globalThis.sessionStorage=oldSession});
+ const original={active:'a',items:[{id:'a',title:'课程',updated:1,messages:[{role:'user',content:'生成课程',attachments:[{name:'材料.md'}]},{role:'assistant',content:'待确认',actionPlans:[{id:'p'}],cards:[{ref:'c'}],callId:'aud-1'}]}]};
+ session.set('claw_ai_threads_u1',JSON.stringify(original));
+ assert.deepEqual(readConversations('u1'),original);
+ assert.deepEqual(JSON.parse(local.get('claw_ai_threads_u1')),original,'旧会话应迁移为浏览器长期存储');
+ writeConversations('u1',original);
+ session.clear();
+ assert.deepEqual(readConversations('u1'),original,'关闭旧浏览会话后仍能恢复全部字段');
+ assert.deepEqual(readConversations('u2'),{active:'',items:[]},'账号间隔离');
+ const remote={active:'b',items:[{id:'b',title:'另一设备',updated:2,messages:[{role:'user',content:'第二个会话'}]}]};
+ const merged=mergeConversations(original,remote);
+ assert.equal(merged.items.length,2);
+ assert.equal(merged.active,'b');
+ assert.deepEqual(merged.items.find(x=>x.id==='a').messages,original.items[0].messages);
+});

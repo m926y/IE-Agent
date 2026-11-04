@@ -122,6 +122,25 @@ test('hosted AI attachments and action plans (R60)', async (t) => {
   const admin = (await api('/api/auth/login', { method: 'POST', body: { username: 'r60_admin', password: 'R60Admin2026' } })).cookie;
   const officer = (await api('/api/auth/login', { method: 'POST', body: { username: 'r60_officer', password: 'R60Officer2026' } })).cookie;
 
+  await t.test('AI 历史按当前账号持久化完整消息并保护版本', async () => {
+    const empty = await api('/api/ai/history', { cookie: admin });
+    assert.equal(empty.status, 200);
+    assert.equal(empty.body.version_no, 0);
+    const snapshot = { active: 'thread-1', items: [{ id: 'thread-1', title: '课程材料', updated: Date.now(), messages: [
+      { role: 'user', content: '根据材料生成课程', attachments: [{ name: '材料.md', kind_label: 'Markdown', chars: 100 }] },
+      { role: 'assistant', content: '已准备待确认清单', actionPlans: [{ id: 'plan-1', kind: 'course' }], cards: [{ ref: 'course:1' }], callId: 'aud-1' },
+    ] }] };
+    const saved = await api('/api/ai/history', { cookie: admin, method: 'PUT', body: { snapshot, expected_version: 0 } });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    const restored = await api('/api/ai/history', { cookie: admin });
+    assert.deepEqual(restored.body.snapshot, snapshot, '所有消息和卡片数据应原样恢复');
+    const reopened = (await api('/api/auth/login', { method: 'POST', body: { username: 'r60_admin', password: 'R60Admin2026' } })).cookie;
+    assert.deepEqual((await api('/api/ai/history', { cookie: reopened })).body.snapshot, snapshot, '重新登录仍能取回历史');
+    assert.equal((await api('/api/ai/history', { cookie: officer })).body.snapshot.items.length, 0, '其他账号不能看到历史');
+    const stale = await api('/api/ai/history', { cookie: admin, method: 'PUT', body: { snapshot, expected_version: 0 } });
+    assert.equal(stale.status, 409, '旧页面不得覆盖新版本');
+  });
+
   await t.test('upload：xlsx/docx/pptx/md 解析、PDF 诚实拒绝、非法文件', async () => {
     const x = await upload(admin, '账号表.xlsx', xlsxBytes([['用户名', '显示名', '角色', '对应车辆'], ['r60_new1', '甲一', '司机', '车辆4'], ['r60_new2', '乙二', '司机', '']]));
     assert.equal(x.status, 201, JSON.stringify(x.body));

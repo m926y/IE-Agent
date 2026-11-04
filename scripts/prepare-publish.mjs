@@ -54,3 +54,5 @@ await cp(new URL("scripts/recompute-model.py",projectRoot),new URL("scripts/reco
 await cp(new URL("scripts/scoring_source/",projectRoot),new URL("scripts/scoring_source/",publishRoot),{recursive:true});
 
 await cp(new URL("scripts/extract-learning-document.py",projectRoot),new URL("scripts/extract-learning-document.py",publishRoot));
+await mkdir(new URL("scripts/contract/migrations/",publishRoot),{recursive:true});
+await cp(new URL("scripts/contract/migrations/019_ai_conversation_history.up.sql",projectRoot),new URL("scripts/contract/migrations/019_ai_conversation_history.up.sql",publishRoot));
