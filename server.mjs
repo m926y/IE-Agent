@@ -4208,7 +4208,17 @@ async function generateDailyReportCore(driverId, reportDate) {
   return validateDailySafetyReport(organizeDailyReport(snapshot, reportDate), snapshot);
 }
 async function hostPublishDailyReport({driverId,reportDate,actorId,actorRole='safety_admin',revise=false,jobClaim=null}) {
+  const range = await hostedReportRange();
+  if (range.first_generatable && reportDate < range.first_generatable) {
+    /* 早于数据覆盖的日期只会产出一份全"未取得"的简报（属主反馈的管理端异常）：拒绝生成，不入库不通知 */
+    if (jobClaim) { try { await dbRequest("drj_u","PATCH","daily_report_jobs",{ query:{ id:`eq.${jobClaim.id}`, lease_token:`eq.${jobClaim.leaseToken}` }, body:{ status:'pending', error_message:'daily_report_date_out_of_range', lease_token:null, lease_until:0, next_at: Date.now()+3600000 } }); } catch { } }
+    throw new HttpError(400, 'daily_report_date_out_of_range');
+  }
   const report = await generateDailyReportCore(driverId, reportDate); // 确定性核心：不调模型
+  if (reportHasNoObservations(report)) {
+    if (jobClaim) { try { await dbRequest("drj_u","PATCH","daily_report_jobs",{ query:{ id:`eq.${jobClaim.id}`, lease_token:`eq.${jobClaim.leaseToken}` }, body:{ status:'pending', error_message:'daily_report_no_observations', lease_token:null, lease_until:0, next_at: Date.now()+3600000 } }); } catch { } }
+    throw new HttpError(409, 'daily_report_no_observations');
+  }
   const finishJob = async () => { if (jobClaim) { try { await dbRequest("drj_u","PATCH","daily_report_jobs",{ query:{ id:`eq.${jobClaim.id}`, lease_token:`eq.${jobClaim.leaseToken}` }, body:{ status:'succeeded', finished_at: nowIso(), lease_token:null, lease_until:null, next_at:0, error_message:null }, headers:{ Prefer:'return=minimal' } }); } catch {} } };
   const cur = await dbRequest("dsr_q","GET","daily_safety_reports",{ query:{ driver_id:`eq.${driverId}`, report_date:`eq.${reportDate}`, is_current:'eq.true', status:'eq.published', select:"id,report_version,report_json,published_at,source_fingerprint,is_current", limit:1 } });
   const current = cur.data?.[0] || null;
@@ -4550,7 +4560,30 @@ async function hostAdminReportEvidence(r,s,u,c){
  }
  const out=await evidenceCheckCore(String(sp.get('ref')||''),c); return sendJson(s,out.code,out.payload);
 }
-async function hostReportSettings(r,s,u,c){ const user=requireUser(c.principal); if(!['safety_admin','safety_officer'].includes(user.role))throw new HttpError(403,'forbidden'); sendJson(s,200,{time:(process.env.IE_DAILY_REPORT_AT||'07:00'),canEdit:false,business_timezone:'Asia/Shanghai',managed_by:'server env (hosted)'}); } // R51：字段名对齐 UI（time/canEdit，此前 publish_time 使面板读到 undefined）；宿主发布时间由部署 env 控制，canEdit 恒 false（诚实降级，不显示可保存假象）
+let hostedRangeCache = null, hostedRangeAt = 0;
+/* 简报可生成区间 = 在线 score_history 的 as_of_date 覆盖区间（不是"今天"）：
+ * 云端数据集是已发行回放，选在区间外的日期只会产出一份"全部未取得"的空简报并被发布（属主反馈的管理端异常）。 */
+async function hostedReportRange() {
+  if (hostedRangeCache && Date.now() - hostedRangeAt < 60000) return hostedRangeCache;
+  const edge = async (dir) => (((await dbRequest("dsr_q", "GET", "score_history", { query: { select: "as_of_date", order: `as_of_date.${dir}`, limit: 1 } }).catch(() => ({ data: [] }))).data || [])[0] || {}).as_of_date || null;
+  const [minObs, maxObs] = [await edge("asc"), await edge("desc")];
+  const plus = (day) => (day ? new Date(Date.parse(day + "T00:00:00Z") + 86400000).toISOString().slice(0, 10) : null);
+  /* 简报按"截至前一天"取观测，所以可生成的最早一天 = 最早观测日的次日；最晚 = 最新观测日的次日 */
+  const first = plus(minObs), last = plus(maxObs);
+  hostedRangeCache = { from: minObs, to: last, first_generatable: first, last_generatable: last, observation_to: maxObs }; hostedRangeAt = Date.now();
+  return hostedRangeCache;
+}
+/* coverage.observedDates 是全车队回放日期，不代表本司机有可用事实；
+ * 只有当个人评分、车队均分、风险、卡片、目标全为空时，这份简报才是"没有任何可引用观测"。 */
+const reportHasNoObservations = (report) => {
+  const m = report?.metrics || {};
+  return (m.personalScore === null || m.personalScore === undefined)
+    && (m.fleetAverage === null || m.fleetAverage === undefined)
+    && !(report?.risks || []).length && !(report?.cards || []).length && !report?.dailyGoal;
+};
+
+async function hostReportSettings(r,s,u,c){ const user=requireUser(c.principal); if(!['safety_admin','safety_officer'].includes(user.role))throw new HttpError(403,'forbidden'); const range = await hostedReportRange();
+  sendJson(s,200,{time:(process.env.IE_DAILY_REPORT_AT||'07:00'),canEdit:false,business_timezone:'Asia/Shanghai',managed_by:'server env (hosted)',data_range:range,default_date:(range.last_generatable && range.last_generatable < dailyBusinessDate()) ? range.last_generatable : dailyBusinessDate()}); } // R51：字段名对齐 UI（time/canEdit，此前 publish_time 使面板读到 undefined）；宿主发布时间由部署 env 控制，canEdit 恒 false（诚实降级，不显示可保存假象）
 async function hostSaveReportSettings(r,s,u,c){ const user=requireUser(c.principal); if(!['safety_admin','safety_officer'].includes(user.role))throw new HttpError(403,'forbidden'); sendJson(s,200,{ok:false,note:'宿主环境的简报发布时间由部署 env IE_DAILY_REPORT_AT 控制（默认 07:00 Asia/Shanghai）'}); }
 async function hostHandleGoal(r,s,u,c,id){ // R51：目标求助处置云端宿主（对齐本地 handleGoal：处置三列+通知+审计；full 模式仍走本地集成分支）
   const user=requireUser(c.principal);

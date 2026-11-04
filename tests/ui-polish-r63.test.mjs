@@ -69,4 +69,22 @@ test('review / root-cause / replay UI contract (R63)', async t => {
     assert.ok(!/onRows\?:/.test(ui), '未使用的 onRows 属性应已回退');
     assert.ok(!/PageCheck/.test(ui));
   });
+
+  await t.test('简报面板与视图：区间来自服务端实测数据，空简报有诚实一句话（R64）', async () => {
+    const dr = await src('daily-report.tsx');
+    const adm = await src('admin-driver-reports.tsx');
+    assert.match(adm, /daily-reports\/settings/, '管理员简报页要读取服务端下发的数据覆盖区间');
+    assert.match(adm, /first_generatable/, '区间用于约束"报告日期"选择');
+    assert.match(adm, /daily_report_no_observations|daily_report_date_out_of_range/, '两类拒绝都要有中文提示');
+    assert.match(adm, /min=\{range\?\.first_generatable\|\|undefined\}/, '日期输入有下限');
+    assert.match(dr, /adminDailyReportSettings\(\)/, '面板读取服务端下发的可生成区间');
+    assert.match(dr, /range\?\.first_generatable\|\|undefined/, '日期输入框以下限约束，选不到没有数据的日期');
+    assert.match(dr, /daily_report_no_observations|daily_report_date_out_of_range/, '两种拒绝都要有中文提示');
+    assert.match(dr, /noObservations/, '无可用观测时整体提示，而不是四张"未取得"卡');
+    assert.ok(!/'fleet 未取得'/.test(dr), "不再出现英文字段名 fleet");
+    assert.ok(!/'日期未取得'/.test(dr), '英文式"日期未取得"占位已移除');
+    assert.match(dr, /每天 \{publishTime\} 后自动为已绑定司机/, '说明使用服务端真实发布时间');
+    const api = await src('api.ts');
+    assert.match(api, /adminDailyReportSettings/, '客户端有 settings 调用');
+  });
 });

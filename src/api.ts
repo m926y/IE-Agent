@@ -78,6 +78,9 @@ export const getData = <T,>(resource: string, params: Record<string, string | nu
   return api<ListResult<T>>(`/api/data/${resource}${qs.toString() ? `?${qs}` : ""}`);
 };
 export const getOverview = () => api<OverviewResult>("/api/overview");
+export type DailyReportSettings = { time: string; canEdit: boolean; business_timezone?: string; data_range?: { from?: string | null; to?: string | null; first_generatable?: string | null; last_generatable?: string | null; observation_to?: string | null }; default_date?: string };
+/** 简报生成区间来自服务端实测的在线数据覆盖（不是浏览器当天） */
+export const adminDailyReportSettings = () => api<DailyReportSettings>("/api/admin/daily-reports/settings");
 export type HistoryDates = { dates: string[]; counts: Record<string, number | null> };
 export const getHistoryDates = () => api<HistoryDates>("/api/meta/history-dates");
 export type BindingResult = { ok: boolean; binding_id: string | null; user_id: string; driver_id: string | null; identity_status: string | null; binding_note: string | null; audit_id: string | null };
