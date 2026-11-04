@@ -332,6 +332,53 @@ test('hosted AI attachments and action plans (R60)', async (t) => {
     assert.equal('text_content' in detail, false, '审计只存结论，不存附件正文');
   });
 
+  await t.test('R62 账号表宽容度：同义表头可解析、无关列忽略并报告、密码列拒绝', async () => {
+    /* 属主反馈"csv 批量创建后没有真正创建"：真实表头写法多样（绑定车辆/车号/岗位…），
+     * 旧版整表判非法 → 清单根本不生成，看起来像"点了没反应"。现在只有缺必需列或含密码列才拒绝。 */
+    const csv = '登录名,姓名,岗位,车牌号,备注\na1_user,甲一,驾驶员,车辆3,本轮忽略的说明列\na2_user,甲二,安全员,,另一列\n';
+    const up = await upload(admin, '账号表-真实写法.csv', Buffer.from('\ufeff' + csv, 'utf8'));
+    assert.equal(up.status, 201, JSON.stringify(up.body));
+    const r = await api('/api/ai/chat', { cookie: admin, method: 'POST', body: { messages: [{ role: 'user', content: `按表格批量创建账号（附件 upload_id=${up.body.upload_id}）` }], attachments: [up.body.upload_id] } });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const plan = r.body.action_plans?.[0];
+    assert.ok(plan, '同义表头的账号表必须能生成待确认清单：' + JSON.stringify(r.body.data_limitations));
+    assert.equal(plan.count, 2);
+    assert.deepEqual(plan.rows.map((x) => x.role).sort(), ['driver', 'safety_officer'], '"驾驶员"→driver、"安全员"→safety_officer');
+    assert.equal(plan.rows.find((x) => x.username === 'a1_user').vehicle, '车辆3', '“车牌号”列按对应车辆解析');
+    assert.ok((plan.ignored_columns || []).length >= 1, '无关列被忽略但要如实报告：' + JSON.stringify(plan.ignored_columns));
+    assert.match(plan.note, /已忽略表格中的非账号列/);
+    const before = tables.app_users.length;
+    assert.equal(tables.app_users.some((u) => String(u.username).startsWith('a1_')), false, '确认前不写库');
+    const exec = await api('/api/agent/execute', { cookie: admin, method: 'POST', body: { plan_id: plan.id, confirm: true } });
+    assert.equal(exec.status, 200, JSON.stringify(exec.body));
+    assert.equal(exec.body.count, 2);
+    assert.equal(tables.app_users.length, before + 2, '确认执行后账号确实落库');
+    assert.ok(tables.audit_logs.some((a) => a.action === 'agent.apply' && String(a.entity_id) === plan.id), '人工确认执行要留 agent.apply 审计');
+    /* R62 核心可见性修复：批量导入的账号必须立刻能在账号列表第一页看到（旧按 user_id 升序，随机新 id 沉底 → 看起来"没创建"） */
+    const list0 = await api('/api/data/admin.accounts?limit=8', { cookie: admin });
+    assert.equal(list0.status, 200, JSON.stringify(list0.body));
+    const listed = (list0.body.rows || []).map((x) => String(x.username));
+    assert.ok(listed.includes('a1_user') && listed.includes('a2_user'), '新建账号要出现在首页：' + listed.join(','));
+    const created = (list0.body.rows || []).filter((x) => ['a1_user', 'a2_user'].includes(String(x.username)));
+    assert.equal(created.length, 2);
+    assert.ok(created.every((x) => String(x.created_at || '').length > 8 && String(x.updated_at || '').length > 8), '新建账号要带创建/更新时间（列表时间列不再永远空白）');
+    assert.ok(!JSON.stringify(list0.body).includes('password_hash'), '投影绝不包含口令列');
+    /* 密码列一律拒绝（红线：初始口令只能服务端生成） */
+    const pw = await upload(admin, '带密码列.csv', Buffer.from('用户名,显示名,角色,初始密码\nx_user,某,司机,abc12345\n', 'utf8'));
+    const r2 = await api('/api/ai/chat', { cookie: admin, method: 'POST', body: { messages: [{ role: 'user', content: `按表格批量创建账号（附件 upload_id=${pw.body.upload_id}）` }], attachments: [pw.body.upload_id] } });
+    assert.equal(r2.body.action_plans?.length || 0, 0);
+    assert.match((r2.body.data_limitations || []).join(''), /不能包含密码列|账号表无效/);
+    /* 过期清单必须明确报错，不再"点了没反应" */
+    const expiredPlan = await api('/api/agent/accounts/preview', { cookie: admin, method: 'POST', body: { rows: [{ username: 'a3_user', display_name: '甲三', role: 'driver' }] } });
+    assert.equal(expiredPlan.status, 200);
+    const row = tables.ai_action_plans.find((x) => x.plan_id === expiredPlan.body.id);
+    assert.ok(Date.parse(row.expires_at) - Date.parse(row.created_at) > 20 * 3600000, '清单有效期已从 30 分钟延长到 24 小时');
+    row.expires_at = new Date(Date.now() - 1000).toISOString();
+    const late = await api('/api/agent/execute', { cookie: admin, method: 'POST', body: { plan_id: expiredPlan.body.id, confirm: true } });
+    assert.equal(late.status, 410, JSON.stringify(late));
+    assert.equal(late.body.error, 'agent_plan_expired');
+  });
+
   await t.test('培训台账批量删除：管理员/安全员权限、混合批次整批拒绝、历史保留', async () => {
     const ofc = (await api('/api/auth/login', { method: 'POST', body: { username: 'r60_driver', password: 'R60Driver2026' } }));
     void ofc;

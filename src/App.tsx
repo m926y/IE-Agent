@@ -167,7 +167,7 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
   }
   const suggestions = who.role === "driver"
     ? ["我的评分怎么构成？", "我能问别人分数吗", "待审核课程算正式制度吗", "如何提交复核申请"]
-    : ["生成最近有数据的一周车队周报，输出HTML和Markdown文件", "分析车队评分分布及重点关注车辆", "查看课程，准备给D级车辆创建培训任务"];
+    : ["汇总最近有数据的一周车队评分（车辆数、均分、等级与可信度分布、周内趋势）", "分析车队评分分布及重点关注车辆", "给出课程与车辆，准备创建一次培训任务"];
   return <div className={"ai-panel ai-with-history"+(who.role==="driver"?" mobile-ai "+(historyOpen?"history-open":""):"")} role="complementary" style={{ width: 380, padding: 0 }}>
     {who.role==="driver"&&<div className="mobile-ai-toolbar"><button aria-label="历史会话" onClick={()=>setHistoryOpen(true)}>☰</button><strong>新会话</strong><button aria-label="新建会话" disabled={busy} onClick={()=>window.dispatchEvent(new Event("claw:driver-new-chat"))}>＋</button></div>}
     <div style={{ padding: "10px 14px", background: "var(--navy)", color: "#fff", borderRadius: "12px 12px 0 0" }}>

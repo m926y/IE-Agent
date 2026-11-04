@@ -55,7 +55,6 @@ export function AiPreplanPage() {
           <div style={{ fontSize: 12.5 }}>责任人 / 确认操作者：<b>{c.operator}</b></div>
           <div className="meta">预计业务待办：{c.todos}</div>
           <div className="meta">所缺条件：{c.missing.length ? c.missing.join("；") : "无"}</div>
-          <div className="meta">数据限制：{c.limits}</div>
           <div style={{ marginTop: 6 }}>
             {c.actionable && c.draft_entry
               ? <button className="btn primary" style={{ width: "auto" }} onClick={() => goDraft(c)}>{c.draft_entry.label} →</button>

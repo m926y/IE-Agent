@@ -13,18 +13,17 @@ type Preview={restore_version?:string|null;base_version:string;weights:Weights;p
 type History={version:string;ordinal:number;rows:{gpsno:string;safety_score:number;risk_level:string}[]};
 function errorMessage(e:unknown){const c=e instanceof ApiError?e.code:'';return ({scoring_version_conflict:'配置已被更新，请重新加载后再预览',scoring_preview_required:'请先预览当前权重的分数变化',weights_sum_invalid:'权重合计必须为 100%',weights_invalid:'请为六个维度填写 0–100% 的有效权重',scoring_global_admin_required:'仅拥有全部车队权限的安全管理员可调整全局评分',scoring_service_unavailable:'评分口径暂时读不到：请刷新重试；权重调整与全量重算在本地完整数据工作台执行',scoring_recompute_failed:'重算失败，当前评分版本未改变'} as Record<string,string>)[c]||'操作失败，请稍后重试';}
 
-/* 云端只读视图：独立组件，配色等常量在其函数体内声明。
+/* 只读视图：独立组件，配色等常量在其函数体内声明。
  * （此前只读分支内联在 WeightEditor 里、用到的 colors 声明在其之后 → TDZ ReferenceError，整个评分规则页白屏） */
 export function HostedWeightView({state,error}:{state:State;error?:string}){
   const colors=['#9671be','#b48bd0','#7d91c3','#75a5a3','#c6a16c','#b8849c'];
   const dim=(k:string)=>Number(state.weights&&state.weights[k])||0;
   const total=Object.values(state.weights||{}).reduce((a,b)=>a+(Number(b)||0),0);
   return <div className="stack weight-editor">
-    <div className="row"><h2>当前使用的评分权重</h2><span className="tag blue">云端只读</span>{state.vehicle_count!==null&&<span className="meta">覆盖 {state.vehicle_count} 辆车</span>}</div>
+    <div className="row"><h2>当前使用的评分权重</h2><span className="tag blue">只读</span>{state.vehicle_count!==null&&<span className="meta">覆盖 {state.vehicle_count} 辆车</span>}</div>
     <section className="panel stack">
       <div className="weight-stacked" role="img" aria-label={`六维权重合计 ${(total*100).toFixed(2)}%`}>{state.dimensions.map((d,ix)=><span key={d.key} style={{width:`${dim(d.key)*100}%`,background:colors[ix%colors.length]}} title={`${d.name} ${(dim(d.key)*100).toFixed(2)}%`}/>)}</div>
       <table className="tbl weight-readonly-table"><thead><tr><th>维度</th><th>当前权重</th><th>观察窗口／天</th><th>生效口径版本</th></tr></thead><tbody>{state.dimensions.map((d,ix)=>{const share=dim(d.key)*100;const whole=Math.abs(share-Math.round(share))<0.005;return <tr key={d.key}><td><i className="weight-dot" style={{background:colors[ix%colors.length]}} aria-hidden="true"/>{d.name}</td><td><b>{whole?Math.round(share):Number(share.toFixed(2))}%</b></td><td>{state.dimension_windows?.[d.key] ?? state.window_days ?? '—'}</td><td className="meta">{state.ruleset_versions?.[d.key] || state.active_version}</td></tr>})}</tbody></table>
-      <p className="meta">{state.hosted_note||'云端工作台只读取当前生效权重，不在此页预览、重算或生效。'}</p>
       {error&&<div className="alert warn" role="alert">{error}</div>}
     </section>
   </div>;

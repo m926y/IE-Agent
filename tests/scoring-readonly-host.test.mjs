@@ -51,7 +51,7 @@ test('hosted read-only scoring view (R61)', async (t) => {
     assert.equal(r.body.weights.imu_evidence, 0.1);
     assert.equal(r.body.active_version, 'original', '云端评分口径版本与 /api/score-version 一致');
     assert.equal(r.body.designs.length, 0);
-    assert.match(r.body.hosted_note, /不在此页预览、重算或生效/);
+    assert.match(r.body.hosted_note, /不在此处预览、重算或生效/);
     assert.equal(r.body.window_days, 14, '窗口来自随发行交付的冻结模型定义');
     assert.equal(r.body.dimension_windows.fatigue_distraction, 1, '各维度自身窗口如实透出（在线表即为 1）');
     assert.ok(Array.isArray(r.body.factors) && r.body.factors.length === 6, '因子按维度分组只读展示');

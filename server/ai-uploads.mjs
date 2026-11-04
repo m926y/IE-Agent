@@ -297,8 +297,19 @@ export function parseUploadBytes(name, bytes) {
 }
 
 /* 账号表映射：与前端 accountRows() 同规则（表头白名单、角色中英映射、行数上限），服务端为权威校验。 */
-const ACCOUNT_HEADER_ALIASES = { '用户名': 'username', '账号': 'username', 'username': 'username', '显示名': 'display_name', '姓名': 'display_name', 'display_name': 'display_name', '角色': 'role', 'role': 'role', '对应车辆': 'vehicle', '车辆': 'vehicle', '车辆编号': 'vehicle', 'vehicle': 'vehicle' };
-const ACCOUNT_ROLE_ALIASES = { '司机': 'driver', '安全员': 'safety_officer', '安全管理员': 'safety_admin', '队长': 'team_leader' };
+const ACCOUNT_HEADER_ALIASES = {
+  '用户名': 'username', '账号': 'username', '登录名': 'username', 'username': 'username', 'user': 'username', 'account': 'username',
+  '显示名': 'display_name', '姓名': 'display_name', '司机姓名': 'display_name', '名称': 'display_name', 'display_name': 'display_name', 'name': 'display_name',
+  '角色': 'role', '岗位': 'role', '权限': 'role', 'role': 'role',
+  '对应车辆': 'vehicle', '绑定车辆': 'vehicle', '车辆': 'vehicle', '车辆号': 'vehicle', '车号': 'vehicle', '车牌': 'vehicle', '车牌号': 'vehicle', '车辆编号': 'vehicle', 'vehicle': 'vehicle', 'gpsno': 'vehicle', 'gps no': 'vehicle',
+};
+const ACCOUNT_ROLE_ALIASES = { '司机': 'driver', '驾驶员': 'driver', '货车司机': 'driver', '安全员': 'safety_officer', '安全管理员': 'safety_admin', '管理员': 'safety_admin', '队长': 'team_leader' };
+const PASSWORD_HEADER = /(密码|口令|password|passwd|pwd|token)/i;
+/* 账号表映射（R62 放宽）：
+ * · 表头接受同义词（绑定车辆/车号/登录名/岗位…），列顺序任意；
+ * · 无法识别的列不再整批拒绝——忽略并在 ignored_columns 里如实报告（前端与清单都要显示）；
+ * · 密码/口令类列一律拒绝（红线：初始口令只能由服务端生成）；
+ * · 行数 1–200、列数上限 COL_CAP、角色中英文映射与本地版一致。 */
 export function sheetToAccountRows(rows) {
   const cleanRows = (Array.isArray(rows) ? rows : []).filter((r) => Array.isArray(r) && r.some((c) => c !== null && c !== undefined && String(c).trim() !== ''));
   if (cleanRows.length < 2) throw fail('account_table_too_short', '请上传1–200行账号数据，另加一行表头');
@@ -306,17 +317,22 @@ export function sheetToAccountRows(rows) {
   const headerRow = cleanRows[0];
   let cols = headerRow.length;
   while (cols > 0 && (headerRow[cols - 1] === null || headerRow[cols - 1] === undefined || String(headerRow[cols - 1]).trim() === '')) cols--;
-  const headers = headerRow.slice(0, cols).map((c) => ACCOUNT_HEADER_ALIASES[String(c ?? '').replace(/^\ufeff/, '').trim().toLowerCase()]);
-  if (![3, 4].includes(headers.length) || new Set(headers).size !== headers.length || headers.some((h) => !h) || !['username', 'display_name', 'role'].every((h) => headers.includes(h)))
-    throw fail('account_table_header_invalid', '表头须包含：用户名、显示名、角色；可添加对应车辆，不要上传密码列。');
-  return cleanRows.slice(1).map((r, i) => {
-    if (r.slice(cols).some((v) => v != null && String(v).trim() !== '')) throw fail('account_table_extra_columns', '第' + (i + 2) + '行存在多余列，请使用账号模板');
-    const o = Object.fromEntries(headers.map((h, k) => [h, String(r[k] ?? '').trim()]));
-    o.role = ACCOUNT_ROLE_ALIASES[o.role] || o.role || 'driver';
+  const rawHeaders = headerRow.slice(0, cols).map((c) => String(c ?? '').replace(/^\ufeff/, '').trim());
+  if (rawHeaders.some((h) => PASSWORD_HEADER.test(h))) throw fail('account_table_password_column', '账号表不能包含密码列：初始口令由服务端生成，只在确认执行后一次性显示。');
+  const headers = rawHeaders.map((h) => ACCOUNT_HEADER_ALIASES[h.toLowerCase()] || ACCOUNT_HEADER_ALIASES[h] || ACCOUNT_HEADER_ALIASES[h.replace(/\s+/g, ' ').toLowerCase()]);
+  const ignored = [...new Set(rawHeaders.filter((h, k) => h && !headers[k]))];
+  if (!['username', 'display_name', 'role'].every((h) => headers.includes(h)))
+    throw fail('account_table_header_invalid', '表头须包含：用户名、显示名、角色；可加对应车辆（同义写法如绑定车辆/车号/车牌也可识别）。');
+  if (new Set(headers.filter(Boolean)).size !== headers.filter(Boolean).length) throw fail('account_table_header_duplicate', '表头有重复列，请使用账号模板。');
+  const out = cleanRows.slice(1).map((r, i) => {
+    const o = {};
+    headers.forEach((h, k) => { if (h) o[h] = String(r[k] ?? '').trim(); });
+    if (!o.username) throw fail('account_table_missing_username', '第' + (i + 2) + '行缺少用户名');
+    o.role = ACCOUNT_ROLE_ALIASES[o.role] || String(o.role || 'driver').trim().toLowerCase();
     return o;
   });
+  return { rows: out, ignored };
 }
-
 /* ---------- 云端存储：解析结果进页面隔离库 ai_chat_uploads（原始字节永不入库） ---------- */
 export const AI_UPLOAD_MAX_COUNT = 3;
 export function newUploadId() { return 'aiu-' + randomBytes(12).toString('hex') }

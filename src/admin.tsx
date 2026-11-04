@@ -5,7 +5,7 @@ import {CourseGroups} from './course-groups';
 import {api} from './api';
 import {systemCell,systemLabel} from './system-values';
 import './system-ui.css';
-import {TrainingSurface,TrainingTable,trainingStatus,useTrainingNames,useTaskDeletionPermission,deleteTrainingTasks} from './training-ui';
+import {TrainingSurface,trainingStatus,useTrainingNames,useTaskDeletionPermission,deleteTrainingTasks} from './training-ui';
 import {RiskQueueChart} from './risk-queue-chart';
 import {eventName} from './event-names';
 import {AdminDriverReports} from './admin-driver-reports';
@@ -654,57 +654,110 @@ function ReviewBench({initialTaskId=null,onReviewed}:{initialTaskId?:string|null
 }
 
 /* 台账筛选（服务端仍会逐条复校验权限与版本，这里只决定界面可见范围） */
-function visibleTasks(rows:Record<string,unknown>[]|null, kw:string, status:string, course:string, names:{driver:(v:unknown)=>string;course:(v:unknown)=>string}) {
-  const k = kw.trim().toLowerCase();
-  return (rows || []).filter((r) => (!status || String(r.status) === status) && (!course || String(r.course_id) === course) && (!k || [names.driver(r.driver_id), names.course(r.course_id), String(r.task_id), String(r.goal || "")].join(" ").toLowerCase().includes(k)));
-}
-
-function TrLedger()  {
-  const trainingNames=useTrainingNames();
-  const {canDelete,canDeleteTask}=useTaskDeletionPermission();
-  const tid = new URLSearchParams(location.hash.split('?')[1]).get('task_id')||new URLSearchParams(location.hash.split('?')[1]).get('task')||'';
+/* R62 培训任务台账：一张表里完成检索/筛选/分页/勾选/批量删除（不再单独做一栏勾选面板）。
+ * 数据仍全部来自服务端 admin.trainings（行级范围与鉴权在服务端）；删除按行 updated_at 做版本校验，
+ * 安全员只能勾选服务端记录为本人创建的任务，管理员可勾选管理范围内全部任务。 */
+const LEDGER_STATUSES = ["assigned", "in_progress", "submitted", "reviewed", "returned", "observation", "interview", "deleted"];
+function TrLedger() {
+  const trainingNames = useTrainingNames();
+  const { canDelete, canDeleteTask } = useTaskDeletionPermission();
+  const tid = new URLSearchParams(location.hash.split('?')[1]).get('task_id') || new URLSearchParams(location.hash.split('?')[1]).get('task') || '';
   const [tick, setTick] = useState(0);
+  const [rows, setRows] = useState<Record<string, unknown>[] | null>(null);
+  const [sel, setSel] = useState<string | null>(tid || null);
+  const [loading, setLoading] = useState(true);
+  const [loadErr, setLoadErr] = useState('');
+  const [kw, setKw] = useState(''), [fStatus, setFStatus] = useState(''), [fCourse, setFCourse] = useState(''), [fMand, setFMand] = useState('');
+  const [page, setPage] = useState(0);
   const [pick, setPick] = useState<string[]>([]);
   const [delBusy, setDelBusy] = useState(false);
-  const [delMsg, setDelMsg] = useState<string | null>(null);
-  const [lKw, setLKw] = useState(""); const [lStatus, setStatus] = useState(""); const [lCourse, setLCourse] = useState("");
-  const [rows, setRows] = useState<Record<string, unknown>[] | null>(null);
-  const [sel, setSel] = useState<string | null>(tid||null);
-  useEffect(() => { getData<Record<string, unknown>>("admin.trainings", { limit: 200 }).then((r) => setRows(r.rows)).catch(() => setRows([])); }, [tick]);
+  const [delMsg, setDelMsg] = useState('');
+  const PAGE_SIZE = 20;
+  useEffect(() => {
+    let alive = true, guard = 0;
+    setLoading(true); setLoadErr('');
+    (async () => {
+      const all: Record<string, unknown>[] = [];
+      try {
+        for (let offset = 0; offset < 10000 && guard < 60; offset += 200) {
+          guard++;
+          const r = await getData<Record<string, unknown>>('admin.trainings', { limit: 200, offset, order: 'updated_at.desc,task_id.asc' });
+          all.push(...r.rows);
+          if (r.rows.length < 200) break;
+        }
+        if (!alive) return;
+        setRows(all);
+        setPick((p) => p.filter((id) => all.some((x) => String(x.task_id) === id)));
+      } catch { if (alive) setLoadErr('培训任务读取失败，请刷新重试。'); }
+      finally { if (alive) setLoading(false); }
+    })();
+    return () => { alive = false; };
+  }, [tick]);
+  useEffect(() => { setPage(0); }, [kw, fStatus, fCourse, fMand]);
   const counts: Record<string, number> = {};
-  for (const r of rows || []) { counts[String(r.status)] = (counts[String(r.status)] || 0) + 1; if (r.due_at && ["assigned", "in_progress", "returned"].includes(String(r.status)) && new Date(String(r.due_at)) < new Date()) counts.overdue = (counts.overdue || 0) + 1; }
+  const open3 = ['assigned', 'in_progress', 'returned'];
+  for (const r of rows || []) {
+    counts[String(r.status)] = (counts[String(r.status)] || 0) + 1;
+    if (r.due_at && open3.includes(String(r.status)) && new Date(String(r.due_at)) < new Date()) counts.overdue = (counts.overdue || 0) + 1;
+  }
+  const all = rows || [];
+  const q = kw.trim().toLowerCase();
+  const filtered = all.filter((r) => (!fStatus || String(r.status) === fStatus) && (!fCourse || String(r.course_id) === fCourse) && (!fMand || (fMand === 'yes' ? Number(r.mandatory) === 1 : Number(r.mandatory) !== 1)) && (!q || [String(r.task_id), String(r.driver_id), trainingNames.driver(r.driver_id), trainingNames.course(r.course_id), String(r.goal || ''), String(r.alert_id || '')].join(' ').toLowerCase().includes(q)));
+  const pageRows = filtered.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+  const pagePicked = pageRows.filter((r) => canDeleteTask(r)).map((r) => String(r.task_id));
+  const cols: [string, string][] = [['task_id', '培训任务'], ['driver_id', '司机'], ['course_id', '培训课程'], ['goal', '学习目标'], ['mandatory', '培训要求'], ['due_at', '截止'], ['status', '状态'], ['submitted_at', '提交日期'], ['reviewed_at', '验收日期']];
+  const fmt = (k: string, v: unknown) => k === 'driver_id' ? trainingNames.driver(v) : k === 'course_id' ? trainingNames.course(v) : k === 'status' ? trainingStatus(v) : k === 'mandatory' ? (Number(v) ? '必修' : '选修') : k.endsWith('_at') && v ? new Date(String(v)).toLocaleDateString('zh-CN') : String(v ?? '—');
   if (sel) return <TaskDetail taskId={sel} onBack={() => { setSel(null); setTick((x) => x + 1); }} />;
-  return <div><TrainingNotificationRecovery/>
-    <PageHead code="TR01" title="培训任务台账" desc="查看培训进度、课程内容与司机反馈。" />
+  return <div><TrainingNotificationRecovery />
+    <PageHead code="TR01" title="培训任务台账" desc="查看培训进度、课程内容与司机反馈；勾选后可批量删除。" />
     <div className="cards">
       {["assigned", "in_progress", "submitted", "reviewed", "returned", "overdue"].map((k) => <div key={k} className={`card ${k === "overdue" ? "risk" : ""}`}><div className="k">{({ assigned: "已分配", in_progress: "进行中", submitted: "待复核", reviewed: "已复核", returned: "退回补充", overdue: "已逾期" } as Record<string, string>)[k]}</div><div className={`v ${!(counts[k] || 0) ? "zero" : ""}`}>{counts[k] || 0}</div></div>)}
+      <div className="card"><div className="k">读取任务总数</div><div className="v">{all.length}</div></div>
     </div>
-    {canDelete && rows && rows.length > 0 && <details className="panel" open={false}><summary>勾选删除任务（管理员可删管理范围内全部；安全员仅限本人创建的任务）</summary>
-      <div className="row" style={{gap:8,flexWrap:"wrap"}}>
-        <button className="btn" disabled={delBusy} onClick={()=>{const vis=visibleTasks(rows,lKw,lStatus,lCourse,trainingNames).filter((r)=>canDeleteTask(r)).map((r)=>String(r.task_id));setPick(vis);setDelMsg(vis.length?`已选中筛选结果里你有权删除的 ${vis.length} 条`:'当前筛选结果里没有你有权删除的任务（安全员只能删本人创建的）');}}>{`选择可删除项`}</button>
-        <button className="btn" disabled={delBusy} onClick={()=>{const ids=visibleTasks(rows,lKw,lStatus,lCourse,trainingNames).map((r)=>String(r.task_id));setPick(ids);setDelMsg(ids.length?`已选 ${ids.length} 条——其中无权限的条目会被服务端整批拒绝`:'当前筛选结果为空');}}>选择筛选结果全部</button>
-        <button className="btn" disabled={delBusy||!pick.length} onClick={()=>setPick([])}>清空选择</button>
-        <span className="meta">已选 {pick.length} 条 · 共读取 {rows.length} 条（按最近更新排序，删除只对已勾选记录生效）</span>
+    {loading && !all.length ? <p role="status">正在读取培训任务…</p> : loadErr ? <div className="alert warn" role="alert">{loadErr}<button className="btn" onClick={() => setTick((x) => x + 1)}>重试</button></div> : !all.length ? <EmptyState kind="nomatch" hint="暂无培训任务，请先审核课程，再创建培训。" /> : <>
+      <div className="row ledger-tools">
+        <input className="btn" aria-label="按司机、车辆、课程或任务检索" placeholder="检索司机、车辆、课程或任务" value={kw} onChange={(e) => { setKw(e.target.value); }} />
+        <select className="btn" aria-label="按状态筛选" value={fStatus} onChange={(e) => setFStatus(e.target.value)}><option value="">全部状态</option>{LEDGER_STATUSES.map((k) => <option key={k} value={k}>{trainingStatus(k)}</option>)}</select>
+        <select className="btn" aria-label="按课程筛选" value={fCourse} onChange={(e) => setFCourse(e.target.value)}><option value="">全部课程</option>{[...new Set(all.map((r) => String(r.course_id)))].map((c) => <option key={c} value={c}>{trainingNames.course(c)}</option>)}</select>
+        <select className="btn" aria-label="按必修选修筛选" value={fMand} onChange={(e) => setFMand(e.target.value)}><option value="">必修与选修</option><option value="yes">仅必修</option><option value="no">仅选修</option></select>
+        <span className="meta">筛选结果 {filtered.length} / 共 {all.length} 条{counts.deleted ? ` · 已删除 ${counts.deleted}` : ''}</span>
       </div>
-      <div className="row ledger-pick-filters" style={{gap:6,flexWrap:"wrap",margin:"4px 0 8px"}}>
-        <input className="btn" aria-label="按司机、车辆或课程检索任务" placeholder="检索司机、课程或任务" value={lKw} onChange={(e)=>{setLKw(e.target.value);setPick([])}}/>
-        <select className="btn" aria-label="按任务状态筛选" value={lStatus} onChange={(e)=>{setStatus(e.target.value);setPick([])}}><option value="">全部状态</option>{["assigned","in_progress","submitted","reviewed","returned","deleted"].map((k)=><option key={k} value={k}>{trainingStatus(k)}</option>)}</select>
-        <select className="btn" aria-label="按课程筛选" value={lCourse} onChange={(e)=>{setLCourse(e.target.value);setPick([])}}><option value="">全部课程</option>{[...new Set((rows||[]).map(r=>String(r.course_id)))].map((c)=><option key={c} value={c}>{trainingNames.course(c)}</option>)}</select>
+      {canDelete && <div className="row ledger-delete">
+        <button className="btn" disabled={delBusy || !pagePicked.length} onClick={() => setPick(pagePicked)}>{`勾选本页可删除项（${pagePicked.length}）`}</button>
+        <button className="btn" disabled={delBusy || !pick.length} onClick={() => setPick([])}>清空选择</button>
+        <button className="btn primary" disabled={delBusy || !pick.length} onClick={async () => {
+          if (!pick.length) return;
+          if (!window.confirm(`确认删除选中的 ${pick.length} 条培训任务？司机端将不再显示这些任务；历史学习记录、课程快照与审计记录保留。`)) return;
+          setDelBusy(true); setDelMsg('');
+          try {
+            const map = new Map(all.map((r) => [String(r.task_id), r]));
+            const tasks = pick.map((id) => ({ task_id: id, expected_updated_at: (map.get(id)?.updated_at as string) ?? null }));
+            const r = await deleteTrainingTasks(tasks);
+            setDelMsg(r.ok ? `已删除 ${r.deleted.length} 条任务；历史学习记录与审计保留。` : `已删除 ${r.deleted.length} 条，${r.failed.length} 条未删除（${r.failed.map((f) => f.error).join('、')}）——这些任务在你勾选后又被学习或改动。`);
+            setPick([]); setTick((x) => x + 1);
+          } catch (e) { setDelMsg('删除被拒绝：' + (e instanceof ApiError ? e.code : '请刷新后重试，服务端不会静默覆盖已变化的任务')); }
+          finally { setDelBusy(false); }
+        }}>{delBusy ? '正在删除…' : `删除所选 ${pick.length || ''} 条`}</button>
+        <span className="meta">{`已选 ${pick.length} 条 · 安全员只能删除自己创建的任务，管理员可删除管理范围内全部任务`}；{delMsg && <em role="status">{delMsg}</em>}</span>
+      </div>}
+      <div className="table-wrap"><table>
+        <thead><tr>{canDelete && <th className="td-check-col"><input type="checkbox" aria-label="勾选本页可删除任务" disabled={!pagePicked.length} checked={pagePicked.length > 0 && pagePicked.every((id) => pick.includes(id))} onChange={(e) => setPick(e.target.checked ? [...new Set([...pick, ...pagePicked])] : pick.filter((x) => !pagePicked.includes(x)))} /></th>}{cols.map(([k, label]) => <th key={k}>{label}</th>)}</tr></thead>
+        <tbody>{pageRows.map((r) => {
+          const id = String(r.task_id), allowed = canDeleteTask(r);
+          return <tr key={id} className={(pick.includes(id) ? 'is-picked ' : '') + (String(r.status) === 'deleted' ? 'is-deleted' : '')} style={{ cursor: 'pointer' }} onClick={() => setSel(id)}>
+            {canDelete && <td className="td-check" onClick={(e) => e.stopPropagation()}><input type="checkbox" disabled={!allowed} checked={pick.includes(id)} aria-label={'选择任务 ' + id} title={allowed ? '' : '只有创建人本人或管理员可以删除'} onChange={(e) => setPick(e.target.checked ? [...new Set([...pick, id])] : pick.filter((x) => x !== id))} /></td>}
+            {cols.map(([k]) => <td key={k} className={/id$|version/.test(k) ? 'mono' : undefined} title={k === 'goal' ? String(r.goal ?? '') : undefined}>{k === 'task_id' ? '培训任务' : fmt(k, r[k])}</td>)}
+          </tr>;
+        })}</tbody>
+      </table>{!pageRows.length && <p className="meta">没有匹配的筛选结果。</p>}</div>
+      <div className="pager">
+        <button className="btn" disabled={page === 0} onClick={() => setPage((v) => v - 1)}>上一页</button>
+        <span>第 {page + 1} 页 · 共 {filtered.length} 条</span>
+        <button className="btn" disabled={(page + 1) * PAGE_SIZE >= filtered.length} onClick={() => setPage((v) => v + 1)}>下一页</button>
       </div>
-      <div className="ledger-pick-list">{(rows||[]).filter((r)=>(!lStatus||String(r.status)===lStatus)&&(!lCourse||String(r.course_id)===lCourse)&&(!lKw.trim()||[trainingNames.driver(r.driver_id),trainingNames.course(r.course_id),String(r.task_id),String(r.goal||"")].join(" ").toLowerCase().includes(lKw.trim().toLowerCase()))).map((r)=>{const id=String(r.task_id);const allowed=canDeleteTask(r);return <label key={id} className={(allowed?"":"disabled")+(pick.includes(id)?" picked":"")}><input type="checkbox" disabled={!allowed||delBusy} checked={pick.includes(id)} onChange={(e)=>setPick(v=>e.target.checked?[...new Set([...v,id])]:v.filter(x=>x!==id))}/><b>{trainingNames.course(r.course_id)}</b><span>{trainingNames.driver(r.driver_id)} · {trainingStatus(r.status)} · 截止 {String(r.due_at||"—").slice(0,10)}</span>{!allowed&&<em>非本人创建</em>}</label>})}</div>
-      <div className="row" style={{gap:8,marginTop:6}}>
-        <button className="btn primary" disabled={delBusy||!pick.length} onClick={async()=>{if(!pick.length)return;if(!window.confirm(`确认删除选中的 ${pick.length} 条培训任务？司机端将不再显示这些任务，历史学习记录与审计保留。`))return;setDelBusy(true);setDelMsg('');try{const map=new Map((rows||[]).map(r=>[String(r.task_id),r]));const tasks=pick.map(id=>({task_id:id,expected_updated_at:(map.get(id)?.updated_at as string)??null}));const r=await deleteTrainingTasks(tasks);setDelMsg(r.ok?`已删除 ${r.deleted.length} 条任务；历史学习记录与审计保留。`:`已删除 ${r.deleted.length} 条，${r.failed.length} 条未删除（${r.failed.map(f=>f.error).join('、')}）`);setPick([]);setTick(v=>v+1);}catch(e){setDelMsg('删除被拒绝：'+(e instanceof ApiError?e.code:'请刷新后重试'))}finally{setDelBusy(false)}}}>{delBusy?'正在删除…':`删除所选 ${pick.length||''} 条`}</button>
-        <span className="meta">删除按任务当前版本校验：他在你勾选之后又学习或改动的任务会被拒绝，不会静默覆盖。</span>
-      </div>
-      {delMsg && <div className="alert info" role="status">{delMsg}</div>}
-    </details>}
-    {(!rows || rows.length === 0) ? <>
-      <EmptyState kind="nomatch" hint="暂无培训任务，请先审核课程，再创建培训。" />
-    </> : <>
-      <details className="panel"><summary>互动课程答题成绩</summary>
-        {(rows || []).filter(r => isInteractiveCourse(r.course_id)).length === 0 ? <p className="meta">当前已读取任务中暂无互动课程记录。</p> : (rows || []).filter(r => isInteractiveCourse(r.course_id)).map(r => <div key={String(r.task_id)} className="task-card"><b>{trainingNames.driver(r.driver_id)} · {trainingNames.course(r.course_id)}</b> · {trainingStatus(r.status)}<QuizScoreSummary record={r.learning_record} /><button className="btn" onClick={() => setSel(String(r.task_id))}>查看任务与复核</button></div>)}
+      <details className="panel"><summary>互动课程答题成绩（当前读取范围 {all.length} 条）</summary>
+        {(all).filter(r => isInteractiveCourse(r.course_id)).length === 0 ? <p className="meta">当前读取任务中暂无互动课程记录。</p> : (all).filter(r => isInteractiveCourse(r.course_id)).map(r => <div key={String(r.task_id)} className="task-card"><b>{trainingNames.driver(r.driver_id)} · {trainingNames.course(r.course_id)}</b> · {trainingStatus(r.status)}<QuizScoreSummary record={r.learning_record} /><button className="btn" onClick={() => setSel(String(r.task_id))}>查看任务与复核</button></div>)}
       </details>
-      <TrainingTable resource="admin.trainings" columns={["task_id","driver_id","course_id","goal","mandatory","due_at","status","submitted_at","reviewed_at"]} params={tid ? { task_id: tid } : {}} onRowClick={(r) => setSel(String(r.task_id))} labels={{ task_id: "培训任务", driver_id: "司机", alert_id: "关联告警", course_id: "培训课程", goal:"学习目标", mandatory:"培训要求", reviewed_at:"验收日期", due_at: "截止", status: "状态", submitted_at: "提交日期" }} />
     </>}
   </div>;
 }

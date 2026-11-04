@@ -1,4 +1,4 @@
-// R54：找回 RM02「历史事件回放」云端只读实现（合并前的宿主功能，R47 交付合并时被本地引擎页顶替）。
+// R54：找回 RM02「历史事件回放」只读实现（合并前的宿主功能，R47 交付合并时被本地引擎页顶替）。
 // 数据源即云端在线表：admin.replay_events（cap view.replay）+ admin.alerts 证据回链；
 // 只做显示时钟推进，不生成告警、不写任何业务表；车辆一律"车辆N"展示（红线：界面不出原始 gpsno）。
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -30,7 +30,7 @@ export function HistoryReplayPage() {
   const byVeh = useMemo(() => { const m = new Map<string, number>(); for (const e of shown) m.set(String(e.gpsno), (m.get(String(e.gpsno)) || 0) + 1); return [...m.entries()].sort((a, b) => b[1] - a[1]); }, [shown]);
   const findAlert = (e: Ev) => alerts.get(String(e.event_id));
   return <div className="stack"><h1>历史事件回放</h1>
-    <p className="alert info">数据来自云端已导入的历史事件投影（replay_events，只读）。回放只推进显示时钟，不生成告警、不写任何业务表；这不是车队全量监控，也不是实时推送。实时案卷引擎（建会话/案卷处置闭环）属本地完整数据工作台，云端工作台不提供。</p>
+    <p className="alert info">历史事件回放（只读投影）：只推进显示时钟，不生成告警、不写任何业务表；这不是车队全量监控，也不是实时推送。实时案卷引擎（建会话/案卷处置闭环）属本地完整数据工作台，云端工作台不提供。</p>
     {err && <p className="alert warn" role="alert">{err}</p>}
     <section className="panel risk-clock"><div className="risk-clock-face"><small>回放日期：{date || '—'} · 北京时间</small><strong>{clock ? String(clock).slice(11, 19) : '--:--:--'}</strong><span>{playing ? '播放中' : (idx >= total && total > 0 ? '已播完' : '已暂停')} · {speed}× 速进 · {idx}/{total} 条</span></div>
       <div className="risk-clock-controls"><div className="row">

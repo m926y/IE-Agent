@@ -4,7 +4,9 @@
 // 业务写入仍由既有门禁接口完成（AI 零写库红线不变）。
 import { randomUUID } from 'node:crypto';
 
-const PLAN_TTL_MS = 30 * 60 * 1000;
+/* 清单有效期 24 小时（原 30 分钟）：培训与课程清单常在下班前统一确认，窗口过短会表现为『确认不了／像没创建』；
+ * 过期后仍拒绝执行（agent_plan_expired→410），必须重新查库生成新清单，不做无限期复用。 */
+const PLAN_TTL_MS = 24 * 60 * 60 * 1000;
 const fail = (code, detail) => { const e = new Error(code); e.code = code; if (detail) e.detail = detail; return e; };
 const nowIso = () => new Date().toISOString();
 const ACCOUNT_KEYS = ['username', 'display_name', 'role', 'vehicle'];

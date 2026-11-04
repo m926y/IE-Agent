@@ -46,7 +46,7 @@ type ResourceTableProps = {
   params?: Record<string, string | number>;
   onRowClick?: (row: Record<string, unknown>) => void;
   rowActionLabel?: string;
-  /** 无匹配行时的自定义空态（拿到底层响应，含云端 hosted_extras 等）；不传则用默认诚实空态 */
+  /** 无匹配行时的自定义空态（可拿到底层响应里的补充事实）；不传则用默认空态 */
   renderEmpty?: (data: ListResult<Record<string, unknown>> | null) => ReactNode;
 };
 
@@ -80,10 +80,10 @@ export function ResourceTable({ renderCell, resource, labels = {}, columns, page
     return <EmptyState kind="error" onRetry={() => load(offset)} />;
   }
   const rows = state.data?.rows ?? [];
-  const hostedNote = state.data?.hosted_note || null;
+  /* R62（属主决定）：服务端仍返回 hosted_note 等口径字段（供诊断与测试），通用表格不再把它们渲染成小字提示 */
   if (rows.length === 0) {
     if (renderEmpty) return <>{renderEmpty(state.data)}</>;
-    return <EmptyState kind="nomatch" hint={hostedNote ? `${hostedNote}（本页按事实显示空态，不补造趋势、告警或证据。）` : "当前筛选/该对象无记录。本页按事实显示空态，不补造趋势、告警或证据。"} />;
+    return <EmptyState kind="nomatch" hint="当前筛选或该对象没有记录。" />;
   }
   const cols = columns || Object.keys(rows[0]);
   const total = state.data?.total ?? rows.length;
@@ -107,7 +107,6 @@ export function ResourceTable({ renderCell, resource, labels = {}, columns, page
         <span>第 {Math.floor((state.data?.offset??offset) / pageSize) + 1} 页{state.data?.total !== null && state.data?.total !== undefined ? ` · 共 ${total} 条` : ""}</span>
         <button className="btn" disabled={state.kind==='loading'||offset + pageSize >= total} onClick={() => setOffset(offset + pageSize)}>下一页</button>
       </div>
-      {hostedNote && <p className="meta">{hostedNote}</p>}
     </div>
   );
 }

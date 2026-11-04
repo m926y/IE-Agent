@@ -40,27 +40,27 @@ test('cloud scoring pages render read-only without crashing (R61)', async t => {
   await t.test('权重页只读视图渲染当前六维权重，无任何重算入口或服务不可用文案', () => {
     const html = render(React.createElement(out.weights.HostedWeightView, { state: STATE }));
     assert.match(html, /当前使用的评分权重/);
-    assert.match(html, /云端只读/);
+    assert.match(html, />只读</);
     assert.match(html, /26\.6%/);
     assert.match(html, /13\.97%/, '非整数权重保留两位小数，不四舍五入成整数');
     assert.match(html, /history|历史事故与未遂/);
     assert.match(html, /snapshot_ffbc02143fcb/);
     assert.match(html, /疲劳与分心[\s\S]*?1[\s\S]*?ruleset_v13_20261102/, '各维度自身窗口与版本如实展示');
     assert.match(html, /覆盖 500 辆车/);
-    assert.match(html, /不在此页预览、重算或生效/);
+    assert.match(html, /生效口径版本/, '每维度标注生效口径版本');
     for (const bad of ['重算服务', '暂不可用', '不可用', '提交并重算', '预览模型规则变化', '确认生效']) assert.ok(!html.includes(bad), '只读页不得出现：' + bad);
     assert.ok(!/<input|<textarea/.test(html), '只读页不渲染可编辑控件');
   });
 
   await t.test('模型规则页只读视图渲染口径并可折叠因子', () => {
     const html = render(React.createElement(out['model-rules'].HostedModelRulesView, { state: STATE }));
-    assert.match(html, /模型因子与参考口径（云端只读）/);
+    assert.match(html, /模型因子与参考口径（只读）/);
     assert.match(html, /观察窗口 14 天/);
     assert.match(html, /时间半衰期 14 天/);
     assert.match(html, /权重合计 100\.00%/);
     assert.match(html, /11803/);
     assert.match(html, /小样本平滑强度/);
-    assert.match(html, /不提供编辑、预览或生效入口/);
+    assert.match(html, /本页只提供查看/);
     for (const bad of ['重算服务', '暂不可用']) assert.ok(!html.includes(bad), '只读页不得出现：' + bad);
   });
 

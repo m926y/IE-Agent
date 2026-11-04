@@ -27,24 +27,25 @@ export function DataExplorer({ driver=false, hostedSources=null, defaultDate='20
   const renderEventsEmpty=(data:ListResult<Record<string,unknown>>|null)=>{
     const ex=(data as unknown as {hosted_extras?:EventsExtras}|null)?.hosted_extras||null;
     return <div className="stack events-empty">
-      <p className="meta">当前条件下没有逐条回放样本——云端「事件明细」是已发行的回放日样本（并非每天每车都有），完整观测窗的逐日事件量见「事件日统计」。以下是云端数据库中的真实替代信息：</p>
+      <p className="meta">当前条件下没有逐条回放样本。</p>
       {ex?.daily_index&&ex.daily_index.length>0&&<div className="panel"><h4>{vehicleLabel(gps)} · {date} 全量索引日统计</h4>
         <div className="table-wrap"><table className="events-index-table"><thead><tr><th>事件名称</th><th>事件类型</th><th>日志条数</th></tr></thead><tbody>{ex.daily_index.map((r,i)=><tr key={i}><td><b>{r.event_name||'未命名事件'}</b></td><td className="mono">{String(r.event_type??'—')}</td><td><b>{r.event_count==null?'—':Number(r.event_count).toLocaleString()}</b></td></tr>)}</tbody></table></div>
-        <p className="meta">来自云端全量索引 local_event_daily（按 车辆×日×事件类型 的真实聚合，覆盖完整观测窗{eventStart&&eventEnd?` ${eventStart} 至 ${eventEnd}`:''}）；逐条原始日志未入库，故此处无法展开单条明细。</p></div>}
-      {ex&&ex.daily_index!==null&&ex.daily_index.length===0&&<p className="meta">全量索引中该车辆在 {date} 也无任何事件记录（当日确无已入库事件，不是数据丢失）。</p>}
+        <p className="meta">该日全量索引统计（按 车辆×日×事件类型 的真实聚合，覆盖完整观测窗{eventStart&&eventEnd?` ${eventStart} 至 ${eventEnd}`:''}）；逐条原始日志未入库，故此处无法展开单条明细。</p></div>}
+      {ex&&ex.daily_index!==null&&ex.daily_index.length===0&&<p className="meta">该车辆在 {date} 无任何事件记录（当日确无已入库事件，不是数据丢失）。</p>}
       {ex&&ex.sample_dates.length>0&&<div className="panel"><h4>有回放样本的日期（点击切换）</h4><div className="row">{ex.sample_dates.map(d=><button key={d} className={`btn ${d===date?'primary':''}`} onClick={()=>{setDate(d);setSelected(null);}}>{d}</button>)}</div><p className="meta">以上日期来自在线 replay_events 表的真实样本日；选中有样本的日期即可查看逐条明细。</p></div>}
-      {!ex&&<p className="meta">（云端数据库暂无可补充的替代信息。）</p>}
+      {!ex&&<p className="meta">暂无该日汇总数据。</p>}
     </div>;
   };
   return <section className="panel stack">
     <div className="row data-filters">
-      <label>数据类型<select className="btn" value={kind} onChange={e=>{setKind(e.target.value as keyof typeof kinds);setSelected(null);}}>{Object.entries(kinds).map(([key,v])=><option key={key} value={key}>{hostedSources&&hostedSources[key]===null?`${v.title}（云端未导入该数据源）`:v.title}</option>)}</select></label>
+      <label>数据类型<select className="btn" value={kind} onChange={e=>{setKind(e.target.value as keyof typeof kinds);setSelected(null);}}>{Object.entries(kinds).map(([key,v])=><option key={key} value={key}>{v.title}</option>)}</select></label>
       {!driver&&<label>车辆<select className="btn" value={gps} onChange={e=>{setGps(e.target.value);setSelected(null);}}><option value="">全部车辆</option>{options.map(v=><option key={v.gpsno} value={v.gpsno}>{v.label}</option>)}</select></label>}
       {kind!=='profiles'&&!unavailable&&<label>日期<input className="btn" type="date" min={eventStart||'2026-06-01'} max={eventEnd||'2026-07-31'} value={date} onChange={e=>{if(e.target.value)setDate(e.target.value);setSelected(null);}} /></label>}
     </div>
+    {unavailable&&<p className="meta">该数据类型暂无可展示的明细。</p>}
     <ResourceTable key={`${kind}:${gps}:${date}`} resource={`${driver?'my':'admin'}.${kind}`} params={unavailable?{}:params} columns={kinds[kind].columns} labels={labels} pageSize={20} rowActionLabel="详情" onRowClick={setSelected} renderEmpty={kind==='events'?renderEventsEmpty:undefined} />
     {selected&&<div className="panel"><div className="row"><h3>数据详情 · {vehicleLabel(selected.gpsno)}</h3><button className="btn" onClick={()=>setSelected(null)}>关闭</button></div><div className="kv">{Object.keys(labels).filter(k=>selected[k]!==undefined).map(k=><div key={k}><span className="meta">{labels[k]} </span><b>{cellView(k,selected[k])}</b></div>)}</div></div>}
-    <p className="meta">事件条数为源日志记录数，保留源文件重复记录；轨迹、IMU 与车辆画像为按 车辆×日 聚合的全量索引，点开详情可见速度标准差、移动点数、各类无效/缺失行计数等质量列。云端「事件明细」为已发行的回放日样本，「事件日统计」{aggregatedSample?'在未导入索引时按该样本实时聚合（不代表完整观测窗）':'读导入的全量索引（覆盖完整观测窗）'}；空值保持为空，不以 0 冒充。</p>
+    
   </section>;
 }
 
@@ -53,14 +54,14 @@ type Manifest={counts:Record<string,number|null>;level_counts:Record<string,numb
 export function DataCenter() {
   const [data,setData]=useState<Manifest|null>(null),[failed,setFailed]=useState<string|null>(null);
   useEffect(()=>{api<Manifest>('/api/data-status').then(setData).catch((e)=>setFailed(e instanceof ApiError?e.code:'network_error'));},[]);
-  if(failed)return <EmptyState kind="error" hint={`数据状态读取失败（${failed}）。云端工作台按在线库实时装配统计；若为 database_unavailable，请稍后重试或联系工作台管理员核查数据库与全量索引表。数据中心的明细行不受此面板影响。`}/>;
+  if(failed)return <EmptyState kind="error" hint={`数据状态读取失败（${failed}），请重试。`}/>;
   if(!data)return <EmptyState kind="loading"/>;
   // bigint 列经 REST 可能回字符串：统一按数值渲染，空值显示"—"，不以 0 冒充
   const show=(v:number|string|null|undefined)=>{if(v===null||v===undefined||v==='')return '—';const n=Number(v);return Number.isFinite(n)?n.toLocaleString():String(v);};
   const prov=data.index_provenance;
   return <div className="stack data-center"><h1>数据中心</h1>
     <div className="cards">{[['drivers','车辆'],['score_snapshots','当前评分'],['score_history','历史评分'],['events','回放事件样本'],['event_daily','事件日统计'],['trajectory_daily','轨迹日汇总'],['imu_daily','IMU 日汇总'],['profiles','车辆画像']].map(([key,title])=><div className="card" key={key}><div className="k">{title}</div><div className="v">{show(data.counts[key])}</div></div>)}</div>
-    <p className="meta">回放事件覆盖 {data.event_start||'—'} 至 {data.event_end||'—'}；评分历史 {data.history_start||'—'} 至 {data.history_end||'—'}。A/B/C/D：{['A','B','C','D'].map(k=>`${k} ${data.level_counts[k]}`).join(' · ')}。计数为"—"表示该索引未在云端导入，不以 0 冒充。</p>
+    <p className="meta">回放事件覆盖 {data.event_start||'—'} 至 {data.event_end||'—'}；评分历史 {data.history_start||'—'} 至 {data.history_end||'—'}。A/B/C/D：{['A','B','C','D'].map(k=>`${k} ${data.level_counts[k]}`).join(' · ')}。</p>
     {prov&&<section className="panel" aria-label="全量索引溯源"><h3>全量索引溯源</h3>
       <div className="prov-grid">
         <div className="prov-item prov-wide"><span className="meta">数据集</span><b>{prov.dataset||'—'}</b><small className="meta">版本 {prov.source_version||'—'}</small></div>
@@ -72,9 +73,7 @@ export function DataCenter() {
         <div className="prov-item"><span className="meta">事件日聚合</span><b>{show(prov.event_daily_groups)} <small>行</small></b><small className="meta">逐条原始日志未入库</small></div>
         <div className="prov-item"><span className="meta">车辆画像</span><b>{show(prov.profile_rows)} <small>车</small></b><small className="meta">月均里程 / 驾驶小时 / 时段占比等</small></div>
       </div>
-      {prov.notes&&<p className="meta">{prov.notes}</p>}
-    </section>}
-    {data.hosted_note&&<details className="panel prov-note"><summary>云端数据装配口径说明</summary><ul className="prov-note-list">{data.hosted_note.split('。').map(s=>s.trim()).filter(Boolean).map((s,i)=><li key={i}>{s}。</li>)}</ul></details>}
+          </section>}
     <DataExplorer hostedSources={data.hosted_sources} defaultDate={data.event_end||prov?.observation_end||'2026-07-31'} eventStart={data.event_start} eventEnd={data.event_end}/>
   </div>;
 }
