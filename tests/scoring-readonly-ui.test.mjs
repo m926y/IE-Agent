@@ -60,7 +60,7 @@ test('cloud scoring pages render read-only without crashing (R61)', async t => {
     assert.match(html, /权重合计 100\.00%/);
     assert.match(html, /11803/);
     assert.match(html, /小样本平滑强度/);
-    assert.match(html, /本页只提供查看/);
+    assert.ok(!/本页只提供查看/.test(html), '模型规则页去掉边界小字');
     for (const bad of ['重算服务', '暂不可用']) assert.ok(!html.includes(bad), '只读页不得出现：' + bad);
   });
 

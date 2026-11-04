@@ -12,13 +12,13 @@ export function HostedModelRulesView({state,msg}:{state:State;msg?:string}){
     {(cfg.factors||[]).length>0?<details open><summary>因子定义、所属维度与严重度（{cfg.factors.length} 项）</summary><table className="tbl"><thead><tr><th>事件码</th><th>因子定义</th><th>所属维度</th><th>严重度</th></tr></thead><tbody>{cfg.factors.map(f=><tr key={f.code}><td>{f.code}</td><td>{f.name}</td><td>{names[f.dimension]||f.dimension}</td><td>{f.severity}</td></tr>)}</tbody></table></details>
       :<p className="meta">因子与参考口径文件未随本次运行交付（显示为不可用，不以估算值填充）；当前权重见上方“维度权重”表。</p>}
     {refs.length>0&&<details><summary>参考分布与先验参数</summary><table className="tbl"><thead><tr><th>维度</th><th>小样本平滑强度</th><th>参考风险率</th><th>参考尺度</th></tr></thead><tbody>{refs.map(([d,r])=><tr key={d}><td>{names[d]||d}</td><td>{r?.tau??'—'}</td><td>{r?.mu??'—'}</td><td>{r?.rate_scale??'—'}</td></tr>)}</tbody></table></details>}
-    <p className="meta">因子与参考口径取自随发行交付的冻结模型定义，用于解释现行扣分口径；本页只提供查看，调整与重算在本地完整数据工作台按草案→审核→生效执行。</p>
+    
     {msg&&<p role="status">{msg}</p>}
   </section>;
 }
 
 export function ModelRulesEditor(){const [s,setS]=useState<State|null>(null),[c,setC]=useState<Config|null>(null),[plan,setPlan]=useState<any>(null),[busy,setBusy]=useState(false),[msg,setMsg]=useState('');
- async function load(){const r=await api<State>('/api/admin/score-weights');setS(r);setC(r.model_config);setPlan(null)}useEffect(()=>{load().catch(e=>setMsg(e instanceof ApiError&&e.code==='scoring_service_unavailable'?"评分链路与模型口径在只读；本页需要本地完整数据工作台的预览/重算通道。":"模型配置读取失败"))},[]);
+ async function load(){const r=await api<State>('/api/admin/score-weights');setS(r);setC(r.model_config);setPlan(null)}useEffect(()=>{load().catch(e=>setMsg(e instanceof ApiError&&e.code==='scoring_service_unavailable'?"模型配置读取失败，请稍后重试。":"模型配置读取失败"))},[]);
  const change=(fn:(x:Config)=>Config)=>{setC(x=>x?fn(x):x);setPlan(null)};
  async function preview(){if(!s||!c)return;setBusy(true);setMsg('');try{setPlan(await api('/api/admin/score-weights/preview',{method:'POST',body:JSON.stringify({weights:s.weights,base_version:s.active_version,model_config:c})}))}catch(e){setMsg(e instanceof ApiError?e.code:'计算失败')}finally{setBusy(false)}}
  async function apply(){setBusy(true);try{await api('/api/admin/score-weights/apply',{method:'POST',body:JSON.stringify({...plan,request_key:crypto.randomUUID(),label:'模型因子与参考口径调整',reason:'管理员核查影响预览后提交'})});setMsg('新模型规则已生效，历史评分和原始基准保留。');await load();window.dispatchEvent(new Event('claw:scores-updated'))}catch(e){setMsg(e instanceof ApiError?e.code:'保存失败')}finally{setBusy(false)}}

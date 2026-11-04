@@ -5,7 +5,8 @@ import {CourseGroups} from './course-groups';
 import {api} from './api';
 import {systemCell,systemLabel} from './system-values';
 import './system-ui.css';
-import {TrainingSurface,trainingStatus,useTrainingNames,useTaskDeletionPermission,deleteTrainingTasks} from './training-ui';
+import {TrainingSurface,trainingStatus,useTrainingNames} from './training-ui';
+import {TrainingLedger} from './training-ledger';
 import {RiskQueueChart} from './risk-queue-chart';
 import {eventName} from './event-names';
 import {AdminDriverReports} from './admin-driver-reports';
@@ -186,45 +187,74 @@ function PageHead({ title }: { code?: string; title: string; desc: string }) {
 }
 
 const RR_LABEL: Record<string, string> = { identity_association: "身份关联疑问", event_record: "事件记录疑问", device_or_data_missing: "设备或数据缺失", score_explanation: "评分解释疑问" };
+const RR_STATUS_CN: Record<string, string> = { submitted: "待处理", checking: "核查中", awaiting_data_owner: "待数据核实", answered: "已答复", closed: "已关闭" };
+const RR_ACTION_CN: Record<string, string> = { "rr.submit": "司机提交申请", "rr.advance": "处理状态更新", "rr.review": "完成复核", "rr.close": "关闭申请", "review_request.submit": "司机提交申请", "review_request.advance": "处理状态更新", "review_request.answered": "已答复司机", "review_request.closed": "已关闭" };
+const DIM_CN: Record<string, string> = { history: "历史事故与未遂", fatigue_distraction: "疲劳与分心", driving_stability: "驾驶稳定性", road_rule: "道路规则", management: "管理配合度", imu_evidence: "IMU 风险佐证" };
+/* R62：台账只读视图与数字显示——业务界面只讲"谁、为什么、处理到哪一步"；
+ * request_id / score_id / evidence_id / source_version 等技术标识统一收进"技术信息"折叠，不进正文。
+ * 分数、扣分、可信度一律两位小数；空值显示"—"，不以 0 冒充未取得。 */
+const n2 = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? x.toFixed(2) : "—"; };
+const dt = (v: unknown) => (v ? new Date(String(v)).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) : "—");
 function EvReview() {
   const [tick, setTick] = useState(0);
-  const [sel, setSel] = useState<string | null>(()=>new URLSearchParams(location.hash.split('?')[1]).get('request'));
+  const [sel, setSel] = useState<string | null>(() => new URLSearchParams(location.hash.split("?")[1]).get("request"));
   const [v, setV] = useState<RRView | null | "error">(null);
   const [note, setNote] = useState("");
   const [rrTpl, setRrTpl] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [showTech, setShowTech] = useState(false);
+  const [driverNames, setDriverNames] = useState<Record<string, string>>({});
+  useEffect(() => { let alive = true; getData<Record<string, unknown>>('admin.drivers', { limit: 2000 }).then((r) => { if (alive) setDriverNames(Object.fromEntries((r.rows || []).map((d) => [String(d.driver_id), vehicleLabel(d.gpsno)]))); }).catch(() => { }); return () => { alive = false; }; }, []);
   useEffect(() => { if (sel) rrView(sel).then(setV).catch(() => setV("error")); else setV(null); }, [sel, tick]);
   async function move(st: string) {
     setMsg(null);
-    try { const r = await rrAdvance(sel!, st, note || (st === "checking" ? "" : note), rrTpl); setMsg(`→ ${r.new_status} · 审计 ${r.audit_id}${r.driver_notified ? " · 已站内通知司机" : ""}`); setNote(""); setTick((x) => x + 1); }
-    catch (e) { const c = e instanceof ApiError ? e.code : "network"; setMsg({ response_note_required: "该状态必须填写答复/说明（进审计）" }[c] || `拒绝：${c}`); }
+    try { const r = await rrAdvance(sel!, st, note || (st === "checking" ? "" : note), rrTpl); setMsg(`已更新为「${RR_STATUS_CN[r.new_status] || r.new_status}」${r.driver_notified ? " · 已站内通知司机" : ""}`); setNote(""); setTick((x) => x + 1); }
+    catch (e) { const c = e instanceof ApiError ? e.code : "network"; setMsg({ response_note_required: "该状态必须填写答复/说明", rr_version_conflict: "该申请刚被他人更新，请重新打开查看" }[c] || `操作未完成：${c}`); }
   }
+  const req = v && typeof v === "object" ? (v.request as Record<string, unknown>) : null;
+  const snap = v && typeof v === "object" ? v.snapshot : null;
   return <div>
-    <PageHead code="EV05" title="评价复核与数据异议" desc="算法输出纠错与业务解释分开：核查=查看原快照与台账（只读）；答复=说明证据链；源数据确有问题仅可转数据负责人（awaiting_data_owner），等待正式版本化重建——本页面与接口无评分写路径。" />
-    <ResourceTable key={`rr${tick}`} resource="admin.review_requests" onRowClick={(r) => setSel(String(r.request_id))} labels={{ request_id: "受理编号", driver_id: "司机", score_id: "评分对象", evidence_id: "证据", reason_code: "原因", status: "状态", review_note: "最新答复", reviewer_id: "处理人", created_at: "提交时间", updated_at: "更新" }} />
-    {v && v !== "error" && <div className="panel"><h3>复核详情 · <Tag tone="blue">{String(v.request.status)}</Tag></h3>
+    <PageHead code="EV05" title="评价复核与数据异议" desc="司机对评分或数据提出异议后在此处理：核查证据、答复司机，必要时转数据核实。" />
+    <ResourceTable key={`rr${tick}`} resource="admin.review_requests" pageSize={10} onRowClick={(r) => { setSel(String(r.request_id)); setShowTech(false); }} rowActionLabel="查看处理"
+      /* 司机列显示"车辆N"，与车队其他页面同一口径；原始 driver_id 只在技术信息里保留 */
+      columns={["driver_id", "reason_code", "status", "created_at", "handled_at"]}
+      renderCell={(c, val) => c === "driver_id" ? (driverNames[String(val)] || vehicleLabel(String(val))) : c === "reason_code" ? (RR_LABEL[String(val)] || String(val ?? "—")) : c === "status" ? <Tag tone={String(val) === "closed" ? "gray" : String(val) === "answered" ? "green" : "amber"}>{RR_STATUS_CN[String(val)] || String(val ?? "—")}</Tag> : c === "created_at" || c === "handled_at" ? <span className="meta">{dt(val)}</span> : String(val ?? "—")}
+      labels={{ driver_id: "司机", reason_code: "申请原因", status: "处理状态", created_at: "提交时间", handled_at: "最近处理" }} />
+    {v && v !== "error" && req && <div className="panel stack">
+      <div className="panel-title"><h3>复核处理 · {RR_LABEL[String(req.reason_code)] || String(req.reason_code ?? "—")}</h3><button className="btn" onClick={() => setSel(null)}>收起</button></div>
       <div className="grid2">
-        <div><h4 style={{ fontSize: 12.5 }}>司机原文（{RR_LABEL[String(v.request.reason_code)] || String(v.request.reason_code)}）</h4>
-          <p style={{ whiteSpace: "pre-wrap", background: "var(--bg)", borderRadius: 8, padding: 8, fontSize: 13 }}>{String(v.request.description)}</p>
-          <div className="kv"><span className="kk">针对记录</span><b className="mono">{String(v.request.score_id || v.request.evidence_id || "—")}</b><span className="kk">source_version</span><b className="mono">{String(v.request.source_version || "—")}</b></div></div>
-        <div><h4 style={{ fontSize: 12.5 }}>原始评分</h4>
-          {v.snapshot ? <div className="kv">
-            <span className="kk">安全分/等级</span><b>{String(v.snapshot.safety_score)} / {String(v.snapshot.risk_level)}（rank {String(v.snapshot.rank)}）</b>
-            <span className="kk">可信度</span><b>{String(v.snapshot.confidence_level)}（{String(v.snapshot.confidence_score)}）</b>
-            <span className="kk">状态</span><b>{String(v.snapshot.score_status)}</b><span className="kk">as_of/版本</span><b className="mono">{String(v.snapshot.as_of_date)} · {String(v.snapshot.source_version)}</b></div> : <p>暂无评分快照</p>}
-          {v.ledger !== null && v.ledger.length > 0 && <><h4 style={{ fontSize: 12.5, marginTop: 6 }}>关联台账证据</h4>{v.ledger.map((l) => <div key={String(l.ledger_id)} className="meta mono" style={{ fontSize: 11.5 }}>{String(l.ledger_id)} · {String(l.dimension)} · {String(l.event_type)} · 分摊 {String(l.allocated_points)}</div>)}</>}
+        <div>
+          <h4 style={{ fontSize: 13 }}>司机原文</h4>
+          <p className="rr-quote" style={{ whiteSpace: "pre-wrap" }}>{String(req.description || "（未填写）")}</p>
+          <div className="kv"><span className="kk">当前状态</span><b>{RR_STATUS_CN[String(req.status)] || String(req.status)}</b><span className="kk">提交时间</span><b>{dt(req.created_at)}</b></div>
+          {String(req.status) === "answered" && <div className="alert info">已答复司机，可继续关闭申请。</div>}
+          <TemplateScenePicker scene="review_answer" driverId={String(req.driver_id ?? "")} onPick={(r) => setRrTpl(r)} label="答复通知模板（可选）" />
+          <div className="field" style={{ marginTop: 8 }}><label>答复 / 处理说明</label>
+            <textarea style={{ width: "100%", minHeight: 56, borderRadius: 8, border: "1px solid var(--line)", padding: 8, font: "inherit" }} value={note} onChange={(e) => setNote(e.target.value)} aria-label="答复说明" placeholder="写明核查了什么、依据哪些记录、结论如何处理" /></div>
+          <div className="row">
+            {(["checking", "awaiting_data_owner", "answered", "closed"] as const).map((st) => { const allowed: Record<string, string[]> = { submitted: ["checking", "answered"], checking: ["awaiting_data_owner", "answered"], awaiting_data_owner: ["answered"], answered: ["closed"], closed: [] }; return allowed[String(req.status)]?.includes(st) ? <button key={st} className="btn" onClick={() => move(st)}>{{ checking: "开始核查", awaiting_data_owner: "转数据核实", answered: "答复司机", closed: "关闭申请" }[st]}</button> : null; })}
+          </div>
+          {msg && <div className="alert info" role="status">{msg}</div>}
+        </div>
+        <div>
+          <h4 style={{ fontSize: 13 }}>当期评分</h4>
+          {snap ? <>
+            <div className="kv"><span className="kk">安全分</span><b>{n2(snap.safety_score)}</b><span className="kk">等级</span><b>{String(snap.risk_level ?? "—")}</b><span className="kk">车队排名</span><b>{snap.rank == null ? "—" : String(snap.rank)}</b><span className="kk">可信度</span><b>{{ high: "高", medium: "中", low: "低" }[String(snap.confidence_level)] || "未取得"}（{n2(snap.confidence_score)}）</b><span className="kk">评分日期</span><b>{String(snap.as_of_date ?? "—")}</b></div>
+            <p className="meta">评分解释按维度分摊到具体事件台账，用于对账与说明，不等同单一事件的独立因果。</p>
+          </> : <p className="meta">未取得当期评分快照。</p>}
+          {v.ledger === null ? <p className="meta">未取得扣分明细。</p> : v.ledger.length > 0 && <><h4 style={{ fontSize: 13, marginTop: 6 }}>扣分明细</h4>
+            <div className="table-wrap"><table className="tbl"><thead><tr><th>维度</th><th>事件</th><th>次数</th><th>分摊扣分</th></tr></thead><tbody>
+              {v.ledger.map((l) => <tr key={String(l.ledger_id)}><td>{DIM_CN[String(l.dimension)] || String(l.dimension ?? "—")}</td><td>{eventName(l.event_type == null ? l.dimension : l.event_type)}</td><td>{l.event_count == null ? "—" : String(l.event_count)}</td><td>{n2(l.allocated_points)}</td></tr>)}
+            </tbody></table></div></>}
+          <h4 style={{ fontSize: 13, marginTop: 8 }}>处理记录</h4>
+          {(v.timeline || []).length === 0 && <p className="meta">暂无处理记录。</p>}
+          {(v.timeline || []).map((e) => <div key={String(e.audit_id)} className="task-card rr-step"><div className="t">{RR_ACTION_CN[String(e.action)] || "状态更新"}{e.new_status ? ` · ${RR_STATUS_CN[String(e.new_status)] || String(e.new_status)}` : ""}</div><div className="meta">{dt(e.occurred_at)}</div></div>)}
+          <details className="rr-tech" open={showTech} onToggle={(e) => setShowTech((e.currentTarget as HTMLDetailsElement).open)}><summary>技术信息（内部定位与口径版本）</summary>
+            <div className="kv"><span className="kk">受理编号</span><b className="mono">{String(req.request_id ?? "—")}</b><span className="kk">司机编号</span><b className="mono">{String(req.driver_id ?? "—")}</b><span className="kk">评分对象</span><b className="mono">{String(req.score_id ?? "—")}</b><span className="kk">证据编号</span><b className="mono">{String(req.evidence_id ?? "—")}</b><span className="kk">申请口径版本</span><b className="mono">{String(snap?.source_version ?? "—")}</b><span className="kk">处理人</span><b className="mono">{String(req.reviewer_id ?? "—")}</b></div>
+            <p className="meta">以上编号仅用于跨系统对账，不进入司机端正文；答复内容请勿直接粘贴原始编号。评分历史保留各时点口径，复核不回算、不改分。</p>
+          </details>
         </div>
       </div>
-      <TemplateScenePicker scene="review_answer" driverId={v && typeof v === "object" ? String((v as unknown as { request?: { driver_id?: string } }).request?.driver_id ?? "") : ""} onPick={(r) => setRrTpl(r)} label="答复通知模板（可选，仅 approved）" />
-      <div className="field" style={{ marginTop: 8 }}><label>答复/处理说明（answered、awaiting_data_owner、closed 必填，进审计与司机端）</label>
-        <textarea style={{ width: "100%", minHeight: 56, borderRadius: 8, border: "1px solid var(--line)", padding: 8, font: "inherit" }} value={note} onChange={(e) => setNote(e.target.value)} aria-label="答复说明" /></div>
-      <div className="row">
-        {(["checking", "awaiting_data_owner", "answered", "closed"] as const).map((st) => { const allowed: Record<string, string[]> = { submitted: ["checking", "answered"], checking: ["awaiting_data_owner", "answered"], awaiting_data_owner: ["answered"], answered: ["closed"], closed: [] }; return allowed[String(v.request.status)]?.includes(st) ? <button key={st} className="btn" onClick={() => move(st)}>{ { checking: "开始核查", awaiting_data_owner: "转数据负责人(等版本化流程)", answered: "答复司机", closed: "关闭申请" }[st]}</button> : null; })}
-        <button className="btn" onClick={() => setSel(null)}>收起</button>
-      </div>
-      {msg && <div className="alert info">{msg}</div>}
-      <h4 style={{ fontSize: 13, marginTop: 8 }}>状态时间轴（audit）</h4>
-      {(v.timeline || []).map((e) => <div key={String(e.audit_id)} className="task-card"><div className="t"><span className="mono">{String(e.action)}</span> · {String(e.old_status || "—")} → {String(e.new_status || "—")}</div><div className="meta">{String(e.occurred_at)} · {String(e.actor_id)}</div></div>)}
     </div>}
     {v === "error" && <EmptyState kind="error" />}
   </div>;
@@ -654,111 +684,13 @@ function ReviewBench({initialTaskId=null,onReviewed}:{initialTaskId?:string|null
 }
 
 /* 台账筛选（服务端仍会逐条复校验权限与版本，这里只决定界面可见范围） */
-/* R62 培训任务台账：一张表里完成检索/筛选/分页/勾选/批量删除（不再单独做一栏勾选面板）。
- * 数据仍全部来自服务端 admin.trainings（行级范围与鉴权在服务端）；删除按行 updated_at 做版本校验，
- * 安全员只能勾选服务端记录为本人创建的任务，管理员可勾选管理范围内全部任务。 */
-const LEDGER_STATUSES = ["assigned", "in_progress", "submitted", "reviewed", "returned", "observation", "interview", "deleted"];
 function TrLedger() {
-  const trainingNames = useTrainingNames();
-  const { canDelete, canDeleteTask } = useTaskDeletionPermission();
   const tid = new URLSearchParams(location.hash.split('?')[1]).get('task_id') || new URLSearchParams(location.hash.split('?')[1]).get('task') || '';
-  const [tick, setTick] = useState(0);
-  const [rows, setRows] = useState<Record<string, unknown>[] | null>(null);
   const [sel, setSel] = useState<string | null>(tid || null);
-  const [loading, setLoading] = useState(true);
-  const [loadErr, setLoadErr] = useState('');
-  const [kw, setKw] = useState(''), [fStatus, setFStatus] = useState(''), [fCourse, setFCourse] = useState(''), [fMand, setFMand] = useState('');
-  const [page, setPage] = useState(0);
-  const [pick, setPick] = useState<string[]>([]);
-  const [delBusy, setDelBusy] = useState(false);
-  const [delMsg, setDelMsg] = useState('');
-  const PAGE_SIZE = 20;
-  useEffect(() => {
-    let alive = true, guard = 0;
-    setLoading(true); setLoadErr('');
-    (async () => {
-      const all: Record<string, unknown>[] = [];
-      try {
-        for (let offset = 0; offset < 10000 && guard < 60; offset += 200) {
-          guard++;
-          const r = await getData<Record<string, unknown>>('admin.trainings', { limit: 200, offset, order: 'updated_at.desc,task_id.asc' });
-          all.push(...r.rows);
-          if (r.rows.length < 200) break;
-        }
-        if (!alive) return;
-        setRows(all);
-        setPick((p) => p.filter((id) => all.some((x) => String(x.task_id) === id)));
-      } catch { if (alive) setLoadErr('培训任务读取失败，请刷新重试。'); }
-      finally { if (alive) setLoading(false); }
-    })();
-    return () => { alive = false; };
-  }, [tick]);
-  useEffect(() => { setPage(0); }, [kw, fStatus, fCourse, fMand]);
-  const counts: Record<string, number> = {};
-  const open3 = ['assigned', 'in_progress', 'returned'];
-  for (const r of rows || []) {
-    counts[String(r.status)] = (counts[String(r.status)] || 0) + 1;
-    if (r.due_at && open3.includes(String(r.status)) && new Date(String(r.due_at)) < new Date()) counts.overdue = (counts.overdue || 0) + 1;
-  }
-  const all = rows || [];
-  const q = kw.trim().toLowerCase();
-  const filtered = all.filter((r) => (!fStatus || String(r.status) === fStatus) && (!fCourse || String(r.course_id) === fCourse) && (!fMand || (fMand === 'yes' ? Number(r.mandatory) === 1 : Number(r.mandatory) !== 1)) && (!q || [String(r.task_id), String(r.driver_id), trainingNames.driver(r.driver_id), trainingNames.course(r.course_id), String(r.goal || ''), String(r.alert_id || '')].join(' ').toLowerCase().includes(q)));
-  const pageRows = filtered.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
-  const pagePicked = pageRows.filter((r) => canDeleteTask(r)).map((r) => String(r.task_id));
-  const cols: [string, string][] = [['task_id', '培训任务'], ['driver_id', '司机'], ['course_id', '培训课程'], ['goal', '学习目标'], ['mandatory', '培训要求'], ['due_at', '截止'], ['status', '状态'], ['submitted_at', '提交日期'], ['reviewed_at', '验收日期']];
-  const fmt = (k: string, v: unknown) => k === 'driver_id' ? trainingNames.driver(v) : k === 'course_id' ? trainingNames.course(v) : k === 'status' ? trainingStatus(v) : k === 'mandatory' ? (Number(v) ? '必修' : '选修') : k.endsWith('_at') && v ? new Date(String(v)).toLocaleDateString('zh-CN') : String(v ?? '—');
-  if (sel) return <TaskDetail taskId={sel} onBack={() => { setSel(null); setTick((x) => x + 1); }} />;
-  return <div><TrainingNotificationRecovery />
-    <PageHead code="TR01" title="培训任务台账" desc="查看培训进度、课程内容与司机反馈；勾选后可批量删除。" />
-    <div className="cards">
-      {["assigned", "in_progress", "submitted", "reviewed", "returned", "overdue"].map((k) => <div key={k} className={`card ${k === "overdue" ? "risk" : ""}`}><div className="k">{({ assigned: "已分配", in_progress: "进行中", submitted: "待复核", reviewed: "已复核", returned: "退回补充", overdue: "已逾期" } as Record<string, string>)[k]}</div><div className={`v ${!(counts[k] || 0) ? "zero" : ""}`}>{counts[k] || 0}</div></div>)}
-      <div className="card"><div className="k">读取任务总数</div><div className="v">{all.length}</div></div>
-    </div>
-    {loading && !all.length ? <p role="status">正在读取培训任务…</p> : loadErr ? <div className="alert warn" role="alert">{loadErr}<button className="btn" onClick={() => setTick((x) => x + 1)}>重试</button></div> : !all.length ? <EmptyState kind="nomatch" hint="暂无培训任务，请先审核课程，再创建培训。" /> : <>
-      <div className="row ledger-tools">
-        <input className="btn" aria-label="按司机、车辆、课程或任务检索" placeholder="检索司机、车辆、课程或任务" value={kw} onChange={(e) => { setKw(e.target.value); }} />
-        <select className="btn" aria-label="按状态筛选" value={fStatus} onChange={(e) => setFStatus(e.target.value)}><option value="">全部状态</option>{LEDGER_STATUSES.map((k) => <option key={k} value={k}>{trainingStatus(k)}</option>)}</select>
-        <select className="btn" aria-label="按课程筛选" value={fCourse} onChange={(e) => setFCourse(e.target.value)}><option value="">全部课程</option>{[...new Set(all.map((r) => String(r.course_id)))].map((c) => <option key={c} value={c}>{trainingNames.course(c)}</option>)}</select>
-        <select className="btn" aria-label="按必修选修筛选" value={fMand} onChange={(e) => setFMand(e.target.value)}><option value="">必修与选修</option><option value="yes">仅必修</option><option value="no">仅选修</option></select>
-        <span className="meta">筛选结果 {filtered.length} / 共 {all.length} 条{counts.deleted ? ` · 已删除 ${counts.deleted}` : ''}</span>
-      </div>
-      {canDelete && <div className="row ledger-delete">
-        <button className="btn" disabled={delBusy || !pagePicked.length} onClick={() => setPick(pagePicked)}>{`勾选本页可删除项（${pagePicked.length}）`}</button>
-        <button className="btn" disabled={delBusy || !pick.length} onClick={() => setPick([])}>清空选择</button>
-        <button className="btn primary" disabled={delBusy || !pick.length} onClick={async () => {
-          if (!pick.length) return;
-          if (!window.confirm(`确认删除选中的 ${pick.length} 条培训任务？司机端将不再显示这些任务；历史学习记录、课程快照与审计记录保留。`)) return;
-          setDelBusy(true); setDelMsg('');
-          try {
-            const map = new Map(all.map((r) => [String(r.task_id), r]));
-            const tasks = pick.map((id) => ({ task_id: id, expected_updated_at: (map.get(id)?.updated_at as string) ?? null }));
-            const r = await deleteTrainingTasks(tasks);
-            setDelMsg(r.ok ? `已删除 ${r.deleted.length} 条任务；历史学习记录与审计保留。` : `已删除 ${r.deleted.length} 条，${r.failed.length} 条未删除（${r.failed.map((f) => f.error).join('、')}）——这些任务在你勾选后又被学习或改动。`);
-            setPick([]); setTick((x) => x + 1);
-          } catch (e) { setDelMsg('删除被拒绝：' + (e instanceof ApiError ? e.code : '请刷新后重试，服务端不会静默覆盖已变化的任务')); }
-          finally { setDelBusy(false); }
-        }}>{delBusy ? '正在删除…' : `删除所选 ${pick.length || ''} 条`}</button>
-        <span className="meta">{`已选 ${pick.length} 条 · 安全员只能删除自己创建的任务，管理员可删除管理范围内全部任务`}；{delMsg && <em role="status">{delMsg}</em>}</span>
-      </div>}
-      <div className="table-wrap"><table>
-        <thead><tr>{canDelete && <th className="td-check-col"><input type="checkbox" aria-label="勾选本页可删除任务" disabled={!pagePicked.length} checked={pagePicked.length > 0 && pagePicked.every((id) => pick.includes(id))} onChange={(e) => setPick(e.target.checked ? [...new Set([...pick, ...pagePicked])] : pick.filter((x) => !pagePicked.includes(x)))} /></th>}{cols.map(([k, label]) => <th key={k}>{label}</th>)}</tr></thead>
-        <tbody>{pageRows.map((r) => {
-          const id = String(r.task_id), allowed = canDeleteTask(r);
-          return <tr key={id} className={(pick.includes(id) ? 'is-picked ' : '') + (String(r.status) === 'deleted' ? 'is-deleted' : '')} style={{ cursor: 'pointer' }} onClick={() => setSel(id)}>
-            {canDelete && <td className="td-check" onClick={(e) => e.stopPropagation()}><input type="checkbox" disabled={!allowed} checked={pick.includes(id)} aria-label={'选择任务 ' + id} title={allowed ? '' : '只有创建人本人或管理员可以删除'} onChange={(e) => setPick(e.target.checked ? [...new Set([...pick, id])] : pick.filter((x) => x !== id))} /></td>}
-            {cols.map(([k]) => <td key={k} className={/id$|version/.test(k) ? 'mono' : undefined} title={k === 'goal' ? String(r.goal ?? '') : undefined}>{k === 'task_id' ? '培训任务' : fmt(k, r[k])}</td>)}
-          </tr>;
-        })}</tbody>
-      </table>{!pageRows.length && <p className="meta">没有匹配的筛选结果。</p>}</div>
-      <div className="pager">
-        <button className="btn" disabled={page === 0} onClick={() => setPage((v) => v - 1)}>上一页</button>
-        <span>第 {page + 1} 页 · 共 {filtered.length} 条</span>
-        <button className="btn" disabled={(page + 1) * PAGE_SIZE >= filtered.length} onClick={() => setPage((v) => v + 1)}>下一页</button>
-      </div>
-      <details className="panel"><summary>互动课程答题成绩（当前读取范围 {all.length} 条）</summary>
-        {(all).filter(r => isInteractiveCourse(r.course_id)).length === 0 ? <p className="meta">当前读取任务中暂无互动课程记录。</p> : (all).filter(r => isInteractiveCourse(r.course_id)).map(r => <div key={String(r.task_id)} className="task-card"><b>{trainingNames.driver(r.driver_id)} · {trainingNames.course(r.course_id)}</b> · {trainingStatus(r.status)}<QuizScoreSummary record={r.learning_record} /><button className="btn" onClick={() => setSel(String(r.task_id))}>查看任务与复核</button></div>)}
-      </details>
-    </>}
+  if (sel) return <TaskDetail taskId={sel} onBack={() => setSel(null)} />;
+  return <div className="stack"><TrainingNotificationRecovery />
+    <PageHead code="TR01" title="培训任务台账" desc="查看培训进度、课程内容与司机反馈；在表格里直接勾选即可批量删除。" />
+    <TrainingLedger onOpen={(id) => setSel(id)} />
   </div>;
 }
 
@@ -821,7 +753,7 @@ function OpConfigPanel() {
     } catch (e) { setMsg(e instanceof ApiError ? `拒绝：${e.code}` : "网络异常"); }
   }
   return <div>
-    <p className="page-desc">运营参数影响待办优先级与流程时限（如 7 天下降阈值仅决定队列提示），<b>不参与也不得重算/覆写事故概率、安全分、等级、六维扣分</b>；每次修改版本+1，旧值/新值/操作者/生效时间入审计。本轮保持 ops_v1 原值。</p>
+    <p className="page-desc">运营参数用于设置待办优先级与流程时限；每次修改都会留版本与操作记录。</p>
     <ResourceTable renderCell={systemCell} resource="admin.operation_config" labels={{ config_id: "配置项", value: "值", unit: "单位", config_version: "版本", updated_by: "修改人", updated_at: "修改时间", effective_at: "生效时间" }} />
     <div className="panel" style={{ marginTop: 10 }}><h3>修改运营参数（产生新版本，需安全管理员确认）</h3>
       <div className="row">

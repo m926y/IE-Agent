@@ -23,3 +23,10 @@
 .risk-replay-table .speed-mid{color:#c07f1f;font-weight:600}
 .risk-replay-table .speed-low{color:#4f7a4f}
 .risk-replay-table .replay-alert-link{padding:4px 10px;font-size:12px;white-space:nowrap}
+
+/* R63 回放风险标注：行内徽标与斑马纹同权重覆盖，确保危险行一眼可见 */
+.risk-replay-table tbody tr.replay-warning-row,.risk-replay-table tbody tr.replay-warning-row:nth-child(even){background:#fffaf3}
+.risk-replay-table tbody tr.replay-warning-row.risk-red,.risk-replay-table tbody tr.replay-warning-row.risk-red:nth-child(even){background:#fff4f6}
+.risk-replay-table tbody tr.replay-warning-row td:nth-child(2){border-left:3px solid #dfb45f}
+.risk-replay-table tbody tr.replay-warning-row.risk-red td:nth-child(2){border-left-color:#c7768b}
+.risk-replay-table td .replay-warning-badge{font-size:11.5px;padding:3px 7px}

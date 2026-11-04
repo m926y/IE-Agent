@@ -12,16 +12,3 @@
 .ledger-pick-list label span { color: var(--ink-2); font-size: 12px; }
 .ledger-pick-list label em { margin-left: auto; font-style: normal; font-size: 11.5px; color: #9a6b1f; }
 .ledger-pick-filters input, .ledger-pick-filters select { width: auto; max-width: 240px; }
-
-/* R62 台账：表内勾选与工具条（不再单独一栏） */
-.ledger-tools{flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 10px}
-.ledger-tools input,.ledger-tools select{width:auto;max-width:280px}
-.ledger-delete{flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 8px;padding:8px 10px;border:1px solid #e7dbef;border-radius:10px;background:#fbf7fe}
-.ledger-delete .btn{width:auto;padding:5px 11px;font-size:13px}
-.ledger-delete em{font-style:normal;color:#6d4f86;font-size:12.5px}
-.tbl td.td-check,.tbl th.td-check-col,table td.td-check,table th.td-check-col{width:34px;text-align:center;padding-left:10px;padding-right:0}
-table td.td-check input,table th.td-check-col input{width:16px;height:16px;margin:0;accent-color:#8a4fa0;cursor:pointer}
-table td.td-check input:disabled{cursor:not-allowed;opacity:.45}
-table tr.is-picked{background:#f8f1fd}
-table tr.is-deleted{opacity:.6}
-table tr.is-deleted td{color:#8a7a97}

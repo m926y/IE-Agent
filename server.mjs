@@ -5309,7 +5309,18 @@ async function handleRiskMonitor(request,response,url,ctx){
       const drv=await qRows('cen_r','drivers',{select:'driver_id,gpsno',limit:2000});
       const bound=new Set((await qRows('dau_q','app_users',{role:'eq.driver',account_status:'eq.active',binding_verified:'eq.true',select:'driver_id',limit:600})).map(x=>String(x.driver_id||'')));
       const last=(await qRows('dsr_q','replay_events',{select:'replay_date',order:'replay_date.desc',limit:1}))[0]?.replay_date||null;
-      sendJson(response,200,{vehicles:drv.map(d=>({gpsno:String(d.gpsno),bound:bound.has(String(d.driver_id))})),default_date:last,can_create:false,mode:'cloud_read_only',hosted_note:'实时案卷引擎属本地完整数据服务；云端请使用「历史回放（RM02）」只读视图。'}); return;
+      /* 风险等级表：只由冻结严重度(SCORING_FACTORS) + 现行规则(RISK_RULES)推导，前端不再自带数字表 */
+      const sevByCode = new Map();
+      for (const d of SCORING_FACTORS) for (const e of d.events) sevByCode.set(Number(e.code), { severity: Number(e.severity), dimension: d.key, name: e.name });
+      const ruleByCode = new Map();
+      for (const r of RISK_RULES) for (const c of r.codes) ruleByCode.set(Number(c), r);
+      const event_rules = [...new Set([...sevByCode.keys(), ...ruleByCode.keys()])].sort((a, b) => b - a).map((code) => {
+        const sv = sevByCode.get(code) || {}, rl = ruleByCode.get(code);
+        const severity = sv.severity ?? null;
+        return { code, name: sv.name || (rl ? rl.title : String(code)), severity, dimension: sv.dimension || null, rule: rl ? rl.key : null, course: rl ? rl.course : null, message: rl ? rl.message : null,
+          level: severity === null ? null : severity >= 6 ? 'red' : severity >= (rl ? 4 : 6) ? 'orange' : severity >= 2 ? 'watch' : null };
+      });
+      sendJson(response,200,{vehicles:drv.map(d=>({gpsno:String(d.gpsno),bound:bound.has(String(d.driver_id))})),default_date:last,can_create:false,mode:'cloud_read_only',event_rules,by_code:Object.fromEntries(event_rules.map((r)=>[r.code,r])),risk_speed_high:80,hosted_note:'实时案卷引擎属本地完整数据服务；云端请使用「历史回放（RM02）」只读视图。'}); return;
     }
     throw new HttpError(503,'risk_local_data_required');
   }

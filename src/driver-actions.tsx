@@ -106,7 +106,7 @@ function ScoreChanges() {
       <label>较早记录<select aria-label="较早评分记录" disabled={busy} value={before} onChange={e => setBefore(e.target.value)}>{!before && <option value="">未取得</option>}{data.options.map(row => <option key={row.score_id} value={row.score_id}>{row.as_of_date}</option>)}</select></label>
       <label>较晚记录<select aria-label="较晚评分记录" disabled={busy} value={after} onChange={e => setAfter(e.target.value)}>{!after && <option value="">未取得</option>}{data.options.map(row => <option key={row.score_id} value={row.score_id}>{row.as_of_date}</option>)}</select></label>
       <button className="btn" disabled={busy || !before || !after || before === after} onClick={() => void load(before, after)}>核对选定两期</button>
-      {data.options_truncated && <p className="meta">选择器展示最近50条真实记录，不补造日期。</p>}
+      {data.options_truncated && <p className="meta">选择器展示最近 50 条记录。</p>}
       <p>{data.note}</p>
       {[data.before, data.after].map((row, index) => row ? <div className="task-card" key={index}><h4>{index === 0 ? "较早" : "较晚"}真实记录</h4><p>截止 {String(row.as_of_date)} · 安全分 {numberText(row.safety_score)}</p><p className="meta">窗口 {String(row.window_start || "未取得")} 至 {String(row.as_of_date)} · 可信度 {driverText(row.confidence_level)}</p><DriverEvidence readable kind="score_history" id={String(row.score_id)} label={`查看${index === 0 ? "较早" : "较晚"}评分依据`} /></div> : <p key={index}>未取得{index === 0 ? "较早" : "较晚"}记录。</p>)}
       <p>记录数值差：{numberText(data.difference)}；不是改善有效判定。</p>

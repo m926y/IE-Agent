@@ -130,8 +130,8 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
   const page = location.hash.replace(/^#\//, "").slice(0, 40);
   function uploadError(e: unknown) {
     const code = e instanceof ApiError ? e.code : "";
-    return ({ file_type_not_supported: "云端支持 .xlsx / .csv / .docx / .pptx / .html / .md / .txt 文件（PDF 暂不支持）",
-      pdf_not_supported_hosted: "云端工作台不支持解析 PDF（需要专门的 PDF 文本层与扫描件解析，仅本地完整版具备）；请把材料另存为 Word(.docx)、Markdown 或 TXT 后重新上传",
+    return ({ file_type_not_supported: "支持 .xlsx / .csv / .docx / .pptx / .html / .md / .txt 文件（暂不支持 PDF）",
+      pdf_not_supported_hosted: "这里不支持解析 PDF（需要专门的 PDF 文本层与扫描件解析）；请把材料另存为 Word(.docx)、Markdown 或 TXT 后重新上传",
       legacy_format_not_supported: "旧版二进制格式不支持：请将 .doc/.ppt/.xls 另存为 .docx/.pptx/.xlsx 后上传",
       file_too_large: "文件超过 20MB 上限", file_empty: "文件为空", csv_quote_invalid: "CSV 引号不完整，请检查文件格式",
       extract_failed: "文件内容解析失败，请确认文件未损坏或加密", extract_empty: "未能从文件中提取到文字内容（可能是空文档或纯图片）",
@@ -177,7 +177,7 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
       <label className="meta" style={{ display: "flex", gap: 4, alignItems: "center" }}><input type="checkbox" checked={Boolean(longOn)} aria-label="长期会话摘要开关" onChange={(e) => { const v = e.target.checked; setLongOn(v); if (!v) { try { localStorage.removeItem(longKey); } catch {} setLongBanner("已关闭并清除本设备长期摘要"); } opsSet("ai_long_session", v ? "on" : "off").then((r) => setLongBanner(`长期摘要开关=${v ? "on" : "off"}（config v${r.new_version}，审计 ${r.audit_id}）`)).catch(() => setLongBanner("开关写入失败（需 manage.operation_config 能力）")); }} />重登后保留脱敏摘要（默认关；2h 过期；不含令牌/明文个人数据/业务状态）</label>
       <button className="btn" style={{ padding: "2px 8px" }} onClick={() => { try { localStorage.removeItem(longKey); } catch {} setLongBanner("已一键清除本设备长期摘要"); }}>一键清除</button>
     </div>{longBanner && <p className="meta">{longBanner}</p>}</details>}
-    {["safety_admin","safety_officer"].includes(who.role) && <details className="ai-advanced"><summary>Excel账号导入</summary><AgentAccountUpload disabled={busy} onPlan={p=>setMsgs(m=>m.concat({role:"assistant",content:`已上传并校验账号表，批次 ${p.id}，共 ${p.count} 个账号；尚未创建。可以在下方确认，或让我检查这个批次。`,actionPlans:[p]}))}/><p className="meta">云端逐项校验重名、车辆唯一绑定与角色权限；初始口令只在确认执行的结果里显示一次，服务器不留存。</p></details>}
+    {["safety_admin","safety_officer"].includes(who.role) && <details className="ai-advanced"><summary>Excel账号导入</summary><AgentAccountUpload disabled={busy} onPlan={p=>setMsgs(m=>m.concat({role:"assistant",content:`已上传并校验账号表，批次 ${p.id}，共 ${p.count} 个账号；尚未创建。可以在下方确认，或让我检查这个批次。`,actionPlans:[p]}))}/><p className="meta">上传后逐项校验重名、车辆唯一绑定与角色权限，确认执行时一次性给出初始口令。</p></details>}
 </div></details>
       
     </div>
@@ -256,7 +256,7 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
     </div>}
     <div className="ai-composer" style={{ padding: "8px 12px", display: "flex", gap: 6 }}>
       <input ref={fileRef} type="file" accept=".xlsx,.csv,.docx,.pptx,.html,.htm,.md,.txt" style={{ display: "none" }} aria-label="上传文件给AI" onChange={(e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) void uploadFile(file); }} />
-      <button className="btn" style={{ width: "auto", padding: "8px 10px" }} title="上传文件（Excel账号表、Word、PPT、HTML、Markdown、TXT、CSV，≤20MB，每条消息最多3个；云端不支持PDF）" aria-label="上传文件" disabled={busy || attBusy || atts.length >= 3} onClick={() => fileRef.current?.click()}>📎</button>
+      <button className="btn" style={{ width: "auto", padding: "8px 10px" }} title="上传文件（Excel账号表、Word、PPT、HTML、Markdown、TXT、CSV，≤20MB，每条消息最多 3 个；暂不支持 PDF）" aria-label="上传文件" disabled={busy || attBusy || atts.length >= 3} onClick={() => fileRef.current?.click()}>📎</button>
       <input style={{ flex: 1, minWidth: 0, padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 8 }} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") send(); }} placeholder={busy ? "正在回复…" : atts.length ? "可补充说明，如：按表格批量创建账号" : "发送消息"} aria-label="AI 提问" />
       <button className="btn primary" style={{ width: "auto" }} onClick={() => send()} disabled={busy || attBusy || (!input.trim() && !atts.length)}>发送</button>
     </div>
