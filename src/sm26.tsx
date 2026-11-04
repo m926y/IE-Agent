@@ -15,6 +15,7 @@ export function AiPreplanPage() {
   const load = (c: Record<string, string>) => {
     setData("loading"); setChk(null);
     const qs = new URLSearchParams(); if (c.driver_id) qs.set("driver_id", c.driver_id); if (c.gpsno) qs.set("gpsno", c.gpsno); if (c.as_of_date) qs.set("as_of_date", c.as_of_date);
+    if (!c.driver_id && !c.gpsno) { setData(null); return; } // 未指定对象不请求：给出输入提示，不触发 400
     api<Pre>("/api/ai/preplan?" + qs.toString()).then((r) => setData(r)).catch(() => setData("fail"));
   };
   useEffect(() => { const h = () => { const c = parse(); setCrit(c); load(c); }; window.addEventListener("hashchange", h); load(crit); return () => window.removeEventListener("hashchange", h); }, []);
@@ -35,6 +36,7 @@ export function AiPreplanPage() {
       <button className="btn" onClick={backToEv03}>← 返回 EV03（保留对象与管理动作为主标签）</button>
       <button className="btn" onClick={() => { const sub = data && typeof data === "object" && data.subject ? data.subject : null; window.dispatchEvent(new CustomEvent("claw:ai-preset", { detail: { prompt: "AI04 三种管理路径并排预演：" + (sub ? `${sub.driver_id}（${sub.gpsno}，as_of ${sub.as_of_date}，版本 ${sub.source_version}）` : "当前对象") + "，调用 action_preplan，只预演不写入" } })); }}>让 AI 预演三路径（对话侧栏，走既有工具与审计）</button>
     </div>
+    {data === null && <div className="alert info">请先在上方输入 driver_id 或车辆编号（可选 as_of_date），再点击「切换对象/日期并重新验权」开始预演。</div>}
     {data === "loading" && <div className="meta">按可信会话组装中（URL 参数只作查询条件，角色/车队一律以服务端会话为准）…</div>}
     {data === "fail" && <div className="alert warn">预演组装失败：会话或查询异常（不展示旧数据冒充）</div>}
     {data && data !== "fail" && typeof data === "object" && data.data_status !== "ok" && <div className="alert info">{data.data_status === "no_data_for_date" ? String(data.note) : data.data_status === "not_found" ? "对象不存在或不在你的授权范围（与不存在同语义，不泄漏）" : String(data.note || "无数据")}</div>}

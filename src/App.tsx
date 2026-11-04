@@ -11,7 +11,8 @@ import { AccountProfile } from "./account";
 import { loadVehicleLabels, displayText } from "./vehicles";
 import {useEffect, useState, useRef} from "react";
 import type { FormEvent } from "react";
-import {ApiError, aiCallsStatus, aiChat, aiConfirm, aiEvidenceCheck, aiEvidenceCheckVer, aiSelftest, getMe, login, opsList, opsSet} from "./api";
+import {ApiError, aiCallsStatus, aiChat, aiConfirm, aiEvidenceCheck, aiEvidenceCheckVer, aiSelftest, aiUpload, getMe, login, opsList, opsSet} from "./api";
+import type { AiUpload } from "./api";
 import type { Selftest } from "./api";
 import type { EvidenceCard } from "./api";
 import { Tag } from "./ui";
@@ -69,7 +70,7 @@ function SsoUnboundView({ name, provider, onUseAppAccount }: { name: string; pro
 function openEvidenceRoute(route:string){if(route.startsWith('driver:'))window.dispatchEvent(new CustomEvent('claw:driver-nav',{detail:route.slice(7)}));else location.hash=route.replace(/^#/, '');}
 
 function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; who: { role: string; userId: string }; preset?: string | null; onPresetUsed?: () => void }) {
-  type Msg = { artifacts?:AgentArtifact[]; actionPlans?:AgentPlan[]; role: "user" | "assistant"; content: string; citations?: string[]; limitations?: string[]; drafts?: Record<string, unknown>[] | null; err?: string; cards?: EvidenceCard[]; callId?: string | null; restored?: boolean; longTerm?: boolean; replayed?: boolean };
+  type Msg = { artifacts?:AgentArtifact[]; actionPlans?:AgentPlan[]; role: "user" | "assistant"; content: string; citations?: string[]; limitations?: string[]; drafts?: Record<string, unknown>[] | null; err?: string; cards?: EvidenceCard[]; callId?: string | null; restored?: boolean; longTerm?: boolean; replayed?: boolean; attachments?: { name: string; kind_label: string; chars: number }[]; audit?: { issues: string[]; llm_checked: boolean } };
   const [historyOpen,setHistoryOpen]=useState(false);
   const [driverGreeting]=useState(()=>[
     '开车辛苦了，有什么想问的？',
@@ -111,24 +112,52 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
   useEffect(() => { if (who.role !== "safety_admin") { setLongOn(false); return; } opsList().then((r) => { const row = (r as { rows: Record<string, unknown>[] }).rows.find((x) => String(x.config_id) === "ai_long_session"); setLongOn(String(row?.value || "off") === "on"); }).catch(() => setLongOn(false)); }, [who.role]);
   useEffect(() => { if (who.role !== "safety_admin" || !longOn) return; try { const items = msgs.slice(-8).map(m => ({ r: m.role, x: excerpt(m.content), refs: (m.cards || []).map(c => c.ref).slice(0, 6) })); localStorage.setItem(longKey, JSON.stringify({ exp: Date.now() + 7200000, items })); } catch { setLongBanner("本平台不支持安全本地存储或配额受限：长期恢复不可用（现跨页 sessionStorage 能力不受影响）"); } }, [msgs, longOn, longKey, who.role]);
   useEffect(() => { try { const raw = localStorage.getItem(longKey); if (raw) { const d = JSON.parse(raw); if (Number(d.exp) > Date.now() && (d.items || []).length) setLongBanner(`已加载本设备长期摘要（脱敏 ${d.items.length} 条，非业务状态；数字将在追问时重查）`); else if (Number(d.exp) < Date.now()) { localStorage.removeItem(longKey); setLongBanner("长期摘要已过期（2h）自动清除——重登从空会话开始"); } } } catch {} }, [longKey]);
+  /* R60：聊天附件（解析后的文字在服务端保留 24 小时；本地只暂存 upload_id 与展示元信息，且不跨会话长期保存） */
+  const attKey = "claw_ai_atts_" + who.userId;
+  const [atts, setAtts] = useState<AiUpload[]>(() => {
+    try { const raw = sessionStorage.getItem(attKey); if (!raw) return [];
+      return (JSON.parse(raw) as AiUpload[]).filter((a) => a && a.upload_id && Date.parse(a.expires_at) > Date.now()); } catch { return []; }
+  });
+  useEffect(() => { try { if (atts.length) sessionStorage.setItem(attKey, JSON.stringify(atts)); else sessionStorage.removeItem(attKey); } catch {} }, [atts, attKey]);
+  const [attBusy, setAttBusy] = useState(false);
+  const [attErr, setAttErr] = useState("");
+  const fileRef = useRef<HTMLInputElement>(null);
   const [probe, setProbe] = useState<string | null>(null);
   const [st, setSt] = useState<null | Selftest>(null);
   const [lastModel, setLastModel] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const page = location.hash.replace(/^#\//, "").slice(0, 40);
+  function uploadError(e: unknown) {
+    const code = e instanceof ApiError ? e.code : "";
+    return ({ file_type_not_supported: "云端支持 .xlsx / .csv / .docx / .pptx / .html / .md / .txt 文件（PDF 暂不支持）",
+      pdf_not_supported_hosted: "云端工作台不支持解析 PDF（需要专门的 PDF 文本层与扫描件解析，仅本地完整版具备）；请把材料另存为 Word(.docx)、Markdown 或 TXT 后重新上传",
+      legacy_format_not_supported: "旧版二进制格式不支持：请将 .doc/.ppt/.xls 另存为 .docx/.pptx/.xlsx 后上传",
+      file_too_large: "文件超过 20MB 上限", file_empty: "文件为空", csv_quote_invalid: "CSV 引号不完整，请检查文件格式",
+      extract_failed: "文件内容解析失败，请确认文件未损坏或加密", extract_empty: "未能从文件中提取到文字内容（可能是空文档或纯图片）",
+      attachment_expired: "附件已过期（24 小时），请重新上传", attachment_forbidden: "只能使用本人上传的附件",
+      payload_too_large: "文件超过 20MB 上限", unauthenticated: "登录已过期：请重新登录后再上传" } as Record<string, string>)[code] || "上传失败：" + (code || "请重试");
+  }
+  async function uploadFile(file: File) {
+    setAttBusy(true); setAttErr("");
+    try { const r = await aiUpload(file); setAtts((prev) => prev.length >= 3 || String(r.upload_id) === "" ? prev : prev.concat(r)) }
+    catch (e) { setAttErr(uploadError(e)) }
+    finally { setAttBusy(false) }
+  }
   async function send(preset?: string) {
     const text = (preset ?? input).trim();
-    if (!text || busy) return;
-    setInput("");
-    const next = [...msgs, { role: "user" as const, content: text }];
+    if ((!text && !atts.length) || busy) return;
+    const sentAtts = atts;
+    const content = text || "（已上传附件，请结合文件内容处理。）";
+    setInput(""); setAtts([]); setAttErr("");
+    const next = [...msgs, { role: "user" as const, content, attachments: sentAtts.map((a) => ({ name: a.name, kind_label: a.kind_label, chars: a.chars })) }];
     setMsgs(next); setBusy(true);
     // 幂等键（agent1 client_request_id 语义）：网络重试/双击由服务端回放同一结果
     const crid = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : "r" + Date.now() + Math.random().toString(36).slice(2, 10);
     try {
-      const r = await aiChat(next.map((m) => ({ role: m.role, content: m.content })), page, crid,page.startsWith('rm-live')?sessionStorage.getItem('claw_current_case')||undefined:undefined);
+      const r = await aiChat(next.map((m) => ({ role: m.role, content: m.content })), page, crid, undefined, sentAtts.map((a) => a.upload_id));
       if (r.meta?.model) setLastModel(String(r.meta.model));
-      setMsgs(next.concat({ role: "assistant", content: r.answer, artifacts:r.artifacts, actionPlans:r.action_plans, citations: r.citations, limitations: r.data_limitations, drafts: r.draft_preview, cards: (r as { evidence_cards?: EvidenceCard[] }).evidence_cards || [], callId: (r as { ai_call_id?: string | null }).ai_call_id || null, replayed: r.idempotent_replay === true }));
+      setMsgs(next.concat({ role: "assistant", content: r.answer, artifacts:r.artifacts, actionPlans:r.action_plans, citations: r.citations, limitations: r.data_limitations, drafts: r.draft_preview, cards: (r as { evidence_cards?: EvidenceCard[] }).evidence_cards || [], callId: (r as { ai_call_id?: string | null }).ai_call_id || null, replayed: r.idempotent_replay === true, audit: r.meta?.answer_audit && !r.meta.answer_audit.passed ? { issues: r.meta.answer_audit.issues, llm_checked: r.meta.answer_audit.llm_checked } : undefined }));
       { const ids = msgs.filter((m) => m.callId).map((m) => m.callId as string).concat([(r as { ai_call_id?: string | null }).ai_call_id || ""].filter(Boolean)); if (ids.length) aiCallsStatus(ids).then((x) => setConfirms((c0) => ({ ...c0, ...x.confirms }))).catch(() => {}); }
     } catch (e) {
       const code = e instanceof ApiError ? e.code : "network_error";
@@ -148,7 +177,7 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
       <label className="meta" style={{ display: "flex", gap: 4, alignItems: "center" }}><input type="checkbox" checked={Boolean(longOn)} aria-label="长期会话摘要开关" onChange={(e) => { const v = e.target.checked; setLongOn(v); if (!v) { try { localStorage.removeItem(longKey); } catch {} setLongBanner("已关闭并清除本设备长期摘要"); } opsSet("ai_long_session", v ? "on" : "off").then((r) => setLongBanner(`长期摘要开关=${v ? "on" : "off"}（config v${r.new_version}，审计 ${r.audit_id}）`)).catch(() => setLongBanner("开关写入失败（需 manage.operation_config 能力）")); }} />重登后保留脱敏摘要（默认关；2h 过期；不含令牌/明文个人数据/业务状态）</label>
       <button className="btn" style={{ padding: "2px 8px" }} onClick={() => { try { localStorage.removeItem(longKey); } catch {} setLongBanner("已一键清除本设备长期摘要"); }}>一键清除</button>
     </div>{longBanner && <p className="meta">{longBanner}</p>}</details>}
-    {["safety_admin","safety_officer"].includes(who.role) && <details className="ai-advanced"><summary>Excel账号导入</summary><AgentAccountUpload disabled={busy} onPlan={p=>setMsgs(m=>m.concat({role:"assistant",content:`已上传并校验账号表，批次 ${p.id}，共 ${p.count} 个账号；尚未创建。可以在下方确认，或让我检查这个批次。`,actionPlans:[p]}))}/></details>}
+    {["safety_admin","safety_officer"].includes(who.role) && <details className="ai-advanced"><summary>Excel账号导入</summary><AgentAccountUpload disabled={busy} onPlan={p=>setMsgs(m=>m.concat({role:"assistant",content:`已上传并校验账号表，批次 ${p.id}，共 ${p.count} 个账号；尚未创建。可以在下方确认，或让我检查这个批次。`,actionPlans:[p]}))}/><p className="meta">云端逐项校验重名、车辆唯一绑定与角色权限；初始口令只在确认执行的结果里显示一次，服务器不留存。</p></details>}
 </div></details>
       
     </div>
@@ -159,7 +188,8 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
 
       {who.role==="driver"&&msgs.length===0&&<div className="mobile-chat-welcome"><img className="mobile-chat-logo" src="/brand/yiliu-mark.svg" alt="易流智安"/><h2>{driverGreeting}</h2></div>}
       {msgs.map((m, i) => m.role === "user"
-        ? <div key={i} className="task-card" style={{ background: "var(--info-bg)" }}><div className="t">{displayText(m.content).startsWith("AI04 三种管理路径并排预演") ? "分析当前车辆的处置方案" : displayText(m.content)}</div></div>
+        ? <div key={i} className="task-card" style={{ background: "var(--info-bg)" }}><div className="t">{displayText(m.content).startsWith("AI04 三种管理路径并排预演") ? "分析当前车辆的处置方案" : displayText(m.content)}</div>
+            {!!m.attachments?.length && <div className="row" style={{ flexWrap: "wrap", gap: 4, marginTop: 4 }}>{m.attachments.map((a, k) => <span key={k} className="ai-att-chip">📎 {a.name}<em>{a.kind_label} · {a.chars}字</em></span>)}</div>}</div>
         : m.err
           ? <div key={i} className="alert warn" style={{ fontSize: 12.5 }}>{m.err === "ai_provider_not_configured" ? "AI 通道未配置（属主 Page env）：运行时模型尚未接通——本界面不是静态聊天模拟，拒绝假回答。人工流程不受影响。" : m.err === "ai_upstream_error" ? "模型上游暂时不可用；工具与人工流程不受影响（可稍后重试）。" : m.err === "ai_request_version_conflict" ? "该问题已有返回结果（幂等保护）；请修改问题后重试。" : m.err === "unauthenticated" ? "登录已过期：请刷新页面重新登录。" : m.err === "ai_policy_blocked" ? "模型端点策略不允许（必须是外部 HTTPS 地址）；请属主检查 Page env。" : `请求失败：${m.err}`}</div>
           : <div key={i} className="task-card">
@@ -201,7 +231,9 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
                     : <div className="task-card"><div className="t">管理动作建议（预演，未写入）</div><div className="meta">{JSON.stringify((d as { paths?: unknown[] }).paths || (d as { draft_action?: unknown[] }) || []).slice(0, 240)}</div>{(d as { fill_to?: Record<string, unknown> }).fill_to ? <button className="btn" style={{ padding: "3px 10px" }} onClick={() => doFill((d as { fill_to: Record<string, unknown> }).fill_to)}>填入表单 →</button> : null}</div>}
                 </div>)}
               </div>}
+              {m.audit && <div className="alert warn" role="status" style={{ fontSize: 11.5, marginTop: 6 }}>⚖️ 审计智能体业务核对{m.audit.llm_checked ? "（已作模型复核）" : ""}：{m.audit.issues.join("；")}</div>}
             </div>)}
+      {busy && <div className="task-card ai-thinking" aria-live="polite"><span className="ai-thinking-dots" aria-hidden="true"><i/><i/><i/></span>思考中，正在查询数据并整理回答…</div>}
     </div>
     {probe && <div className="alert info" style={{ fontSize: 12 }}>{probe}</div>}
     {checkMsg && <div className="alert info" style={{ margin: "0 12px 6px" }}>{checkMsg}</div>}
@@ -214,9 +246,19 @@ function AiPanel({ onClose, who, preset, onPresetUsed }: { onClose: () => void; 
  if (pi?.training?.fill_to) pre.push({ kind: "training", ...(pi.training as Record<string, unknown>) });
  setMsgs((m) => m.concat({ role: "assistant" as const, content: `【工具链自检（真实执行，非模型对话）】\n` + r.tools.map((x) => `${x.tool}:${x.status}${x.requires_confirmation ? "(需确认草稿)" : ""}`).join("\n") + `\n业务表计数前后一致=${r.writes}`, drafts: pre.length ? pre : null })); }).catch((e) => setProbe("自检失败 " + (e instanceof ApiError ? e.code : "?"))); }}>检查工具</button>}
     </div>
+    {(atts.length > 0 || attBusy || attErr) && <div style={{ padding: "6px 12px 0" }}>
+      <div className="row" style={{ flexWrap: "wrap", gap: 4 }}>
+        {atts.map((a) => <span key={a.upload_id} className="ai-att-chip">📎 {a.name}<em>{a.kind_label} · {a.chars}字{a.rows ? ` · ${a.rows}行` : ""}{a.truncated ? " · 已截断" : ""}</em>
+          <button className="ai-att-x" aria-label={"移除附件 " + a.name} disabled={busy || attBusy} onClick={() => setAtts((prev) => prev.filter((x) => x.upload_id !== a.upload_id))}>✕</button></span>)}
+        {attBusy && <span className="ai-att-chip">解析中…<span className="ai-thinking-dots" aria-hidden="true"><i/><i/><i/></span></span>}
+      </div>
+      {attErr && <div className="alert warn" role="alert" style={{ fontSize: 12, marginTop: 4 }}>{attErr}</div>}
+    </div>}
     <div className="ai-composer" style={{ padding: "8px 12px", display: "flex", gap: 6 }}>
-      <input style={{ flex: 1, minWidth: 0, padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 8 }} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") send(); }} placeholder={busy ? "正在回复…" : "发送消息"} aria-label="AI 提问" />
-      <button className="btn primary" style={{ width: "auto" }} onClick={() => send()} disabled={busy || !input.trim()}>发送</button>
+      <input ref={fileRef} type="file" accept=".xlsx,.csv,.docx,.pptx,.html,.htm,.md,.txt" style={{ display: "none" }} aria-label="上传文件给AI" onChange={(e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) void uploadFile(file); }} />
+      <button className="btn" style={{ width: "auto", padding: "8px 10px" }} title="上传文件（Excel账号表、Word、PPT、HTML、Markdown、TXT、CSV，≤20MB，每条消息最多3个；云端不支持PDF）" aria-label="上传文件" disabled={busy || attBusy || atts.length >= 3} onClick={() => fileRef.current?.click()}>📎</button>
+      <input style={{ flex: 1, minWidth: 0, padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 8 }} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") send(); }} placeholder={busy ? "正在回复…" : atts.length ? "可补充说明，如：按表格批量创建账号" : "发送消息"} aria-label="AI 提问" />
+      <button className="btn primary" style={{ width: "auto" }} onClick={() => send()} disabled={busy || attBusy || (!input.trim() && !atts.length)}>发送</button>
     </div>
     </div>
   </div>;

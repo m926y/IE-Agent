@@ -290,6 +290,23 @@ thead th { color: #8b759a; }
 .data-center > .cards { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); }
 @media (max-width: 700px) { .data-center > .cards { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 
+/* R59：全量索引溯源结构化面板 + 云端装配口径折叠说明 + 事件明细空态补齐 */
+.prov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 10px; }
+.prov-item { border: 1px solid #e6dff1; border-radius: 11px; padding: 12px 14px; background: linear-gradient(135deg, #ffffff, #f9f6fd); display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.prov-item .meta { font-size: 12px; }
+.prov-item b { font-size: 17px; color: #553a72; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.prov-item b small { font-size: 12px; color: #8a7a99; font-weight: 400; margin-left: 2px; }
+.prov-item small.meta { color: #8d8296; font-size: 12px; }
+.prov-item.prov-wide { grid-column: span 2; }
+@media (max-width: 700px) { .prov-item.prov-wide { grid-column: span 1; } }
+.prov-note summary { cursor: pointer; font-weight: 600; color: #553a72; }
+.prov-note-list { margin: 10px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; color: #6b6175; font-size: 13px; line-height: 1.7; }
+.events-empty .panel { margin-top: 4px; }
+.events-empty .panel h4 { margin: 0 0 8px; font-size: 14px; color: #553a72; }
+.events-index-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.events-index-table th { text-align: left; padding: 8px 12px; background: #efe7f8; color: #5d4277; }
+.events-index-table td { padding: 8px 12px; border-bottom: 1px solid #f0ebf6; }
+
 .weight-stacked { height: 24px; border-radius: 9px; display: flex; overflow: hidden; background: #eee9f3; }
 .weight-editor .panel { gap: 8px; }
 .weight-editor .panel > p { margin: 5px 0; }
@@ -321,3 +338,7 @@ thead th { color: #8b759a; }
 .ai-advanced > summary { cursor:pointer; color:var(--ink-3); }
 @media(min-width:1350px) { .admin-workspace.ai-open .ai-panel { width:410px !important; } .admin-workspace.ai-open .admin-shell .main { margin-right:428px; } }
 @media(max-width:700px) { .ai-panel { top:90px; bottom:12px; } .driver-workspace .ai-panel { bottom:90px; } }
+
+/* R61 云端只读权重视图 */
+.weight-readonly-table td:first-child{display:flex;align-items:center;gap:8px}
+.weight-dot{width:10px;height:10px;border-radius:50%;display:inline-block;flex:0 0 auto}

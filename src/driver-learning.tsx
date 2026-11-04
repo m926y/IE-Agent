@@ -55,9 +55,22 @@ export function DriverRiskPanel() {
 }
 
 
-// Keep the peer's task-card structure while routing every course through the existing validated player.
+// 课程形式徽标：让司机一眼分清「选择题课程」与「阅读反思课程」（R59：司机端找不到选择题的可发现性修复）
+export function courseTypeBadge(row:Record<string,unknown>,view:TaskView|null):{tone:'blue'|'green'|'gray';text:string}{
+  if(isInteractiveCourse(row.course_id))return {tone:'blue',text:'选择题课程 · 逐题作答'};
+  const editable=view?parseEditable(view.course?.content):null;
+  if(editable){const choice=editable.questions.filter(q=>q.type!=='text').length;return {tone:choice?'blue':'gray',text:choice?`自编课程 · ${choice} 道选择题`:'自编课程 · 问答'};}
+  return {tone:'gray',text:'阅读反思课程'};
+}
+export function rowCourseKind(row:Record<string,unknown>):'quiz'|'editable'|'lesson'{
+  if(isInteractiveCourse(row.course_id))return 'quiz';
+  let v;try{v=JSON.parse(String(row.learning_record||'{}'))}catch{}
+  if(v?.kind==='course_quiz')return 'quiz';
+  if(v?.kind==='editable_course_record')return 'editable';
+  return 'lesson';
+}
 export function DriverTrainingCard({row,reload,initialOpen=false}:{row:Record<string,unknown>;reload:()=>void;initialOpen?:boolean}){
  const navigation=useDriverNavigation();const [open,setOpen]=useState(initialOpen),[view,setView]=useState<TaskView|null>(null),[error,setError]=useState<unknown>(null);const id=String(row.task_id);
  useEffect(()=>{let active=true;taskView(id).then(v=>{if(active)setView(v)}).catch(e=>{if(active)setError(e)});return()=>{active=false}},[open,id,row.status]);
- const back=()=>navigation.request(()=>{setOpen(false);reload()});return <article className={"task-card"+(open?" driver-course-screen":"")}><h4>{String(view?.course?.title||'培训课程')}</h4><p className="meta">状态 {trainingStatusNames[String(view?.task.status||row.status)]||String(row.status)} · 截止 {String(row.due_at||'未设置')}{row.mandatory?' · 必修':''}</p><QuizScoreSummary record={row.learning_record}/><button className="btn primary course-open-button" onClick={()=>setOpen(true)}>{open?'已打开课程':'进入课程与学习记录'}</button>{open&&<><button className="btn driver-course-back" aria-label="返回培训任务" onClick={back}>←</button>{error?<DriverReadError error={error} retry={()=>{setError(null);taskView(id).then(setView).catch(setError)}}/>:!view?<EmptyState kind="loading"/>:<>{parseEditable(view.course?.content)?<CustomLearning taskId={id} onBack={back}/>:isInteractiveCourse(row.course_id)?<QuizTask taskId={id} onBack={back}/>:<PersonalLesson id={id} status={String(view.task.status)} onBack={back}/>}<LearningReportPanel taskId={id} onLoaded={reload}/></>}</>}</article>
+ const back=()=>navigation.request(()=>{setOpen(false);reload()});const badge=courseTypeBadge(row,view);return <article className={"task-card"+(open?" driver-course-screen":"")}><h4>{String(view?.course?.title||'培训课程')} <Tag tone={badge.tone}>{badge.text}</Tag></h4><p className="meta">状态 {trainingStatusNames[String(view?.task.status||row.status)]||String(row.status)} · 截止 {String(row.due_at||'未设置')}{row.mandatory?' · 必修':''}</p><QuizScoreSummary record={row.learning_record}/><button className="btn primary course-open-button" onClick={()=>setOpen(true)}>{open?'已打开课程':'进入课程与学习记录'}</button>{open&&<><button className="btn driver-course-back" aria-label="返回培训任务" onClick={back}>←</button>{error?<DriverReadError error={error} retry={()=>{setError(null);taskView(id).then(setView).catch(setError)}}/>:!view?<EmptyState kind="loading"/>:<>{parseEditable(view.course?.content)?<CustomLearning taskId={id} onBack={back}/>:isInteractiveCourse(row.course_id)?<QuizTask taskId={id} onBack={back}/>:<PersonalLesson id={id} status={String(view.task.status)} onBack={back}/>}<LearningReportPanel taskId={id} onLoaded={reload}/></>}</>}</article>;
 }

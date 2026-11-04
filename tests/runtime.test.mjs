@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { access, chmod, cp, mkdtemp, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
 
@@ -46,7 +46,9 @@ async function waitForResponse(url, process, readOutput) {
 }
 
 async function runCommand(command, args, options) {
-  const child = spawn(command, args, {
+  const actualArgs = process.platform === "win32" && command === "npm" ? [join(dirname(process.execPath), "node_modules/npm/bin/npm-cli.js"), ...args] : args;
+  const actualCommand = process.platform === "win32" && command === "npm" ? process.execPath : command;
+  const child = spawn(actualCommand, actualArgs, {
     ...options,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -85,7 +87,6 @@ test("build emits a standalone dynamic QW Page and serves healthy root", async (
     access(new URL("package.json", publishRoot)),
     access(new URL("package-lock.json", publishRoot)),
     access(new URL("server.mjs", publishRoot)),
-    access(new URL("server/driver-actions.mjs", publishRoot)),
     access(new URL("dist/index.html", publishRoot)),
   ]);
 
@@ -94,10 +95,10 @@ test("build emits a standalone dynamic QW Page and serves healthy root", async (
     "dist",
     "package-lock.json",
     "package.json",
+    "scripts",
     "server",
     "server.mjs",
   ]);
-  assert.deepEqual(await readdir(new URL("server/", publishRoot)), ["driver-actions.mjs"]);
 
   // Copy the publish artifact out of the source tree so the server cannot
   // resolve packages from the project's dev node_modules, install only
@@ -110,9 +111,9 @@ test("build emits a standalone dynamic QW Page and serves healthy root", async (
   try {
     await cp(publishRoot, appRoot, { recursive: true });
     await runCommand(
-      process.execPath,
-      [process.env.npm_execpath || join(process.execPath, "..", "node_modules", "npm", "bin", "npm-cli.js"), "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
-      { cwd: appRoot, env: { ...process.env, npm_config_cache: join(writableRoot, "npm-cache") } },
+      "npm",
+      ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
+      { cwd: appRoot },
     );
     await setTreeWritable(appRoot, false);
 

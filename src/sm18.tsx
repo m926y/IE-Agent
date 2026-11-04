@@ -1,7 +1,7 @@
 import {vehicleLabel} from './vehicles';
 // R18 SM01 账号管理：列表筛选 + 编辑抽屉 + 创建/停用/恢复（复用 manage.accounts 门禁；页面永不渲染口令）
 import { useEffect, useState, useRef } from "react";
-import { accountEdit, createUser, getData, setUserStatus } from "./api";
+import { accountEdit, api, ApiError, createUser, getData, setUserStatus } from "./api";
 
 const driverLabel=(id:unknown)=>/^D-车辆\d+$/.test(String(id))?String(id).slice(2):vehicleLabel(String(id).replace(/^D-/,""));
 type Acct = Record<string, string | number | boolean | null>;
@@ -45,6 +45,14 @@ export function AccountAdminPanel({ onChanged,canCreateAdmin=true }: { onChanged
     try { const r = await setUserStatus(String(a.user_id), next); setMsg(r.account_status === "active" ? "账号已启用" : "账号已停用"); await reload(); }
     catch (e) { setErr("状态操作被拒：" + (e instanceof Error ? e.message : "?")); }
   }
+  /* R60：删除账号入口（服务端同源校验：不能删自己、不能删最后一个启用管理员、安全员只能在车队范围内删非管理员） */
+  const DEL_ERR: Record<string, string> = { cannot_delete_self: "不能删除当前登录的账号。", cannot_delete_last_admin: "系统必须保留至少一个启用的安全管理员，此账号不能删除。", cannot_delete_admin: "只有安全管理员可以删除管理员账号。", out_of_fleet_scope: "该账号不在你的车队范围内。", forbidden: "当前角色无权删除账号。" };
+  async function remove(a: Acct) {
+    const label = String(a.username || a.user_id || "");
+    if (!window.confirm(`确认删除账号「${label}」？删除后该账号立即无法登录，车辆绑定收回；历史培训、聊天与审计记录会保留。`)) return;
+    try { await api("/api/admin/users/" + encodeURIComponent(String(a.user_id)), { method: "DELETE" }); setMsg("账号已删除：登录会话与绑定已收回，历史记录保留。"); setEditing(null); await reload(); }
+    catch (e) { const code = e instanceof ApiError ? e.code : ""; setErr(DEL_ERR[code] || ("删除被拒绝：" + (code || (e instanceof Error ? "请刷新后重试" : "请刷新后重试")))); }
+  }
   return <div>
     {credential && <section className="panel credential-card" role="status"><h3>账号已创建</h3><p>请安全交付以下登录信息；首次登录需要更换密码。</p>
       <label className="field">用户名<input value={credential.username} readOnly /></label>
@@ -71,7 +79,7 @@ export function AccountAdminPanel({ onChanged,canCreateAdmin=true }: { onChanged
         <td className="meta">{String(a.updated_at || "").slice(0, 16)}</td>
         <td style={{ whiteSpace: "nowrap" }}>
           <button className="btn" style={{ padding: "2px 8px" }} onClick={() => openEdit(a)}>编辑</button>{" "}
-          {a.account_status === "active" ? <button className="btn" style={{ padding: "2px 8px" }} onClick={() => status(a, "disabled")}>停用</button> : <button className="btn" style={{ padding: "2px 8px" }} onClick={() => status(a, "active")}>恢复</button>}
+          {a.account_status === "active" ? <button className="btn" style={{ padding: "2px 8px" }} onClick={() => status(a, "disabled")}>停用</button> : <button className="btn" style={{ padding: "2px 8px" }} onClick={() => status(a, "active")}>恢复</button>}{" "}<button className="btn task-delete" style={{ padding: "2px 8px" }} onClick={() => void remove(a)}>删除</button>
         </td>
       </tr>)}</tbody></table>
     {editing && <div ref={editRef} className="task-card account-edit-target" style={{ marginTop: 8, outline: "2px solid #1a56c4" }}>

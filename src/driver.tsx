@@ -10,7 +10,7 @@ import {OfflineTrainingAgenda} from './offline-training';
 import {vehicleOptions} from './vehicles';
 import { useEffect, useRef, useState } from "react";
 import { DriverNavigationProvider, useDriverNavigation } from "./driver-navigation";
-import { DriverRiskPanel, DriverTrainingCard } from "./driver-learning";
+import { DriverRiskPanel, DriverTrainingCard, rowCourseKind } from "./driver-learning";
 import { DriverReadError, numberText, finiteValue, driverDimensions } from "./driver-shared";
 import { DriverEvidence } from "./driver-evidence";
 import { DriverActions } from "./driver-actions";
@@ -307,6 +307,7 @@ function MyTraining() {
   return <div className="stack"><h3>培训任务</h3><OfflineTrainingAgenda/><button className="btn" onClick={load}>刷新任务状态</button>
     <p className="meta">查看学习任务、提交反馈，并跟进验收结果。</p>
     {error ? <DriverReadError error={error} retry={load} /> : null}
+    {rows.length > 0 && !rows.some(r => rowCourseKind(r) === 'quiz') && <div className="alert info" role="note"><b>当前没有选择题作答任务。</b>本页任务以阅读反思型课程为主（打开后是材料阅读＋个人反思，不是选择题）。需要选择题练习时，请联系管理员在「培训 → 课程库与审核」安装并审核<b>互动课程</b>（内置选择题题库，如「交规与出车检查」「疲劳识别与休息」）后分发，或创建带选择题的自编课程。</div>}
     {rows.length === 0 && <EmptyState kind="nomatch" hint="本页暂无培训任务。" />}
     {target&&<DriverTrainingCard key={"target:"+String(target.task_id)} row={target} reload={load} initialOpen/>}
     {rows.filter(r=>r.task_id!==target?.task_id).map(r => <DriverTrainingCard key={String(r.task_id)} row={r} reload={load} />)}

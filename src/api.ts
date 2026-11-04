@@ -27,6 +27,9 @@ export type ListResult<T = Record<string, unknown>> = {
   total: number | null;
   limit: number;
   offset: number;
+  /** 云端（托管库）如实标注：本资源的数据源状态与口径说明，缺省时不展示 */
+  hosted_note?: string | null;
+  hosted_unavailable?: boolean;
 };
 
 export type OverviewResult = {
@@ -145,9 +148,19 @@ export const setUserStatus = (id: string, account_status: string) => api<{ ok: t
 export const egressProbe = () => api<{ ok: boolean; status?: number; error?: string; note?: string; ms?: number }>("/api/meta/egress-probe");
 
 export type AiCitation = string;
-export type ChatResult = { artifacts?:import('./agent-tools').AgentArtifact[]; action_plans?:import('./agent-tools').AgentPlan[]; ok: true; answer: string; citations: AiCitation[]; data_limitations: string[]; draft_preview: Record<string, unknown>[] | null; requires_confirmation: boolean; idempotent_replay?: boolean; meta: { prompt_version: string; model: string; engine?: string; skill?: string; skill_title?: string; tool_calls?: number; rounds?: number; duration_ms?: number } };
+export type ChatResult = { artifacts?:import('./agent-tools').AgentArtifact[]; action_plans?:import('./agent-tools').AgentPlan[]; ok: true; answer: string; citations: AiCitation[]; data_limitations: string[]; draft_preview: Record<string, unknown>[] | null; requires_confirmation: boolean; idempotent_replay?: boolean; meta: { prompt_version: string; model: string; engine?: string; skill?: string; skill_title?: string; tool_calls?: number; rounds?: number; duration_ms?: number; answer_audit?: { passed: boolean; issues: string[]; possible_causes?: string[]; solutions?: string[]; llm_checked: boolean } } };
 export type Selftest = { ok: true; prompt_version: string; provider: string; tools: { tool: string; status: string; refs?: number; requires_confirmation?: boolean }[]; writes: string; counts_before: Record<string, number|null>; counts_after: Record<string, number|null>; note: string };
-export const aiChat = (messages: { role: string; content: string }[], page?: string, clientRequestId?: string, caseId?:string) => api<ChatResult>("/api/ai/chat", { method: "POST", body: JSON.stringify({ messages, page,case_id:caseId, ...(clientRequestId ? { client_request_id: clientRequestId } : {}) }) });
+export type AiUpload = { upload_id: string; name: string; kind: string; kind_label: string; chars: number; truncated: boolean; rows: number | null; expires_at: string; hosted_note?: string };
+/* R60：聊天附件按原始字节流 + x-file-name 头上传（服务端解析为文字），不能复用 JSON 版 api() */
+export const aiUpload = async (file: File): Promise<AiUpload> => {
+  const res = await fetch("/api/ai/upload", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/octet-stream", "x-file-name": encodeURIComponent(file.name) }, body: file });
+  const text = await res.text();
+  let json: unknown = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* 非 JSON 错误体按 http 码处理 */ }
+  if (!res.ok) throw new ApiError(res.status, (json as { error?: string } | null)?.error || `http_${res.status}`);
+  return json as AiUpload;
+};
+export const aiChat = (messages: { role: string; content: string }[], page?: string, clientRequestId?: string, caseId?:string, attachments?:string[]) => api<ChatResult>("/api/ai/chat", { method: "POST", body: JSON.stringify({ messages, page,case_id:caseId, ...(attachments&&attachments.length?{attachments}:{}), ...(clientRequestId ? { client_request_id: clientRequestId } : {}) }) });
 export const aiSelftest = () => api<Selftest>("/api/ai/selftest");
 
 export type EvidenceCard = { ref: string; table: string; field: string; value: string | number | null; window: string | null; as_of_date: string | null; source_version: string | null; confidence: string | null; limitations: string | null; verification_id?: string | null };

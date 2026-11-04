@@ -5,7 +5,7 @@ import {CourseGroups} from './course-groups';
 import {api} from './api';
 import {systemCell,systemLabel} from './system-values';
 import './system-ui.css';
-import {TrainingSurface,TrainingTable,trainingStatus,useTrainingNames} from './training-ui';
+import {TrainingSurface,TrainingTable,trainingStatus,useTrainingNames,useTaskDeletionPermission,deleteTrainingTasks} from './training-ui';
 import {RiskQueueChart} from './risk-queue-chart';
 import {eventName} from './event-names';
 import {AdminDriverReports} from './admin-driver-reports';
@@ -21,10 +21,12 @@ import { FleetScoreTrend } from "./overview-controls";
 import { VehicleScoreTrend } from './score-trend';
 import {MessageButton} from './messaging';
 import { TrainingLibraryPanel, QuizScoreSummary, AdminQuizReview, isInteractiveCourse } from "./training";
-import {RiskAlertBar,RiskMonitorPage} from './risk-monitor';
+import {RiskAlertBar} from './risk-monitor';
+import {HistoryReplayPage} from './risk-replay'; // R54：云端历史回放 RM02
+import { AiPreplanPage } from './sm26'; // R26 AI04 管理动作并排预演（此前误渲染实时回放引擎页）
 import { AgentAccountImportPanel } from './agent-tools';
 import { WeightEditor } from "./weights";
-import { DataCenter, FullReplay } from "./data";
+import { DataCenter } from "./data";
 import { AccountProfile, Avatar } from "./account";
 import { vehicleLabel, vehicleId, vehicleOptions, displayText } from "./vehicles";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -149,7 +151,7 @@ const NAV: { group: string; items: { key: string; label: string; code?: string }
   ]},
   { group: "风险监控", items: [
     { key: "rm-queue", label: "风险工作台", code: "RM01" },
-    { key: "rm-live", label: "风险回放", code: "RM-LIVE" },
+    { key: "rm-replay", label: "历史回放", code: "RM02" },
     { key: "rm-alerts", label: "告警与事件档案", code: "RM03/RM05" },
   ]},
   { group: "培训改善", items: [
@@ -199,8 +201,8 @@ function EvReview() {
   }
   return <div>
     <PageHead code="EV05" title="评价复核与数据异议" desc="算法输出纠错与业务解释分开：核查=查看原快照与台账（只读）；答复=说明证据链；源数据确有问题仅可转数据负责人（awaiting_data_owner），等待正式版本化重建——本页面与接口无评分写路径。" />
-    <ResourceTable key={`rr${tick}`} resource="admin.review_requests" onRowClick={(r) => setSel(String(r.request_id))} labels={{ request_id: "request_id", driver_id: "司机", score_id: "评分对象", evidence_id: "证据", reason_code: "原因", status: "状态", review_note: "最新答复", reviewer_id: "处理人", created_at: "提交时间", updated_at: "更新" }} />
-    {v && v !== "error" && <div className="panel"><h3>复核详情 {String(v.request.request_id)} · <Tag tone="blue">{String(v.request.status)}</Tag></h3>
+    <ResourceTable key={`rr${tick}`} resource="admin.review_requests" onRowClick={(r) => setSel(String(r.request_id))} labels={{ request_id: "受理编号", driver_id: "司机", score_id: "评分对象", evidence_id: "证据", reason_code: "原因", status: "状态", review_note: "最新答复", reviewer_id: "处理人", created_at: "提交时间", updated_at: "更新" }} />
+    {v && v !== "error" && <div className="panel"><h3>复核详情 · <Tag tone="blue">{String(v.request.status)}</Tag></h3>
       <div className="grid2">
         <div><h4 style={{ fontSize: 12.5 }}>司机原文（{RR_LABEL[String(v.request.reason_code)] || String(v.request.reason_code)}）</h4>
           <p style={{ whiteSpace: "pre-wrap", background: "var(--bg)", borderRadius: 8, padding: 8, fontSize: 13 }}>{String(v.request.description)}</p>
@@ -489,8 +491,6 @@ function QueueConfirm({group,rows}:{group:string;rows:ScoreRow[]}){
  return <section className="panel risk-queue-action"><h3>{dual?'建立风险核查记录':quality?'安排设备与数据检查':'下一步处理'}</h3><p className="meta">{description}</p>{(dual||quality)&&<div className="row"><select aria-label="选择核查车辆" value={gps} disabled={busy} onChange={e=>{setGps(e.target.value);setMsg('');setAlertId('')}}><option value="">请选择车辆</option>{rows.map(r=><option key={String(r.queue_id)} value={String(r.gpsno)}>{vehicleLabel(r.gpsno)}</option>)}</select><button className="btn primary" disabled={busy||!selected} onClick={()=>void go()}>{busy?'正在建立…':dual?'建立核查记录':'建立检查任务'}</button></div>}{!dual&&!quality&&<a className="btn" href="#/ev-actions">查看车辆处置与培训</a>}{msg&&<p role="status" className="alert info">{msg}{alertId&&<a className="btn" href={'#/rm-alerts?alert_id='+encodeURIComponent(alertId)}>去处理</a>}</p>}</section>;
 }
 
-function RmReplay() { return <FullReplay />; }
-
 function RmAlerts({ initialAlertId }: { initialAlertId?: string | null }) {
   const [vehicleQuery,setVehicleQuery]=useState(''),[vehicleFilter,setVehicleFilter]=useState(''),[vehicleError,setVehicleError]=useState('');
   const archiveDetailRef=useRef<HTMLElement>(null),archiveListRef=useRef<HTMLDivElement>(null);
@@ -653,10 +653,21 @@ function ReviewBench({initialTaskId=null,onReviewed}:{initialTaskId?:string|null
   </div>;
 }
 
+/* 台账筛选（服务端仍会逐条复校验权限与版本，这里只决定界面可见范围） */
+function visibleTasks(rows:Record<string,unknown>[]|null, kw:string, status:string, course:string, names:{driver:(v:unknown)=>string;course:(v:unknown)=>string}) {
+  const k = kw.trim().toLowerCase();
+  return (rows || []).filter((r) => (!status || String(r.status) === status) && (!course || String(r.course_id) === course) && (!k || [names.driver(r.driver_id), names.course(r.course_id), String(r.task_id), String(r.goal || "")].join(" ").toLowerCase().includes(k)));
+}
+
 function TrLedger()  {
   const trainingNames=useTrainingNames();
+  const {canDelete,canDeleteTask}=useTaskDeletionPermission();
   const tid = new URLSearchParams(location.hash.split('?')[1]).get('task_id')||new URLSearchParams(location.hash.split('?')[1]).get('task')||'';
   const [tick, setTick] = useState(0);
+  const [pick, setPick] = useState<string[]>([]);
+  const [delBusy, setDelBusy] = useState(false);
+  const [delMsg, setDelMsg] = useState<string | null>(null);
+  const [lKw, setLKw] = useState(""); const [lStatus, setStatus] = useState(""); const [lCourse, setLCourse] = useState("");
   const [rows, setRows] = useState<Record<string, unknown>[] | null>(null);
   const [sel, setSel] = useState<string | null>(tid||null);
   useEffect(() => { getData<Record<string, unknown>>("admin.trainings", { limit: 200 }).then((r) => setRows(r.rows)).catch(() => setRows([])); }, [tick]);
@@ -668,6 +679,25 @@ function TrLedger()  {
     <div className="cards">
       {["assigned", "in_progress", "submitted", "reviewed", "returned", "overdue"].map((k) => <div key={k} className={`card ${k === "overdue" ? "risk" : ""}`}><div className="k">{({ assigned: "已分配", in_progress: "进行中", submitted: "待复核", reviewed: "已复核", returned: "退回补充", overdue: "已逾期" } as Record<string, string>)[k]}</div><div className={`v ${!(counts[k] || 0) ? "zero" : ""}`}>{counts[k] || 0}</div></div>)}
     </div>
+    {canDelete && rows && rows.length > 0 && <details className="panel" open={false}><summary>勾选删除任务（管理员可删管理范围内全部；安全员仅限本人创建的任务）</summary>
+      <div className="row" style={{gap:8,flexWrap:"wrap"}}>
+        <button className="btn" disabled={delBusy} onClick={()=>{const vis=visibleTasks(rows,lKw,lStatus,lCourse,trainingNames).filter((r)=>canDeleteTask(r)).map((r)=>String(r.task_id));setPick(vis);setDelMsg(vis.length?`已选中筛选结果里你有权删除的 ${vis.length} 条`:'当前筛选结果里没有你有权删除的任务（安全员只能删本人创建的）');}}>{`选择可删除项`}</button>
+        <button className="btn" disabled={delBusy} onClick={()=>{const ids=visibleTasks(rows,lKw,lStatus,lCourse,trainingNames).map((r)=>String(r.task_id));setPick(ids);setDelMsg(ids.length?`已选 ${ids.length} 条——其中无权限的条目会被服务端整批拒绝`:'当前筛选结果为空');}}>选择筛选结果全部</button>
+        <button className="btn" disabled={delBusy||!pick.length} onClick={()=>setPick([])}>清空选择</button>
+        <span className="meta">已选 {pick.length} 条 · 共读取 {rows.length} 条（按最近更新排序，删除只对已勾选记录生效）</span>
+      </div>
+      <div className="row ledger-pick-filters" style={{gap:6,flexWrap:"wrap",margin:"4px 0 8px"}}>
+        <input className="btn" aria-label="按司机、车辆或课程检索任务" placeholder="检索司机、课程或任务" value={lKw} onChange={(e)=>{setLKw(e.target.value);setPick([])}}/>
+        <select className="btn" aria-label="按任务状态筛选" value={lStatus} onChange={(e)=>{setStatus(e.target.value);setPick([])}}><option value="">全部状态</option>{["assigned","in_progress","submitted","reviewed","returned","deleted"].map((k)=><option key={k} value={k}>{trainingStatus(k)}</option>)}</select>
+        <select className="btn" aria-label="按课程筛选" value={lCourse} onChange={(e)=>{setLCourse(e.target.value);setPick([])}}><option value="">全部课程</option>{[...new Set((rows||[]).map(r=>String(r.course_id)))].map((c)=><option key={c} value={c}>{trainingNames.course(c)}</option>)}</select>
+      </div>
+      <div className="ledger-pick-list">{(rows||[]).filter((r)=>(!lStatus||String(r.status)===lStatus)&&(!lCourse||String(r.course_id)===lCourse)&&(!lKw.trim()||[trainingNames.driver(r.driver_id),trainingNames.course(r.course_id),String(r.task_id),String(r.goal||"")].join(" ").toLowerCase().includes(lKw.trim().toLowerCase()))).map((r)=>{const id=String(r.task_id);const allowed=canDeleteTask(r);return <label key={id} className={(allowed?"":"disabled")+(pick.includes(id)?" picked":"")}><input type="checkbox" disabled={!allowed||delBusy} checked={pick.includes(id)} onChange={(e)=>setPick(v=>e.target.checked?[...new Set([...v,id])]:v.filter(x=>x!==id))}/><b>{trainingNames.course(r.course_id)}</b><span>{trainingNames.driver(r.driver_id)} · {trainingStatus(r.status)} · 截止 {String(r.due_at||"—").slice(0,10)}</span>{!allowed&&<em>非本人创建</em>}</label>})}</div>
+      <div className="row" style={{gap:8,marginTop:6}}>
+        <button className="btn primary" disabled={delBusy||!pick.length} onClick={async()=>{if(!pick.length)return;if(!window.confirm(`确认删除选中的 ${pick.length} 条培训任务？司机端将不再显示这些任务，历史学习记录与审计保留。`))return;setDelBusy(true);setDelMsg('');try{const map=new Map((rows||[]).map(r=>[String(r.task_id),r]));const tasks=pick.map(id=>({task_id:id,expected_updated_at:(map.get(id)?.updated_at as string)??null}));const r=await deleteTrainingTasks(tasks);setDelMsg(r.ok?`已删除 ${r.deleted.length} 条任务；历史学习记录与审计保留。`:`已删除 ${r.deleted.length} 条，${r.failed.length} 条未删除（${r.failed.map(f=>f.error).join('、')}）`);setPick([]);setTick(v=>v+1);}catch(e){setDelMsg('删除被拒绝：'+(e instanceof ApiError?e.code:'请刷新后重试'))}finally{setDelBusy(false)}}}>{delBusy?'正在删除…':`删除所选 ${pick.length||''} 条`}</button>
+        <span className="meta">删除按任务当前版本校验：他在你勾选之后又学习或改动的任务会被拒绝，不会静默覆盖。</span>
+      </div>
+      {delMsg && <div className="alert info" role="status">{delMsg}</div>}
+    </details>}
     {(!rows || rows.length === 0) ? <>
       <EmptyState kind="nomatch" hint="暂无培训任务，请先审核课程，再创建培训。" />
     </> : <>
@@ -819,8 +849,8 @@ export function AdminShell({ user, aiOpen, onAiToggle }: { user: MeUser; aiOpen:
       case "ev-review": return <EvReview />;
       case "ev-root": return <RootCausesPage />;
       case "rm-queue": return <RmQueue />;
-      case "rm-live": return <RiskMonitorPage />;
-      case "rm-replay": return <RiskMonitorPage />;
+      case "rm-live": return <HistoryReplayPage />; // R59：实时回放引擎 UI 已按产品决定移除；旧深链与聊天案卷引用统一落到历史回放
+      case "rm-replay": return <HistoryReplayPage />; // R54：找回合并前的云端 RM02 历史回放（只读投影）
       case "rm-alerts": { const m = location.hash.match(/[?&]alert_id=([^&#]+)/); return <RmAlerts initialAlertId={m ? decodeURIComponent(m[1]) : null} />; }
       case "tr-ledger": return <TrLedger />;
       case "tr-courses": return <TrCourses />;
@@ -830,7 +860,7 @@ export function AdminShell({ user, aiOpen, onAiToggle }: { user: MeUser; aiOpen:
       case "sm-driver-accounts": return <SmBindings/>;
       case "sm-bindings": return <SmBindings />;
       case "sm-config": return <SmConfig admin={user.role==="safety_admin"}/>;
-      case "ai-preplan": return <RiskMonitorPage />;
+      case "ai-preplan": return <AiPreplanPage />;
       case "sm-audit": return <SmAudit />;
       case "sm-drafts": return <SmConfig admin={user.role==="safety_admin"}/>;
       case "sm-knowledge": return <SmKnowledge />;
@@ -859,7 +889,7 @@ export function AdminShell({ user, aiOpen, onAiToggle }: { user: MeUser; aiOpen:
       <RiskAlertBar />
       {navigation.filter(g => g.items.length > 1 && g.items.some(it => it.key === route)).map(g => <nav className="module-tabs" aria-label={g.group} key={g.group}>{g.items.filter(it => it.key !== "ev-driver" && (["safety_admin","safety_officer"].includes(user.role)||it.key!=="sm-drafts")).map(it => <a key={it.key} href={`#/${it.key}`} aria-current={route === it.key ? "page" : undefined} className={route === it.key ? "active" : ""}>{it.label.replace("/数据异议", "")}</a>)}</nav>)}
       {['rm-alerts','ev-review'].includes(route)&&new URLSearchParams(routeKey.split('?')[1]||'').get('return_vehicle')&&<a className="btn vehicle-back" href={'#/ev-fleet?gpsno='+encodeURIComponent(new URLSearchParams(routeKey.split('?')[1]||'').get('return_vehicle')!)+'&tab=3'}>← 返回上一级</a>}
-      {['ev-fleet','rm-live'].includes(route)&&new URLSearchParams(routeKey.split('?')[1]||'').get('return_evaluation')&&<a className="btn vehicle-back" href={'#/ev-actions?driver_id='+encodeURIComponent(new URLSearchParams(routeKey.split('?')[1]||'').get('return_evaluation')!)}>← 返回上一级</a>}
+      {['ev-fleet','rm-replay'].includes(route)&&new URLSearchParams(routeKey.split('?')[1]||'').get('return_evaluation')&&<a className="btn vehicle-back" href={'#/ev-actions?driver_id='+encodeURIComponent(new URLSearchParams(routeKey.split('?')[1]||'').get('return_evaluation')!)}>← 返回上一级</a>}
       {route.startsWith("tr-")?<TrainingSurface>{view}</TrainingSurface>:route.startsWith("sm-")?<div className="system-surface">{view}</div>:view}
     </main>
   </div>;
